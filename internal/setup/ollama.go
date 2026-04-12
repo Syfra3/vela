@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -53,9 +54,10 @@ func installOllamaMac() error {
 	// Try Homebrew first
 	if _, err := exec.LookPath("brew"); err == nil {
 		fmt.Println("Installing Ollama via Homebrew...")
+		fmt.Println("This may take a few minutes...")
 		cmd := exec.Command("brew", "install", "ollama")
-		cmd.Stdout = nil
-		cmd.Stderr = nil
+		cmd.Stdout = os.Stdout // Show output
+		cmd.Stderr = os.Stderr // Show errors
 		if err := cmd.Run(); err != nil {
 			return fmt.Errorf("brew install ollama failed: %w", err)
 		}
@@ -64,9 +66,12 @@ func installOllamaMac() error {
 
 	// Fallback: curl install script
 	fmt.Println("Homebrew not found. Installing Ollama via curl...")
+	fmt.Println("You may be prompted for your password (sudo)...")
+	fmt.Println("This may take a few minutes...")
 	cmd := exec.Command("bash", "-c", "curl -fsSL https://ollama.com/install.sh | sh")
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+	cmd.Stdout = os.Stdout // Show output
+	cmd.Stderr = os.Stderr // Show errors
+	cmd.Stdin = os.Stdin   // Allow password input
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("curl install failed: %w", err)
 	}
@@ -75,9 +80,12 @@ func installOllamaMac() error {
 
 func installOllamaLinux() error {
 	fmt.Println("Installing Ollama via curl...")
+	fmt.Println("You may be prompted for your password (sudo)...")
+	fmt.Println("This may take a few minutes...")
 	cmd := exec.Command("bash", "-c", "curl -fsSL https://ollama.com/install.sh | sh")
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+	cmd.Stdout = os.Stdout // Show output
+	cmd.Stderr = os.Stderr // Show errors
+	cmd.Stdin = os.Stdin   // Allow password input
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("curl install failed: %w", err)
 	}
@@ -165,10 +173,11 @@ func GetOllamaModels() ([]string, error) {
 
 // PullModel downloads an Ollama model.
 func PullModel(model string) error {
-	fmt.Printf("Pulling model: %s\n", model)
+	fmt.Printf("Pulling model: %s (~4GB download)\n", model)
+	fmt.Println("This may take 5-15 minutes depending on your connection...")
 	cmd := exec.Command("ollama", "pull", model)
-	cmd.Stdout = nil
-	cmd.Stderr = nil
+	cmd.Stdout = os.Stdout // Show progress bar from Ollama
+	cmd.Stderr = os.Stderr // Show errors
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to pull model %s: %w", model, err)
 	}

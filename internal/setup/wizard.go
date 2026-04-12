@@ -59,6 +59,7 @@ type WizardModel struct {
 
 	// Detailed requirement checks
 	checkResults []RequirementCheck
+	hardware     *HardwareInfo
 
 	// Provider choice
 	providerChoice int // 0=local, 1=remote
@@ -90,14 +91,16 @@ type WizardModel struct {
 
 func NewWizard() WizardModel {
 	return WizardModel{
-		step:           StepWelcome,
+		step:           StepSystemCheck, // Start at system check, not welcome
 		providerChoice: 0,
 		selectedModel:  "llama3",
+		working:        true, // Show "checking..." immediately
 	}
 }
 
 func (m WizardModel) Init() tea.Cmd {
-	return nil
+	// Auto-start system check on init
+	return m.checkSystem()
 }
 
 func (m WizardModel) Quitting() bool {
@@ -106,11 +109,12 @@ func (m WizardModel) Quitting() bool {
 
 // Messages
 type systemCheckMsg struct {
-	ok     bool
-	os     string
-	arch   string
-	issues []string
-	checks []RequirementCheck
+	ok       bool
+	os       string
+	arch     string
+	issues   []string
+	checks   []RequirementCheck
+	hardware *HardwareInfo
 }
 
 type ollamaCheckMsg struct {
@@ -156,9 +160,12 @@ func (m WizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sysArch = msg.arch
 		m.sysIssues = msg.issues
 		m.checkResults = msg.checks
+		m.hardware = msg.hardware
 		m.working = false
 
 		if msg.ok {
+			// Auto-advance after showing hardware for 2 seconds
+			time.Sleep(1 * time.Second)
 			m.step = StepProviderChoice
 		} else {
 			m.step = StepError
@@ -425,8 +432,33 @@ func (m WizardModel) viewSystemCheck() string {
 	b.WriteString(textStyle.Render("System Requirements Check"))
 	b.WriteString("\n\n")
 
+	// Show hardware info prominently
+	if m.hardware != nil {
+		hardwareBox := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("252")).
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("39")).
+			Padding(0, 1).
+			Width(60)
+
+		hardwareText := fmt.Sprintf("Detected Hardware:\n\n"+
+			"OS/Arch:  %s/%s\n"+
+			"CPU:      %s (%d cores)\n"+
+			"RAM:      %dGB total, %dGB free\n"+
+			"Disk:     %dGB available\n\n"+
+			"Recommendation: %s",
+			m.hardware.OS, m.hardware.Arch,
+			m.hardware.CPUModel, m.hardware.CPUCores,
+			m.hardware.TotalRAMGB, m.hardware.FreeRAMGB,
+			m.hardware.DiskFreeGB,
+			m.hardware.RecommendedModel())
+
+		b.WriteString(hardwareBox.Render(hardwareText))
+		b.WriteString("\n\n")
+	}
+
 	if len(m.checkResults) == 0 && m.working {
-		b.WriteString(dimStyle.Render("Initializing checks..."))
+		b.WriteString(dimStyle.Render("Analyzing system..."))
 		b.WriteString("\n")
 	}
 
@@ -692,6 +724,9 @@ func (m WizardModel) checkSystem() tea.Cmd {
 		issues := []string{}
 		checks := []RequirementCheck{}
 
+		// Detect hardware
+		hardware, _ := DetectHardware()
+
 		// Check 1: Operating System
 		osCheck := RequirementCheck{
 			Name:        "Operating System",
@@ -820,11 +855,12 @@ func (m WizardModel) checkSystem() tea.Cmd {
 		checks = append(checks, ollamaCheck)
 
 		return systemCheckMsg{
-			ok:     len(issues) == 0,
-			os:     osName,
-			arch:   arch,
-			issues: issues,
-			checks: checks,
+			ok:       len(issues) == 0,
+			os:       osName,
+			arch:     arch,
+			issues:   issues,
+			checks:   checks,
+			hardware: hardware,
 		}
 	}
 }
