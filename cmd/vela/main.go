@@ -1,15 +1,20 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/Syfra3/vela/internal/cache"
+	"github.com/Syfra3/vela/internal/config"
 	"github.com/Syfra3/vela/internal/detect"
 	"github.com/Syfra3/vela/internal/export"
 	"github.com/Syfra3/vela/internal/extract"
 	igraph "github.com/Syfra3/vela/internal/graph"
+	"github.com/Syfra3/vela/internal/llm"
 	"github.com/Syfra3/vela/internal/security"
 	"github.com/Syfra3/vela/internal/tui"
 	"github.com/Syfra3/vela/pkg/types"
@@ -31,12 +36,20 @@ codebases and technical documentation.`,
 	}
 
 	root.AddCommand(extractCmd())
+	root.AddCommand(configCmd())
+	root.AddCommand(doctorCmd())
 	return root
 }
+
+// ---------------------------------------------------------------------------
+// vela extract
+// ---------------------------------------------------------------------------
 
 func extractCmd() *cobra.Command {
 	var outDir string
 	var noTUI bool
+	var providerFlag string
+	var modelFlag string
 
 	cmd := &cobra.Command{
 		Use:   "extract <path>",
@@ -50,8 +63,39 @@ func extractCmd() *cobra.Command {
 				return fmt.Errorf("invalid path: %w", err)
 			}
 
+			// Load config
+			cfg, err := config.Load()
+			if err != nil {
+				return fmt.Errorf("loading config: %w", err)
+			}
+			// CLI flags override config
+			if providerFlag != "" {
+				cfg.LLM.Provider = providerFlag
+			}
+			if modelFlag != "" {
+				cfg.LLM.Model = modelFlag
+			}
+
+			// Build LLM provider (nil = no LLM, code-only mode)
+			var provider types.LLMProvider
+			if cfg.LLM.Provider != "" && cfg.LLM.Provider != "none" {
+				llmClient, err := llm.NewClient(&cfg.LLM)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "warning: LLM provider unavailable (%v) — doc extraction disabled\n", err)
+				} else {
+					provider = llmClient
+				}
+			}
+
+			// Load cache
+			fileCache, err := cache.Load(cfg.Extraction.CacheDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: cache unavailable (%v)\n", err)
+				fileCache = nil
+			}
+
 			// Discover files
-			exts := []string{".go", ".md", ".txt"}
+			exts := []string{".go", ".py", ".ts", ".tsx", ".js", ".jsx", ".md", ".txt", ".pdf"}
 			files, err := detect.Collect(root, exts)
 			if err != nil {
 				return fmt.Errorf("detecting files: %w", err)
@@ -65,11 +109,14 @@ func extractCmd() *cobra.Command {
 			// Set up progress channel
 			progressCh := make(chan types.ProgressUpdate, 16)
 
-			// Run TUI or plain logger in background
 			if noTUI || !isTTY() {
 				go tui.RunPlainProgress(progressCh)
 			} else {
-				prog := tui.NewProgram(progressCh, "none")
+				providerName := "none"
+				if provider != nil {
+					providerName = provider.Name()
+				}
+				prog := tui.NewProgram(progressCh, providerName)
 				if prog != nil {
 					go func() { _, _ = prog.Run() }()
 				} else {
@@ -77,13 +124,12 @@ func extractCmd() *cobra.Command {
 				}
 			}
 
-			// Bootstrap progress
 			progress := types.ExtractionProgress{
 				TotalFiles:  len(files),
-				TotalChunks: len(files), // 1 chunk per file in Phase 0
+				TotalChunks: len(files),
+				StartTime:   time.Now(),
 			}
 
-			// Extract nodes and edges
 			var allNodes []types.Node
 			var allEdges []types.Edge
 
@@ -93,16 +139,38 @@ func extractCmd() *cobra.Command {
 				progress.CurrentChunk = i + 1
 				progressCh <- types.ProgressUpdate{Progress: progress}
 
-				nodes, edges, err := extractFile(root, f, rel)
+				// Cache check
+				if fileCache != nil {
+					sha, shaErr := cache.SHA256File(f)
+					if shaErr == nil && fileCache.IsCached(f, sha) {
+						progress.ProcessedFiles++
+						progress.ProcessedChunks = i + 1
+						continue
+					}
+				}
+
+				nodes, edges, err := extract.ExtractAll(root, []string{f}, provider, cfg.LLM.MaxChunkTokens)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", rel, err)
 					continue
 				}
+
+				// Mark in cache on success
+				if fileCache != nil {
+					if sha, shaErr := cache.SHA256File(f); shaErr == nil {
+						fileCache.Mark(f, sha)
+					}
+				}
+
 				allNodes = append(allNodes, nodes...)
 				allEdges = append(allEdges, edges...)
-
 				progress.ProcessedFiles++
 				progress.ProcessedChunks = i + 1
+			}
+
+			// Save cache
+			if fileCache != nil {
+				_ = fileCache.Save()
 			}
 
 			// Signal completion
@@ -116,7 +184,7 @@ func extractCmd() *cobra.Command {
 				return fmt.Errorf("building graph: %w", err)
 			}
 
-			// Export to JSON
+			// Export JSON
 			tg := g.ToTypes()
 			if err := export.WriteJSON(tg, outDir); err != nil {
 				return fmt.Errorf("writing graph.json: %w", err)
@@ -130,14 +198,76 @@ func extractCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&outDir, "out", "vela-out", "Output directory")
 	cmd.Flags().BoolVar(&noTUI, "no-tui", false, "Disable TUI, use plain log output")
+	cmd.Flags().StringVar(&providerFlag, "provider", "", "LLM provider override (local|anthropic|openai|none)")
+	cmd.Flags().StringVar(&modelFlag, "model", "", "LLM model override")
 	return cmd
 }
 
-// extractFile routes a single file to the correct extractor.
-func extractFile(root, path, rel string) ([]types.Node, []types.Edge, error) {
-	nodes, edges, err := extract.ExtractAll(root, []string{path}, nil)
-	return nodes, edges, err
+// ---------------------------------------------------------------------------
+// vela config
+// ---------------------------------------------------------------------------
+
+func configCmd() *cobra.Command {
+	cfg := &cobra.Command{
+		Use:   "config",
+		Short: "Manage Vela configuration",
+	}
+
+	var force bool
+	init_ := &cobra.Command{
+		Use:   "init",
+		Short: "Create default ~/.vela/config.yaml",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, err := config.WriteDefault(force)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Config written to %s\n", path)
+			return nil
+		},
+	}
+	init_.Flags().BoolVar(&force, "force", false, "Overwrite existing config")
+	cfg.AddCommand(init_)
+	return cfg
 }
+
+// ---------------------------------------------------------------------------
+// vela doctor
+// ---------------------------------------------------------------------------
+
+func doctorCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "doctor",
+		Short: "Check LLM provider health",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+
+			client, err := llm.NewClient(&cfg.LLM)
+			if err != nil {
+				fmt.Printf("  [FAIL] %s provider: %v\n", cfg.LLM.Provider, err)
+				os.Exit(1)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			if err := client.Health(ctx); err != nil {
+				fmt.Printf("  [UNREACHABLE] %s: %v\n", client.Provider(), err)
+				os.Exit(1)
+			}
+
+			fmt.Printf("  [OK] %s\n", client.Provider())
+			return nil
+		},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
 
 // isTTY returns true if stdout is connected to a terminal.
 func isTTY() bool {
