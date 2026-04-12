@@ -75,11 +75,12 @@ func (m ExtractModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m ExtractModel) View() string {
-	var b strings.Builder
+	// Content only — menu will wrap with header/footer
+	return m.ViewContent()
+}
 
-	headerStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("39")).
-		Bold(true)
+func (m ExtractModel) ViewContent() string {
+	var b strings.Builder
 
 	textStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("252"))
@@ -91,12 +92,6 @@ func (m ExtractModel) View() string {
 		Foreground(lipgloss.Color("42")).
 		Bold(true)
 
-	boxStyle := lipgloss.NewStyle().
-		Padding(1, 2).
-		Width(80)
-
-	b.WriteString(headerStyle.Render("Extract — Knowledge Graph"))
-	b.WriteString("\n\n")
 	b.WriteString(textStyle.Render("Enter the directory path to extract:"))
 	b.WriteString("\n\n")
 	b.WriteString(inputStyle.Render("> " + m.directoryInput))
@@ -107,7 +102,5 @@ func (m ExtractModel) View() string {
 		b.WriteString("\n\n")
 	}
 
-	b.WriteString(textStyle.Render("Enter start extraction • esc cancel"))
-
-	return boxStyle.Render(b.String())
+	return b.String()
 }

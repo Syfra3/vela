@@ -7,62 +7,79 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
-// WizardState represents the current screen in the setup wizard.
-type WizardState int
+// Step-by-step linear wizard flow:
+// 1. Check system requirements
+// 2. Choose local vs remote LLM
+// 3. Configure local (install Ollama + model) OR configure remote (API keys)
+// 4. Configure MCP
+// 5. Validate installation
+// 6. Finish
+
+type WizardStep int
 
 const (
-	StateWelcome WizardState = iota
-	StateOllamaCheck
-	StateInstallOllama
-	StateStartOllama
-	StateModelChoice
-	StatePullingModel
-	StateAPIKeyChoice
-	StateClientChoice
-	StateInstallingMCP
-	StateSuccess
-	StateError
+	StepWelcome WizardStep = iota
+	StepSystemCheck
+	StepProviderChoice
+	StepLocalSetup  // Install Ollama + start + pull model
+	StepRemoteSetup // Configure API keys
+	StepMCPConfig
+	StepValidation
+	StepComplete
+	StepError
 )
 
 type WizardModel struct {
-	state    WizardState
+	step     WizardStep
 	err      error
 	quitting bool
-	message  string
+	message  []string // Progress messages
 
-	// Ollama state
+	// System check results
+	sysOS     string
+	sysArch   string
+	sysOK     bool
+	sysIssues []string
+
+	// Provider choice
+	providerChoice int // 0=local, 1=remote
+
+	// Local setup state
 	ollamaInstalled bool
 	ollamaRunning   bool
 	ollamaPath      string
-	ollamaModels    []string
+	modelPulled     bool
 	selectedModel   string
-	modelIndex      int
 
-	// API keys state
-	useRemoteLLM  bool
-	providerIndex int // 0=local, 1=anthropic, 2=openai
-	anthropicKey  string
-	openaiKey     string
-	keyInputMode  string // "anthropic", "openai", ""
-	keyInput      string
+	// Remote setup state
+	remoteProvider int // 0=anthropic, 1=openai
+	apiKey         string
+	keyInput       string
 
-	// MCP state
-	clientIndex int // 0=OpenCode, 1=Claude Desktop, 2=Skip
+	// MCP config
+	mcpTarget     int // 0=OpenCode, 1=Claude Desktop, 2=Skip
+	mcpConfigured bool
 
-	// Progress tracking
-	installing bool
+	// Validation results
+	llmHealthy bool
+	mcpHealthy bool
+
+	// UI state
+	cursor  int
+	working bool
 }
 
 func NewWizard() WizardModel {
 	return WizardModel{
-		state:         StateWelcome,
-		clientIndex:   0,
-		providerIndex: 0,
+		step:           StepWelcome,
+		providerChoice: 0,
+		selectedModel:  "llama3",
 	}
 }
 
@@ -71,15 +88,21 @@ func (m WizardModel) Init() tea.Cmd {
 }
 
 func (m WizardModel) Quitting() bool {
-	return m.quitting || m.state == StateSuccess || m.state == StateError
+	return m.quitting || m.step == StepComplete || m.step == StepError
 }
 
 // Messages
+type systemCheckMsg struct {
+	ok     bool
+	os     string
+	arch   string
+	issues []string
+}
+
 type ollamaCheckMsg struct {
 	installed bool
 	running   bool
 	path      string
-	err       error
 }
 
 type ollamaInstallMsg struct {
@@ -92,11 +115,6 @@ type ollamaStartMsg struct {
 	err     error
 }
 
-type modelListMsg struct {
-	models []string
-	err    error
-}
-
 type modelPullMsg struct {
 	success bool
 	err     error
@@ -107,73 +125,116 @@ type mcpInstallMsg struct {
 	err     error
 }
 
+type validationMsg struct {
+	llmOK bool
+	mcpOK bool
+	err   error
+}
+
 func (m WizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		return m.handleKeyPress(msg)
+		return m.handleKey(msg)
+
+	case systemCheckMsg:
+		m.sysOK = msg.ok
+		m.sysOS = msg.os
+		m.sysArch = msg.arch
+		m.sysIssues = msg.issues
+		m.working = false
+
+		if msg.ok {
+			m.step = StepProviderChoice
+		} else {
+			m.step = StepError
+			m.err = fmt.Errorf("system requirements not met: %v", msg.issues)
+		}
 
 	case ollamaCheckMsg:
 		m.ollamaInstalled = msg.installed
 		m.ollamaRunning = msg.running
 		m.ollamaPath = msg.path
-		m.err = msg.err
+		m.working = false
 
+		// Continue to next local setup phase
 		if !m.ollamaInstalled {
-			m.state = StateInstallOllama
+			return m, m.installOllama()
 		} else if !m.ollamaRunning {
-			m.state = StateStartOllama
+			return m, m.startOllama()
 		} else {
-			m.state = StateModelChoice
-			return m, m.checkModels()
+			return m, m.pullModel()
 		}
 
 	case ollamaInstallMsg:
+		m.working = false
 		if msg.success {
-			m.state = StateStartOllama
+			m.ollamaInstalled = true
+			m.addMessage("✓ Ollama installed")
 			return m, m.startOllama()
 		} else {
-			m.state = StateError
+			m.step = StepError
 			m.err = msg.err
 		}
 
 	case ollamaStartMsg:
+		m.working = false
 		if msg.success {
-			m.state = StateModelChoice
-			return m, m.checkModels()
+			m.ollamaRunning = true
+			m.addMessage("✓ Ollama started")
+			time.Sleep(2 * time.Second) // Give Ollama time to start
+			return m, m.pullModel()
 		} else {
-			m.state = StateError
+			m.step = StepError
 			m.err = msg.err
 		}
 
-	case modelListMsg:
-		m.ollamaModels = msg.models
-		if len(m.ollamaModels) == 0 {
-			// No models — suggest llama3
-			m.selectedModel = "llama3"
-		}
-
 	case modelPullMsg:
+		m.working = false
 		if msg.success {
-			m.state = StateAPIKeyChoice
+			m.modelPulled = true
+			m.addMessage(fmt.Sprintf("✓ Model %s ready", m.selectedModel))
+			m.step = StepMCPConfig
 		} else {
-			m.state = StateError
+			m.step = StepError
 			m.err = msg.err
 		}
 
 	case mcpInstallMsg:
+		m.working = false
 		if msg.success {
-			m.state = StateSuccess
-			m.message = "Setup complete"
+			m.mcpConfigured = true
+			m.addMessage("✓ MCP configured")
+			m.step = StepValidation
+			return m, m.validate()
 		} else {
-			m.state = StateError
+			m.step = StepError
 			m.err = msg.err
 		}
+
+	case validationMsg:
+		m.working = false
+		m.llmHealthy = msg.llmOK
+		m.mcpHealthy = msg.mcpOK
+
+		if msg.llmOK {
+			m.addMessage("✓ LLM provider healthy")
+		}
+		if msg.mcpOK {
+			m.addMessage("✓ MCP server ready")
+		}
+
+		m.step = StepComplete
 	}
 
 	return m, nil
 }
 
-func (m WizardModel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m WizardModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.working {
+		// Block input while working
+		return m, nil
+	}
+
 	switch msg.String() {
 	case "ctrl+c", "esc":
 		m.quitting = true
@@ -183,22 +244,24 @@ func (m WizardModel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleEnter()
 
 	case "up", "k":
-		return m.handleUp(), nil
+		if m.cursor > 0 {
+			m.cursor--
+		}
 
 	case "down", "j":
-		return m.handleDown(), nil
-
-	case "s", "n":
-		return m.handleSkip()
+		maxCursor := m.getMaxCursor()
+		if m.cursor < maxCursor {
+			m.cursor++
+		}
 
 	case "backspace":
-		if m.keyInputMode != "" && len(m.keyInput) > 0 {
+		if m.step == StepRemoteSetup && len(m.keyInput) > 0 {
 			m.keyInput = m.keyInput[:len(m.keyInput)-1]
 		}
 
 	default:
-		// Append character for key input
-		if m.keyInputMode != "" && len(msg.String()) == 1 {
+		// Key input for API keys
+		if m.step == StepRemoteSetup && len(msg.String()) == 1 {
 			m.keyInput += msg.String()
 		}
 	}
@@ -207,376 +270,334 @@ func (m WizardModel) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m WizardModel) handleEnter() (tea.Model, tea.Cmd) {
-	switch m.state {
-	case StateWelcome:
-		m.state = StateOllamaCheck
-		return m, m.checkOllama()
+	switch m.step {
+	case StepWelcome:
+		m.step = StepSystemCheck
+		m.working = true
+		return m, m.checkSystem()
 
-	case StateInstallOllama:
-		m.state = StateInstallingMCP // temp state while installing
-		return m, m.installOllama()
-
-	case StateStartOllama:
-		m.state = StateInstallingMCP
-		return m, m.startOllama()
-
-	case StateModelChoice:
-		if len(m.ollamaModels) > 0 && m.modelIndex < len(m.ollamaModels) {
-			m.selectedModel = m.ollamaModels[m.modelIndex]
-			m.state = StateAPIKeyChoice
+	case StepProviderChoice:
+		m.providerChoice = m.cursor
+		if m.providerChoice == 0 {
+			// Local LLM
+			m.step = StepLocalSetup
+			m.working = true
+			return m, m.checkOllama()
 		} else {
-			// Pull llama3
-			m.selectedModel = "llama3"
-			m.state = StatePullingModel
-			return m, m.pullModel()
+			// Remote LLM
+			m.step = StepRemoteSetup
 		}
 
-	case StateAPIKeyChoice:
-		// Move to MCP config
-		m.state = StateClientChoice
+	case StepRemoteSetup:
+		m.remoteProvider = m.cursor
+		if m.keyInput != "" {
+			m.apiKey = m.keyInput
+			m.addMessage("✓ API key configured")
+			m.step = StepMCPConfig
+		}
 
-	case StateClientChoice:
-		m.state = StateInstallingMCP
-		return m, m.installMCP()
+	case StepMCPConfig:
+		m.mcpTarget = m.cursor
+		if m.mcpTarget < 2 {
+			m.working = true
+			return m, m.installMCP()
+		} else {
+			// Skip MCP
+			m.step = StepValidation
+			m.working = true
+			return m, m.validate()
+		}
 
-	case StateSuccess, StateError:
+	case StepComplete, StepError:
 		m.quitting = true
-		return m, nil
 	}
 
 	return m, nil
 }
 
-func (m WizardModel) handleUp() WizardModel {
-	switch m.state {
-	case StateModelChoice:
-		if m.modelIndex > 0 {
-			m.modelIndex--
-		}
-	case StateAPIKeyChoice:
-		if m.providerIndex > 0 {
-			m.providerIndex--
-		}
-	case StateClientChoice:
-		if m.clientIndex > 0 {
-			m.clientIndex--
-		}
+func (m WizardModel) getMaxCursor() int {
+	switch m.step {
+	case StepProviderChoice:
+		return 1 // local, remote
+	case StepRemoteSetup:
+		return 1 // anthropic, openai
+	case StepMCPConfig:
+		return 2 // opencode, claude, skip
+	default:
+		return 0
 	}
-	return m
 }
 
-func (m WizardModel) handleDown() WizardModel {
-	switch m.state {
-	case StateModelChoice:
-		maxIndex := len(m.ollamaModels)
-		if m.modelIndex < maxIndex {
-			m.modelIndex++
-		}
-	case StateAPIKeyChoice:
-		if m.providerIndex < 2 {
-			m.providerIndex++
-		}
-	case StateClientChoice:
-		if m.clientIndex < 2 {
-			m.clientIndex++
-		}
-	}
-	return m
-}
-
-func (m WizardModel) handleSkip() (tea.Model, tea.Cmd) {
-	switch m.state {
-	case StateInstallOllama:
-		// Skip local LLM — go to API key choice
-		m.state = StateAPIKeyChoice
-		m.useRemoteLLM = true
-
-	case StateModelChoice:
-		// Skip model pull — go to API keys
-		m.state = StateAPIKeyChoice
-
-	case StateAPIKeyChoice:
-		// Skip API keys — go to MCP
-		m.state = StateClientChoice
-
-	case StateClientChoice:
-		// Skip MCP install
-		m.state = StateSuccess
-		m.message = "Setup skipped"
-	}
-
-	return m, nil
+func (m *WizardModel) addMessage(msg string) {
+	m.message = append(m.message, msg)
 }
 
 func (m WizardModel) View() string {
-	if m.quitting {
-		return ""
-	}
+	// Standalone view (for compatibility)
+	return m.ViewContent()
+}
 
-	switch m.state {
-	case StateWelcome:
+func (m WizardModel) ViewContent() string {
+	switch m.step {
+	case StepWelcome:
 		return m.viewWelcome()
-	case StateOllamaCheck:
-		return m.viewChecking("Checking Ollama installation...")
-	case StateInstallOllama:
-		return m.viewInstallOllama()
-	case StateStartOllama:
-		return m.viewStartOllama()
-	case StateModelChoice:
-		return m.viewModelChoice()
-	case StatePullingModel:
-		return m.viewPulling()
-	case StateAPIKeyChoice:
-		return m.viewAPIKeyChoice()
-	case StateClientChoice:
-		return m.viewClientChoice()
-	case StateInstallingMCP:
-		return m.viewInstalling()
-	case StateSuccess:
-		return m.viewSuccess()
-	case StateError:
+	case StepSystemCheck:
+		return m.viewSystemCheck()
+	case StepProviderChoice:
+		return m.viewProviderChoice()
+	case StepLocalSetup:
+		return m.viewLocalSetup()
+	case StepRemoteSetup:
+		return m.viewRemoteSetup()
+	case StepMCPConfig:
+		return m.viewMCPConfig()
+	case StepValidation:
+		return m.viewValidation()
+	case StepComplete:
+		return m.viewComplete()
+	case StepError:
 		return m.viewError()
 	}
 	return ""
 }
 
-// ---------------------------------------------------------------------------
-// View Helpers
-// ---------------------------------------------------------------------------
+func (m WizardModel) FooterHelp() string {
+	if m.working {
+		return "Please wait..."
+	}
 
+	switch m.step {
+	case StepWelcome:
+		return "Enter start setup • esc quit"
+	case StepProviderChoice, StepRemoteSetup, StepMCPConfig:
+		return "↑↓ navigate • Enter select • esc quit"
+	case StepComplete, StepError:
+		return "Enter exit"
+	default:
+		return "Please wait..."
+	}
+}
+
+// View helpers
 var (
-	boxStyle = lipgloss.NewStyle().
-			Padding(1, 2).
-			Width(80)
-
-	headerStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("39")).
-			Bold(true)
-
-	textStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("252"))
-
-	successStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("42")).
-			Bold(true)
-
-	errorStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("196")).
-			Bold(true)
-
-	cursorStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color("39"))
+	textStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
+	successStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	errorStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	cursorStyle  = lipgloss.NewStyle().Foreground(lipgloss.Color("39"))
+	dimStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 )
 
 func (m WizardModel) viewWelcome() string {
 	var b strings.Builder
-	b.WriteString(headerStyle.Render("Vela Setup Wizard"))
+	b.WriteString(textStyle.Render("Welcome to Vela Setup"))
 	b.WriteString("\n\n")
-	b.WriteString(textStyle.Render("This wizard will:"))
+	b.WriteString(textStyle.Render("This wizard will guide you through:"))
 	b.WriteString("\n")
-	b.WriteString(textStyle.Render("  1. Check/install Ollama (local LLM runtime)"))
+	b.WriteString(textStyle.Render("  1. System requirements check"))
 	b.WriteString("\n")
-	b.WriteString(textStyle.Render("  2. Download a model (llama3 recommended)"))
+	b.WriteString(textStyle.Render("  2. LLM provider configuration (local or remote)"))
 	b.WriteString("\n")
-	b.WriteString(textStyle.Render("  3. Optionally configure remote LLM (Anthropic/OpenAI)"))
+	b.WriteString(textStyle.Render("  3. MCP server setup"))
 	b.WriteString("\n")
-	b.WriteString(textStyle.Render("  4. Configure MCP for OpenCode/Claude Desktop"))
+	b.WriteString(textStyle.Render("  4. Installation validation"))
 	b.WriteString("\n\n")
-	b.WriteString(textStyle.Render("Press Enter to begin, or q to quit"))
-	return boxStyle.Render(b.String())
+	return b.String()
 }
 
-func (m WizardModel) viewChecking(msg string) string {
+func (m WizardModel) viewSystemCheck() string {
 	var b strings.Builder
-	b.WriteString(headerStyle.Render("Setup"))
-	b.WriteString("\n\n")
-	b.WriteString(textStyle.Render(msg))
-	b.WriteString("\n")
-	return boxStyle.Render(b.String())
-}
 
-func (m WizardModel) viewInstallOllama() string {
-	var b strings.Builder
-	b.WriteString(headerStyle.Render("Install Ollama"))
-	b.WriteString("\n\n")
-	b.WriteString(textStyle.Render("Ollama not found. Install now?"))
-	b.WriteString("\n\n")
-	b.WriteString(textStyle.Render(fmt.Sprintf("Platform: %s/%s", runtime.GOOS, runtime.GOARCH)))
-	b.WriteString("\n")
-	b.WriteString(textStyle.Render("Method: brew (macOS) or curl (Linux)"))
-	b.WriteString("\n\n")
-	b.WriteString(textStyle.Render("Enter install • s skip (use remote LLM) • q quit"))
-	return boxStyle.Render(b.String())
-}
-
-func (m WizardModel) viewStartOllama() string {
-	var b strings.Builder
-	b.WriteString(headerStyle.Render("Start Ollama"))
-	b.WriteString("\n\n")
-	b.WriteString(textStyle.Render(fmt.Sprintf("Ollama installed: %s", m.ollamaPath)))
-	b.WriteString("\n")
-	b.WriteString(textStyle.Render("But not running. Start now?"))
-	b.WriteString("\n\n")
-	b.WriteString(textStyle.Render("Enter start • s skip • q quit"))
-	return boxStyle.Render(b.String())
-}
-
-func (m WizardModel) viewModelChoice() string {
-	var b strings.Builder
-	b.WriteString(headerStyle.Render("Choose Model"))
-	b.WriteString("\n\n")
-
-	if len(m.ollamaModels) > 0 {
-		b.WriteString(textStyle.Render("Installed models:"))
+	if m.working {
+		b.WriteString(textStyle.Render("Checking system requirements..."))
 		b.WriteString("\n")
-		for i, model := range m.ollamaModels {
-			cursor := "  "
-			style := textStyle
-			if i == m.modelIndex {
-				cursor = cursorStyle.Render("▸ ")
-				style = cursorStyle
-			}
-			b.WriteString(cursor + style.Render(model) + "\n")
-		}
-
-		// Add "Pull llama3" option
-		cursor := "  "
-		style := textStyle
-		if m.modelIndex == len(m.ollamaModels) {
-			cursor = cursorStyle.Render("▸ ")
-			style = cursorStyle
-		}
-		b.WriteString(cursor + style.Render("Pull llama3 (recommended)") + "\n")
+	} else if m.sysOK {
+		b.WriteString(successStyle.Render("✓ System check passed"))
+		b.WriteString("\n")
+		b.WriteString(dimStyle.Render(fmt.Sprintf("  OS: %s, Arch: %s", m.sysOS, m.sysArch)))
+		b.WriteString("\n")
 	} else {
-		b.WriteString(textStyle.Render("No models found. Pull llama3?"))
+		b.WriteString(errorStyle.Render("✗ System check failed"))
+		b.WriteString("\n")
+		for _, issue := range m.sysIssues {
+			b.WriteString(errorStyle.Render(fmt.Sprintf("  • %s", issue)))
+			b.WriteString("\n")
+		}
+	}
+
+	b.WriteString("\n")
+	return b.String()
+}
+
+func (m WizardModel) viewProviderChoice() string {
+	var b strings.Builder
+	b.WriteString(textStyle.Render("Choose LLM provider:"))
+	b.WriteString("\n\n")
+
+	options := []string{
+		"Local (Ollama - privacy-first, runs on your machine)",
+		"Remote (Anthropic/OpenAI - cloud-based, requires API key)",
+	}
+
+	for i, opt := range options {
+		cursor := "  "
+		style := textStyle
+		if i == m.cursor {
+			cursor = cursorStyle.Render("▸ ")
+			style = cursorStyle
+		}
+		b.WriteString(cursor + style.Render(opt) + "\n")
+	}
+
+	b.WriteString("\n")
+	return b.String()
+}
+
+func (m WizardModel) viewLocalSetup() string {
+	var b strings.Builder
+	b.WriteString(textStyle.Render("Configuring local LLM (Ollama)..."))
+	b.WriteString("\n\n")
+
+	for _, msg := range m.message {
+		b.WriteString(dimStyle.Render(msg))
+		b.WriteString("\n")
+	}
+
+	if m.working {
+		b.WriteString(textStyle.Render("⏳ Working..."))
 		b.WriteString("\n")
 	}
 
 	b.WriteString("\n")
-	b.WriteString(textStyle.Render("↑↓ navigate • Enter select • s skip • q quit"))
-	return boxStyle.Render(b.String())
+	return b.String()
 }
 
-func (m WizardModel) viewPulling() string {
+func (m WizardModel) viewRemoteSetup() string {
 	var b strings.Builder
-	b.WriteString(headerStyle.Render("Pulling Model"))
-	b.WriteString("\n\n")
-	b.WriteString(textStyle.Render(fmt.Sprintf("Downloading %s...", m.selectedModel)))
-	b.WriteString("\n")
-	return boxStyle.Render(b.String())
-}
-
-func (m WizardModel) viewAPIKeyChoice() string {
-	var b strings.Builder
-	b.WriteString(headerStyle.Render("LLM Provider"))
-	b.WriteString("\n\n")
-	b.WriteString(textStyle.Render("Choose default LLM provider:"))
+	b.WriteString(textStyle.Render("Configure remote LLM provider:"))
 	b.WriteString("\n\n")
 
-	providers := []string{
-		fmt.Sprintf("Local (%s)", m.selectedModel),
-		"Anthropic Claude",
-		"OpenAI GPT",
-	}
-
-	for i, provider := range providers {
+	providers := []string{"Anthropic Claude", "OpenAI GPT"}
+	for i, p := range providers {
 		cursor := "  "
 		style := textStyle
-		if i == m.providerIndex {
+		if i == m.cursor {
 			cursor = cursorStyle.Render("▸ ")
 			style = cursorStyle
 		}
-		b.WriteString(cursor + style.Render(provider) + "\n")
+		b.WriteString(cursor + style.Render(p) + "\n")
 	}
 
 	b.WriteString("\n")
-	b.WriteString(textStyle.Render("↑↓ navigate • Enter select • s skip • q quit"))
-	return boxStyle.Render(b.String())
+	b.WriteString(textStyle.Render("API Key: "))
+	if m.keyInput == "" {
+		b.WriteString(dimStyle.Render("(enter key)"))
+	} else {
+		b.WriteString(textStyle.Render(strings.Repeat("*", len(m.keyInput))))
+	}
+	b.WriteString("\n\n")
+
+	return b.String()
 }
 
-func (m WizardModel) viewClientChoice() string {
+func (m WizardModel) viewMCPConfig() string {
 	var b strings.Builder
-	b.WriteString(headerStyle.Render("MCP Configuration"))
-	b.WriteString("\n\n")
-	b.WriteString(textStyle.Render("Install Vela MCP server for:"))
+	b.WriteString(textStyle.Render("Configure MCP server for:"))
 	b.WriteString("\n\n")
 
-	clients := []string{
+	options := []string{
 		"OpenCode (Anthropic CLI)",
 		"Claude Desktop",
-		"Skip MCP installation",
+		"Skip MCP setup",
 	}
 
-	for i, client := range clients {
+	for i, opt := range options {
 		cursor := "  "
 		style := textStyle
-		if i == m.clientIndex {
+		if i == m.cursor {
 			cursor = cursorStyle.Render("▸ ")
 			style = cursorStyle
 		}
-		b.WriteString(cursor + style.Render(client) + "\n")
+		b.WriteString(cursor + style.Render(opt) + "\n")
 	}
 
 	b.WriteString("\n")
-	b.WriteString(textStyle.Render("↑↓ navigate • Enter select • s skip • q quit"))
-	return boxStyle.Render(b.String())
+	return b.String()
 }
 
-func (m WizardModel) viewInstalling() string {
+func (m WizardModel) viewValidation() string {
 	var b strings.Builder
-	b.WriteString(headerStyle.Render("Installing"))
+	b.WriteString(textStyle.Render("Validating installation..."))
 	b.WriteString("\n\n")
-	b.WriteString(textStyle.Render("Configuring Vela..."))
+
+	for _, msg := range m.message {
+		b.WriteString(dimStyle.Render(msg))
+		b.WriteString("\n")
+	}
+
+	if m.working {
+		b.WriteString(textStyle.Render("⏳ Testing connectivity..."))
+		b.WriteString("\n")
+	}
+
 	b.WriteString("\n")
-	return boxStyle.Render(b.String())
+	return b.String()
 }
 
-func (m WizardModel) viewSuccess() string {
+func (m WizardModel) viewComplete() string {
 	var b strings.Builder
-	b.WriteString(successStyle.Render("✓ Setup Complete"))
+	b.WriteString(successStyle.Render("✓ Setup Complete!"))
+	b.WriteString("\n\n")
+	b.WriteString(textStyle.Render("Installation summary:"))
 	b.WriteString("\n\n")
 
-	if m.ollamaInstalled {
-		b.WriteString(textStyle.Render(fmt.Sprintf("✓ Ollama: %s", m.ollamaPath)))
-		b.WriteString("\n")
-	}
-	if m.selectedModel != "" {
-		b.WriteString(textStyle.Render(fmt.Sprintf("✓ Model: %s", m.selectedModel)))
-		b.WriteString("\n")
-	}
-	if m.clientIndex < 2 {
-		clients := []string{"OpenCode", "Claude Desktop"}
-		b.WriteString(textStyle.Render(fmt.Sprintf("✓ MCP: %s", clients[m.clientIndex])))
+	for _, msg := range m.message {
+		b.WriteString(successStyle.Render(msg))
 		b.WriteString("\n")
 	}
 
 	b.WriteString("\n")
-	b.WriteString(textStyle.Render("Press Enter to exit"))
-	return boxStyle.Render(b.String())
+	b.WriteString(textStyle.Render("You can now use Vela!"))
+	b.WriteString("\n\n")
+	return b.String()
 }
 
 func (m WizardModel) viewError() string {
 	var b strings.Builder
 	b.WriteString(errorStyle.Render("✗ Setup Failed"))
 	b.WriteString("\n\n")
-	b.WriteString(textStyle.Render(fmt.Sprintf("Error: %v", m.err)))
+	b.WriteString(errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
 	b.WriteString("\n\n")
-	b.WriteString(textStyle.Render("Press Enter to exit"))
-	return boxStyle.Render(b.String())
+	return b.String()
 }
 
-// ---------------------------------------------------------------------------
 // Commands
-// ---------------------------------------------------------------------------
+func (m WizardModel) checkSystem() tea.Cmd {
+	return func() tea.Msg {
+		os := runtime.GOOS
+		arch := runtime.GOARCH
+		issues := []string{}
+
+		// Check supported platforms
+		if os != "darwin" && os != "linux" && os != "windows" {
+			issues = append(issues, fmt.Sprintf("unsupported OS: %s", os))
+		}
+
+		return systemCheckMsg{
+			ok:     len(issues) == 0,
+			os:     os,
+			arch:   arch,
+			issues: issues,
+		}
+	}
+}
 
 func (m WizardModel) checkOllama() tea.Cmd {
 	return func() tea.Msg {
-		installed, running, path, err := CheckOllama()
+		installed, running, path, _ := CheckOllama()
 		return ollamaCheckMsg{
 			installed: installed,
 			running:   running,
 			path:      path,
-			err:       err,
 		}
 	}
 }
@@ -601,16 +622,6 @@ func (m WizardModel) startOllama() tea.Cmd {
 	}
 }
 
-func (m WizardModel) checkModels() tea.Cmd {
-	return func() tea.Msg {
-		models, err := GetOllamaModels()
-		return modelListMsg{
-			models: models,
-			err:    err,
-		}
-	}
-}
-
 func (m WizardModel) pullModel() tea.Cmd {
 	return func() tea.Msg {
 		err := PullModel(m.selectedModel)
@@ -625,52 +636,45 @@ func (m WizardModel) installMCP() tea.Cmd {
 	return func() tea.Msg {
 		var configPath string
 
-		switch m.clientIndex {
-		case 0: // OpenCode
+		switch m.mcpTarget {
+		case 0:
 			configPath = getOpenCodeConfigPath()
-		case 1: // Claude Desktop
+		case 1:
 			configPath = getClaudeDesktopConfigPath()
-		case 2: // Skip
+		case 2:
 			return mcpInstallMsg{success: true, err: nil}
 		}
 
 		if configPath == "" {
-			return mcpInstallMsg{success: false, err: fmt.Errorf("could not determine config path for platform %s", runtime.GOOS)}
+			return mcpInstallMsg{success: false, err: fmt.Errorf("could not determine config path")}
 		}
 
-		// Create config directory
 		configDir := filepath.Dir(configPath)
 		if err := os.MkdirAll(configDir, 0755); err != nil {
 			return mcpInstallMsg{success: false, err: err}
 		}
 
-		// Read or create config
 		var cfg map[string]interface{}
 		data, err := os.ReadFile(configPath)
 		if err != nil {
-			cfg = map[string]interface{}{
-				"mcpServers": map[string]interface{}{},
-			}
+			cfg = map[string]interface{}{"mcpServers": map[string]interface{}{}}
 		} else {
 			if err := json.Unmarshal(data, &cfg); err != nil {
 				return mcpInstallMsg{success: false, err: err}
 			}
 		}
 
-		// Ensure mcpServers exists
 		mcpServers, ok := cfg["mcpServers"].(map[string]interface{})
 		if !ok {
 			mcpServers = map[string]interface{}{}
 			cfg["mcpServers"] = mcpServers
 		}
 
-		// Add vela server
 		mcpServers["vela"] = map[string]interface{}{
 			"command": "vela",
 			"args":    []string{"serve"},
 		}
 
-		// Write config
 		data, err = json.MarshalIndent(cfg, "", "  ")
 		if err != nil {
 			return mcpInstallMsg{success: false, err: err}
@@ -681,5 +685,19 @@ func (m WizardModel) installMCP() tea.Cmd {
 		}
 
 		return mcpInstallMsg{success: true, err: nil}
+	}
+}
+
+func (m WizardModel) validate() tea.Cmd {
+	return func() tea.Msg {
+		// TODO: Actually validate LLM connectivity
+		llmOK := m.ollamaRunning || m.apiKey != ""
+		mcpOK := m.mcpConfigured || m.mcpTarget == 2
+
+		return validationMsg{
+			llmOK: llmOK,
+			mcpOK: mcpOK,
+			err:   nil,
+		}
 	}
 }

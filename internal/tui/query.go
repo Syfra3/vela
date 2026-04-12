@@ -82,11 +82,12 @@ func (m QueryModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m QueryModel) View() string {
-	var b strings.Builder
+	// Content only — menu will wrap with header/footer
+	return m.ViewContent()
+}
 
-	headerStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("39")).
-		Bold(true)
+func (m QueryModel) ViewContent() string {
+	var b strings.Builder
 
 	textStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("252"))
@@ -103,14 +104,9 @@ func (m QueryModel) View() string {
 		Width(76).
 		Padding(1)
 
-	boxStyle := lipgloss.NewStyle().
-		Padding(1, 2).
-		Width(80)
-
-	// Header
+	// Mode name will be in section header
 	modeNames := []string{"Path", "Explain", "Nodes"}
-	b.WriteString(headerStyle.Render(fmt.Sprintf("Query — %s", modeNames[m.mode])))
-	b.WriteString("\n\n")
+	_ = modeNames // Used by menu
 
 	// Mode description
 	modeDesc := map[QueryMode]string{
@@ -139,8 +135,10 @@ func (m QueryModel) View() string {
 		b.WriteString("\n\n")
 	}
 
-	// Footer
-	b.WriteString(textStyle.Render("Tab change mode • Enter execute • esc cancel"))
+	return b.String()
+}
 
-	return boxStyle.Render(b.String())
+func (m QueryModel) ModeName() string {
+	modeNames := []string{"Path", "Explain", "Nodes"}
+	return modeNames[m.mode]
 }

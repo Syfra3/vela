@@ -63,11 +63,12 @@ func (m ConfigViewModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m ConfigViewModel) View() string {
-	var b strings.Builder
+	// Content only — menu will wrap with header/footer
+	return m.ViewContent()
+}
 
-	headerStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("39")).
-		Bold(true)
+func (m ConfigViewModel) ViewContent() string {
+	var b strings.Builder
 
 	textStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("252"))
@@ -82,12 +83,6 @@ func (m ConfigViewModel) View() string {
 	errorStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("196"))
 
-	boxStyle := lipgloss.NewStyle().
-		Padding(1, 2).
-		Width(80)
-
-	b.WriteString(headerStyle.Render("Config — Vela Settings"))
-	b.WriteString("\n\n")
 	b.WriteString(textStyle.Render(fmt.Sprintf("Config file: %s", m.configPath)))
 	b.WriteString("\n\n")
 
@@ -122,7 +117,5 @@ func (m ConfigViewModel) View() string {
 		b.WriteString("\n\n")
 	}
 
-	b.WriteString(textStyle.Render("e edit in $EDITOR • esc back to menu"))
-
-	return boxStyle.Render(b.String())
+	return b.String()
 }

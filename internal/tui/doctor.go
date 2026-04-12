@@ -70,11 +70,12 @@ func (m DoctorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m DoctorModel) View() string {
-	var b strings.Builder
+	// Content only — menu will wrap with header/footer
+	return m.ViewContent()
+}
 
-	headerStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("39")).
-		Bold(true)
+func (m DoctorModel) ViewContent() string {
+	var b strings.Builder
 
 	textStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("252"))
@@ -84,13 +85,6 @@ func (m DoctorModel) View() string {
 
 	errorStyle := lipgloss.NewStyle().
 		Foreground(lipgloss.Color("196"))
-
-	boxStyle := lipgloss.NewStyle().
-		Padding(1, 2).
-		Width(80)
-
-	b.WriteString(headerStyle.Render("Doctor — LLM Health Check"))
-	b.WriteString("\n\n")
 
 	if m.checking {
 		b.WriteString(textStyle.Render("Checking LLM providers..."))
@@ -114,12 +108,7 @@ func (m DoctorModel) View() string {
 			textStyle.Render(msg)))
 	}
 
-	if !m.checking && len(m.results) > 0 {
-		b.WriteString("\n")
-		b.WriteString(textStyle.Render("r re-check • esc back to menu"))
-	}
-
-	return boxStyle.Render(b.String())
+	return b.String()
 }
 
 func (m DoctorModel) runHealthCheck() tea.Cmd {

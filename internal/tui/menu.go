@@ -409,23 +409,47 @@ func (m MenuModel) updateDoctor(msg tea.Msg) (tea.Model, tea.Cmd) {
 // ---------------------------------------------------------------------------
 
 func (m MenuModel) viewInstall() string {
-	return m.installWizard.View()
+	var b strings.Builder
+	b.WriteString(m.renderHeader("Setup Wizard"))
+	b.WriteString(m.installWizard.ViewContent())
+	b.WriteString(m.renderFooter(m.installWizard.FooterHelp()))
+	return appStyle.Render(b.String())
 }
 
 func (m MenuModel) viewExtract() string {
-	return m.extractModel.View()
+	var b strings.Builder
+	b.WriteString(m.renderHeader("Extract — Knowledge Graph"))
+	b.WriteString(m.extractModel.ViewContent())
+	b.WriteString(m.renderFooter("Enter start extraction • esc back to menu"))
+	return appStyle.Render(b.String())
 }
 
 func (m MenuModel) viewQuery() string {
-	return m.queryModel.View()
+	var b strings.Builder
+	b.WriteString(m.renderHeader(fmt.Sprintf("Query — %s", m.queryModel.ModeName())))
+	b.WriteString(m.queryModel.ViewContent())
+	b.WriteString(m.renderFooter("Tab change mode • Enter execute • esc back to menu"))
+	return appStyle.Render(b.String())
 }
 
 func (m MenuModel) viewConfig() string {
-	return m.configModel.View()
+	var b strings.Builder
+	b.WriteString(m.renderHeader("Config — Vela Settings"))
+	b.WriteString(m.configModel.ViewContent())
+	b.WriteString(m.renderFooter("e edit in $EDITOR • esc back to menu"))
+	return appStyle.Render(b.String())
 }
 
 func (m MenuModel) viewDoctor() string {
-	return m.doctorModel.View()
+	var b strings.Builder
+	b.WriteString(m.renderHeader("Doctor — LLM Health Check"))
+	b.WriteString(m.doctorModel.ViewContent())
+	footer := "esc back to menu"
+	if !m.doctorModel.checking && len(m.doctorModel.results) > 0 {
+		footer = "r re-check • esc back to menu"
+	}
+	b.WriteString(m.renderFooter(footer))
+	return appStyle.Render(b.String())
 }
 
 // ---------------------------------------------------------------------------
