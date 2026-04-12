@@ -1,0 +1,50 @@
+# Binaries
+bin/
+dist/
+vela
+vela-*
+
+# Build artifacts
+*.o
+*.so
+*.dylib
+*.exe
+*.dll
+
+# Go
+*.go.sum
+vendor/
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Vela outputs
+vela-out/
+*.graph.json
+*.graph.html
+*.graphml
+
+# Cache
+.cache/
+vela-cache/
+
+# Python (for clustering wrapper)
+__pycache__/
+*.pyc
+.venv/
+venv/
+env/
+
+# Test coverage
+coverage.out
+*.cover
