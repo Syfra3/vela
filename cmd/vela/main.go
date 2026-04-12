@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 
 	"github.com/Syfra3/vela/internal/cache"
@@ -38,8 +39,16 @@ func rootCmd() *cobra.Command {
 		Short: "Vela — Knowledge Explorer & Graph Builder",
 		Long: `Vela is a Go-native, privacy-first knowledge graph builder for
 codebases and technical documentation.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			// Default: launch TUI if no subcommand
+			if err := launchTUI(); err != nil {
+				fmt.Fprintf(os.Stderr, "TUI unavailable: %v\n", err)
+				os.Exit(1)
+			}
+		},
 	}
 
+	root.AddCommand(tuiCmd())
 	root.AddCommand(extractCmd())
 	root.AddCommand(configCmd())
 	root.AddCommand(doctorCmd())
@@ -49,6 +58,30 @@ codebases and technical documentation.`,
 	root.AddCommand(serveCmd())
 	root.AddCommand(hookCmd())
 	return root
+}
+
+// ---------------------------------------------------------------------------
+// vela tui
+// ---------------------------------------------------------------------------
+
+func tuiCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "tui",
+		Short: "Launch interactive TUI menu",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return launchTUI()
+		},
+	}
+}
+
+func launchTUI() error {
+	if !tui.IsTTY() {
+		return fmt.Errorf("TUI requires a terminal (stdout is not a TTY)")
+	}
+	m := tui.NewMenuModel()
+	p := tea.NewProgram(m, tea.WithAltScreen())
+	_, err := p.Run()
+	return err
 }
 
 // ---------------------------------------------------------------------------

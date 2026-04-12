@@ -2,15 +2,49 @@ package tui
 
 import "github.com/charmbracelet/lipgloss"
 
-var (
-	// Colours
-	colorAccent  = lipgloss.Color("#4e79a7")
-	colorMuted   = lipgloss.Color("#888888")
-	colorSuccess = lipgloss.Color("#59a14f")
-	colorWarn    = lipgloss.Color("#f28e2b")
-	colorErr     = lipgloss.Color("#e15759")
+// ─── Colors (Vela Palette) ───────────────────────────────────────────────
 
-	// Styles
+var (
+	// Core colors
+	colorBase        = lipgloss.Color("#242426") // Dark background
+	colorSurface     = lipgloss.Color("#2a2a2d") // Panel bg
+	colorOverlay     = lipgloss.Color("#4a4a4e") // Muted borders
+	colorText        = lipgloss.Color("#e0e0e2") // Light text
+	colorSubtext     = lipgloss.Color("#8a8a8e") // Dim text
+	colorAccent      = lipgloss.Color("#4e79a7") // Primary blue
+	colorAccentLight = lipgloss.Color("#6b99c3") // Lighter blue
+	colorMuted       = lipgloss.Color("#888888") // Muted grey
+	colorSuccess     = lipgloss.Color("#59a14f") // Green
+	colorWarn        = lipgloss.Color("#f28e2b") // Orange
+	colorErr         = lipgloss.Color("#e15759") // Red
+)
+
+// ─── Layout Styles ───────────────────────────────────────────────────────
+
+var (
+	// App frame
+	appStyle = lipgloss.NewStyle().
+			Foreground(colorText).
+			Padding(1, 2)
+
+	// Header (section titles)
+	headerStyle = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(colorAccent).
+			MarginBottom(1)
+
+	// Footer / help bar
+	helpStyle = lipgloss.NewStyle().
+			Foreground(colorSubtext).
+			MarginTop(1)
+
+	// Error message
+	errorStyle = lipgloss.NewStyle().
+			Foreground(colorErr).
+			Bold(true).
+			Padding(0, 1)
+
+	// Legacy styles (kept for compatibility with app.go)
 	styleHeader = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(colorAccent)
