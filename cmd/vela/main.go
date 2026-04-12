@@ -15,6 +15,7 @@ import (
 	"github.com/Syfra3/vela/internal/extract"
 	igraph "github.com/Syfra3/vela/internal/graph"
 	"github.com/Syfra3/vela/internal/llm"
+	"github.com/Syfra3/vela/internal/report"
 	"github.com/Syfra3/vela/internal/security"
 	"github.com/Syfra3/vela/internal/tui"
 	"github.com/Syfra3/vela/pkg/types"
@@ -48,6 +49,7 @@ codebases and technical documentation.`,
 func extractCmd() *cobra.Command {
 	var outDir string
 	var noTUI bool
+	var noViz bool
 	var providerFlag string
 	var modelFlag string
 
@@ -184,20 +186,50 @@ func extractCmd() *cobra.Command {
 				return fmt.Errorf("building graph: %w", err)
 			}
 
+			// Leiden clustering (best-effort — requires Python + graspologic)
+			if partition, lErr := igraph.RunLeiden(g); lErr == nil {
+				communities := g.ApplyCommunities(partition)
+				fmt.Printf("  Communities detected: %d\n", len(communities))
+			} else {
+				fmt.Fprintf(os.Stderr, "  note: clustering unavailable (%v)\n", lErr)
+			}
+
 			// Export JSON
 			tg := g.ToTypes()
 			if err := export.WriteJSON(tg, outDir); err != nil {
 				return fmt.Errorf("writing graph.json: %w", err)
 			}
 
-			fmt.Printf("\nGraph written to %s/graph.json\n", outDir)
+			// GRAPH_REPORT.md
+			if rErr := report.Generate(g, outDir); rErr != nil {
+				fmt.Fprintf(os.Stderr, "  warning: report generation failed: %v\n", rErr)
+			}
+
+			if !noViz {
+				// HTML export
+				if hErr := export.WriteHTML(tg, outDir); hErr != nil {
+					fmt.Fprintf(os.Stderr, "  warning: HTML export failed: %v\n", hErr)
+				}
+				// Obsidian vault
+				if oErr := export.WriteObsidian(tg, outDir); oErr != nil {
+					fmt.Fprintf(os.Stderr, "  warning: Obsidian export failed: %v\n", oErr)
+				}
+			}
+
+			fmt.Printf("\nGraph written to %s/\n", outDir)
 			fmt.Printf("  Nodes: %d  Edges: %d\n", len(allNodes), len(allEdges))
+			fmt.Printf("  graph.json · GRAPH_REPORT.md")
+			if !noViz {
+				fmt.Printf(" · graph.html · obsidian/")
+			}
+			fmt.Println()
 			return nil
 		},
 	}
 
 	cmd.Flags().StringVar(&outDir, "out", "vela-out", "Output directory")
 	cmd.Flags().BoolVar(&noTUI, "no-tui", false, "Disable TUI, use plain log output")
+	cmd.Flags().BoolVar(&noViz, "no-viz", false, "Skip HTML and Obsidian exports")
 	cmd.Flags().StringVar(&providerFlag, "provider", "", "LLM provider override (local|anthropic|openai|none)")
 	cmd.Flags().StringVar(&modelFlag, "model", "", "LLM model override")
 	return cmd
