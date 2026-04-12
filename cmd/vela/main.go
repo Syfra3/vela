@@ -19,7 +19,9 @@ import (
 	"github.com/Syfra3/vela/internal/query"
 	"github.com/Syfra3/vela/internal/report"
 	"github.com/Syfra3/vela/internal/security"
+	"github.com/Syfra3/vela/internal/server"
 	"github.com/Syfra3/vela/internal/tui"
+	"github.com/Syfra3/vela/internal/watch"
 	"github.com/Syfra3/vela/pkg/types"
 )
 
@@ -44,6 +46,8 @@ codebases and technical documentation.`,
 	root.AddCommand(pathCmd())
 	root.AddCommand(explainCmd())
 	root.AddCommand(queryCmd())
+	root.AddCommand(serveCmd())
+	root.AddCommand(hookCmd())
 	return root
 }
 
@@ -55,6 +59,10 @@ func extractCmd() *cobra.Command {
 	var outDir string
 	var noTUI bool
 	var noViz bool
+	var watchMode bool
+	var neo4jURL string
+	var neo4jUser string
+	var neo4jPass string
 	var providerFlag string
 	var modelFlag string
 
@@ -239,6 +247,16 @@ func extractCmd() *cobra.Command {
 				}
 			}
 
+			// Neo4j push (optional)
+			if neo4jURL != "" {
+				fmt.Printf("  Pushing to Neo4j at %s...\n", neo4jURL)
+				if nErr := export.PushNeo4j(tg, neo4jURL, neo4jUser, neo4jPass); nErr != nil {
+					fmt.Fprintf(os.Stderr, "  warning: Neo4j push failed: %v\n", nErr)
+				} else {
+					fmt.Println("  Neo4j push complete.")
+				}
+			}
+
 			fmt.Printf("\nGraph written to %s/\n", outDir)
 			fmt.Printf("  Nodes: %d  Edges: %d\n", len(allNodes), len(allEdges))
 			fmt.Printf("  graph.json · GRAPH_REPORT.md")
@@ -246,6 +264,54 @@ func extractCmd() *cobra.Command {
 				fmt.Printf(" · graph.html · obsidian/")
 			}
 			fmt.Println()
+
+			// --watch: start file watcher for incremental re-extraction
+			if watchMode {
+				fmt.Println("\n[watch] watching for changes (Ctrl-C to stop)...")
+				codeExts := []string{".go", ".py", ".ts", ".tsx", ".js", ".jsx", ".md", ".txt"}
+				stop := make(chan struct{})
+
+				reextract := func(changed []string) error {
+					for _, f := range changed {
+						rel := extract.RelPath(root, f)
+						fmt.Printf("[watch] re-extracting: %s\n", rel)
+
+						// Invalidate cache for changed file
+						if fileCache != nil {
+							if sha, shaErr := cache.SHA256File(f); shaErr == nil {
+								fileCache.Mark(f, sha+"_dirty") // force cache miss
+							}
+						}
+
+						nodes, edges, err := extract.ExtractAll(root, []string{f}, provider, cfg.LLM.MaxChunkTokens)
+						if err != nil {
+							fmt.Fprintf(os.Stderr, "[watch] skipping %s: %v\n", rel, err)
+							continue
+						}
+						allNodes = append(allNodes, nodes...)
+						allEdges = append(allEdges, edges...)
+					}
+
+					// Rebuild and re-export
+					g, err := igraph.Build(allNodes, allEdges)
+					if err != nil {
+						return fmt.Errorf("rebuilding graph: %w", err)
+					}
+					tg := g.ToTypes()
+					if err := export.WriteJSON(tg, outDir); err != nil {
+						return err
+					}
+					fmt.Printf("[watch] graph updated — %d nodes, %d edges\n", len(allNodes), len(allEdges))
+					return nil
+				}
+
+				w, err := watch.New(root, codeExts, reextract)
+				if err != nil {
+					return fmt.Errorf("starting watcher: %w", err)
+				}
+				return w.Run(stop)
+			}
+
 			return nil
 		},
 	}
@@ -253,6 +319,10 @@ func extractCmd() *cobra.Command {
 	cmd.Flags().StringVar(&outDir, "out", "vela-out", "Output directory")
 	cmd.Flags().BoolVar(&noTUI, "no-tui", false, "Disable TUI, use plain log output")
 	cmd.Flags().BoolVar(&noViz, "no-viz", false, "Skip HTML and Obsidian exports")
+	cmd.Flags().BoolVar(&watchMode, "watch", false, "Watch for file changes and re-extract automatically")
+	cmd.Flags().StringVar(&neo4jURL, "neo4j-push", "", "Push graph to Neo4j Bolt URL (e.g. bolt://localhost:7687)")
+	cmd.Flags().StringVar(&neo4jUser, "neo4j-user", "neo4j", "Neo4j username")
+	cmd.Flags().StringVar(&neo4jPass, "neo4j-pass", "neo4j", "Neo4j password")
 	cmd.Flags().StringVar(&providerFlag, "provider", "", "LLM provider override (local|anthropic|openai|none)")
 	cmd.Flags().StringVar(&modelFlag, "model", "", "LLM model override")
 	return cmd
@@ -388,6 +458,80 @@ func queryCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: vela-out/graph.json)")
 	return cmd
+}
+
+// ---------------------------------------------------------------------------
+// vela serve
+// ---------------------------------------------------------------------------
+
+func serveCmd() *cobra.Command {
+	var graphFile string
+	var port int
+
+	cmd := &cobra.Command{
+		Use:   "serve [graph-file]",
+		Short: "Serve the knowledge graph via MCP-compatible HTTP endpoints",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				graphFile = args[0]
+			}
+			if graphFile == "" {
+				graphFile = defaultGraphFile
+			}
+			eng, err := query.LoadFromFile(graphFile)
+			if err != nil {
+				return fmt.Errorf("loading graph: %w", err)
+			}
+			srv := server.New(eng, port)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			return srv.Start(ctx)
+		},
+	}
+	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: vela-out/graph.json)")
+	cmd.Flags().IntVar(&port, "port", 7700, "Port to listen on")
+	return cmd
+}
+
+// ---------------------------------------------------------------------------
+// vela hook
+// ---------------------------------------------------------------------------
+
+func hookCmd() *cobra.Command {
+	hook := &cobra.Command{
+		Use:   "hook",
+		Short: "Manage git hooks",
+	}
+	hook.AddCommand(hookInstallCmd())
+	return hook
+}
+
+func hookInstallCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "install",
+		Short: "Install a post-commit hook that rebuilds the graph on each commit",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return installHook()
+		},
+	}
+}
+
+func installHook() error {
+	const hookScript = `#!/bin/sh
+# Vela post-commit hook — auto-regenerate knowledge graph
+vela extract . --no-tui --no-viz --provider none 2>/dev/null || true
+`
+	hookDir := ".git/hooks"
+	if _, err := os.Stat(hookDir); os.IsNotExist(err) {
+		return fmt.Errorf(".git/hooks not found — run from the root of a git repository")
+	}
+	hookPath := hookDir + "/post-commit"
+	if err := os.WriteFile(hookPath, []byte(hookScript), 0755); err != nil {
+		return fmt.Errorf("writing hook: %w", err)
+	}
+	fmt.Printf("Hook installed at %s\n", hookPath)
+	return nil
 }
 
 // ---------------------------------------------------------------------------

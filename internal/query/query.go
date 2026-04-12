@@ -222,3 +222,14 @@ func (e *Engine) Query(input string) string {
 		return fmt.Sprintf("unknown command %q — type 'help' for available commands", cmd)
 	}
 }
+
+// Graph returns the underlying types.Graph (read-only reference).
+func (e *Engine) Graph() *types.Graph {
+	return e.graph
+}
+
+// NodeByID returns the node with the given ID string, if it exists.
+func (e *Engine) NodeByID(id string) (types.Node, bool) {
+	n, ok := e.nodeByID[id]
+	return n, ok
+}
