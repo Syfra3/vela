@@ -67,8 +67,8 @@ func (m *MenuModel) rebuildMenu() {
 
 	if !m.installed {
 		m.items = append(m.items, menuItem{
-			label:       "Install MCP",
-			description: "Download and configure Vela for OpenCode/Claude Desktop",
+			label:       "Setup Environment",
+			description: "Install Ollama, configure LLM, and setup MCP server",
 			key:         "install",
 		})
 	}
