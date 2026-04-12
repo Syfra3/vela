@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -15,6 +16,7 @@ import (
 	"github.com/Syfra3/vela/internal/extract"
 	igraph "github.com/Syfra3/vela/internal/graph"
 	"github.com/Syfra3/vela/internal/llm"
+	"github.com/Syfra3/vela/internal/query"
 	"github.com/Syfra3/vela/internal/report"
 	"github.com/Syfra3/vela/internal/security"
 	"github.com/Syfra3/vela/internal/tui"
@@ -39,6 +41,9 @@ codebases and technical documentation.`,
 	root.AddCommand(extractCmd())
 	root.AddCommand(configCmd())
 	root.AddCommand(doctorCmd())
+	root.AddCommand(pathCmd())
+	root.AddCommand(explainCmd())
+	root.AddCommand(queryCmd())
 	return root
 }
 
@@ -111,14 +116,27 @@ func extractCmd() *cobra.Command {
 			// Set up progress channel
 			progressCh := make(chan types.ProgressUpdate, 16)
 
+			providerName := "none"
+			providerOK := false
+			if provider != nil {
+				providerName = provider.Name()
+				providerOK = true
+			}
+
+			// queryFn is injected into TUI for post-extraction interactive mode.
+			// It is resolved after the graph is built; closure captures the pointer.
+			var queryEngine *query.Engine
+			queryFn := func(input string) string {
+				if queryEngine == nil {
+					return "graph not ready yet"
+				}
+				return queryEngine.Query(input)
+			}
+
 			if noTUI || !isTTY() {
 				go tui.RunPlainProgress(progressCh)
 			} else {
-				providerName := "none"
-				if provider != nil {
-					providerName = provider.Name()
-				}
-				prog := tui.NewProgram(progressCh, providerName)
+				prog := tui.NewProgram(progressCh, nil, providerName, providerOK, 1, queryFn)
 				if prog != nil {
 					go func() { _, _ = prog.Run() }()
 				} else {
@@ -198,6 +216,11 @@ func extractCmd() *cobra.Command {
 			tg := g.ToTypes()
 			if err := export.WriteJSON(tg, outDir); err != nil {
 				return fmt.Errorf("writing graph.json: %w", err)
+			}
+
+			// Wire query engine now that graph.json is on disk
+			if qe, qErr := query.LoadFromFile(outDir + "/graph.json"); qErr == nil {
+				queryEngine = qe
 			}
 
 			// GRAPH_REPORT.md
@@ -295,6 +318,76 @@ func doctorCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Query commands
+// ---------------------------------------------------------------------------
+
+const defaultGraphFile = "vela-out/graph.json"
+
+func loadEngine(graphFlag string) (*query.Engine, error) {
+	if graphFlag == "" {
+		graphFlag = defaultGraphFile
+	}
+	return query.LoadFromFile(graphFlag)
+}
+
+func pathCmd() *cobra.Command {
+	var graphFile string
+	cmd := &cobra.Command{
+		Use:   "path <from> <to>",
+		Short: "Find the shortest dependency path between two nodes",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			eng, err := loadEngine(graphFile)
+			if err != nil {
+				return err
+			}
+			fmt.Println(eng.Path(args[0], args[1]))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: vela-out/graph.json)")
+	return cmd
+}
+
+func explainCmd() *cobra.Command {
+	var graphFile string
+	cmd := &cobra.Command{
+		Use:   "explain <node>",
+		Short: "List all edges involving a node",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			eng, err := loadEngine(graphFile)
+			if err != nil {
+				return err
+			}
+			fmt.Println(eng.Explain(strings.Join(args, " ")))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: vela-out/graph.json)")
+	return cmd
+}
+
+func queryCmd() *cobra.Command {
+	var graphFile string
+	cmd := &cobra.Command{
+		Use:   "query <command>",
+		Short: "Run a graph query (path, explain, nodes, edges)",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			eng, err := loadEngine(graphFile)
+			if err != nil {
+				return err
+			}
+			fmt.Println(eng.Query(strings.Join(args, " ")))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: vela-out/graph.json)")
+	return cmd
 }
 
 // ---------------------------------------------------------------------------
