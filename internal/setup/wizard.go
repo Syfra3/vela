@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -35,6 +36,15 @@ const (
 	StepError
 )
 
+// RequirementCheck represents a single system requirement validation
+type RequirementCheck struct {
+	Name        string
+	Description string
+	Status      string // "checking", "pass", "fail", "warning"
+	Message     string
+	Required    bool
+}
+
 type WizardModel struct {
 	step     WizardStep
 	err      error
@@ -46,6 +56,9 @@ type WizardModel struct {
 	sysArch   string
 	sysOK     bool
 	sysIssues []string
+
+	// Detailed requirement checks
+	checkResults []RequirementCheck
 
 	// Provider choice
 	providerChoice int // 0=local, 1=remote
@@ -97,6 +110,7 @@ type systemCheckMsg struct {
 	os     string
 	arch   string
 	issues []string
+	checks []RequirementCheck
 }
 
 type ollamaCheckMsg struct {
@@ -141,13 +155,14 @@ func (m WizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sysOS = msg.os
 		m.sysArch = msg.arch
 		m.sysIssues = msg.issues
+		m.checkResults = msg.checks
 		m.working = false
 
 		if msg.ok {
 			m.step = StepProviderChoice
 		} else {
 			m.step = StepError
-			m.err = fmt.Errorf("system requirements not met: %v", msg.issues)
+			m.err = fmt.Errorf("system requirements not met")
 		}
 
 	case ollamaCheckMsg:
@@ -407,20 +422,63 @@ func (m WizardModel) viewWelcome() string {
 func (m WizardModel) viewSystemCheck() string {
 	var b strings.Builder
 
-	if m.working {
-		b.WriteString(textStyle.Render("Checking system requirements..."))
+	b.WriteString(textStyle.Render("System Requirements Check"))
+	b.WriteString("\n\n")
+
+	if len(m.checkResults) == 0 && m.working {
+		b.WriteString(dimStyle.Render("Initializing checks..."))
 		b.WriteString("\n")
-	} else if m.sysOK {
-		b.WriteString(successStyle.Render("✓ System check passed"))
+	}
+
+	// Display all checks with status
+	for _, check := range m.checkResults {
+		var icon string
+		var style lipgloss.Style
+
+		switch check.Status {
+		case "pass":
+			icon = "✓"
+			style = successStyle
+		case "fail":
+			icon = "✗"
+			style = errorStyle
+		case "warning":
+			icon = "⚠"
+			style = lipgloss.NewStyle().Foreground(lipgloss.Color("214")) // orange
+		case "checking":
+			icon = "⏳"
+			style = dimStyle
+		default:
+			icon = "○"
+			style = dimStyle
+		}
+
+		b.WriteString(style.Render(fmt.Sprintf("%s %s", icon, check.Name)))
 		b.WriteString("\n")
-		b.WriteString(dimStyle.Render(fmt.Sprintf("  OS: %s, Arch: %s", m.sysOS, m.sysArch)))
+		b.WriteString(dimStyle.Render(fmt.Sprintf("  %s", check.Description)))
 		b.WriteString("\n")
-	} else {
-		b.WriteString(errorStyle.Render("✗ System check failed"))
-		b.WriteString("\n")
-		for _, issue := range m.sysIssues {
-			b.WriteString(errorStyle.Render(fmt.Sprintf("  • %s", issue)))
+
+		if check.Message != "" {
+			b.WriteString(dimStyle.Render(fmt.Sprintf("  → %s", check.Message)))
 			b.WriteString("\n")
+		}
+		b.WriteString("\n")
+	}
+
+	// Summary
+	if !m.working && len(m.checkResults) > 0 {
+		if m.sysOK {
+			b.WriteString("\n")
+			b.WriteString(successStyle.Render("All required checks passed!"))
+			b.WriteString("\n")
+		} else {
+			b.WriteString("\n")
+			b.WriteString(errorStyle.Render("Some required checks failed."))
+			b.WriteString("\n")
+			for _, issue := range m.sysIssues {
+				b.WriteString(errorStyle.Render(fmt.Sprintf("  • %s", issue)))
+				b.WriteString("\n")
+			}
 		}
 	}
 
@@ -454,21 +512,77 @@ func (m WizardModel) viewProviderChoice() string {
 
 func (m WizardModel) viewLocalSetup() string {
 	var b strings.Builder
-	b.WriteString(textStyle.Render("Configuring local LLM (Ollama)..."))
+	b.WriteString(textStyle.Render("Local LLM Setup (Ollama)"))
 	b.WriteString("\n\n")
 
-	for _, msg := range m.message {
-		b.WriteString(dimStyle.Render(msg))
-		b.WriteString("\n")
+	// Show setup steps with status
+	steps := []struct {
+		name   string
+		desc   string
+		status string
+	}{
+		{
+			name:   "Install Ollama",
+			desc:   "Download and install Ollama runtime",
+			status: m.getStepStatus(m.ollamaInstalled, m.working && !m.ollamaInstalled),
+		},
+		{
+			name:   "Start Ollama Service",
+			desc:   "Launch Ollama background service",
+			status: m.getStepStatus(m.ollamaRunning, m.working && m.ollamaInstalled && !m.ollamaRunning),
+		},
+		{
+			name:   fmt.Sprintf("Pull %s Model", m.selectedModel),
+			desc:   "Download LLM model (~4GB)",
+			status: m.getStepStatus(m.modelPulled, m.working && m.ollamaRunning && !m.modelPulled),
+		},
 	}
 
-	if m.working {
-		b.WriteString(textStyle.Render("⏳ Working..."))
+	for _, step := range steps {
+		var icon string
+		var style lipgloss.Style
+
+		switch step.status {
+		case "pass":
+			icon = "✓"
+			style = successStyle
+		case "working":
+			icon = "⏳"
+			style = dimStyle
+		case "pending":
+			icon = "○"
+			style = dimStyle
+		}
+
+		b.WriteString(style.Render(fmt.Sprintf("%s %s", icon, step.name)))
 		b.WriteString("\n")
+		b.WriteString(dimStyle.Render(fmt.Sprintf("  %s", step.desc)))
+		b.WriteString("\n\n")
+	}
+
+	// Show progress messages
+	if len(m.message) > 0 {
+		b.WriteString("\n")
+		b.WriteString(textStyle.Render("Progress:"))
+		b.WriteString("\n")
+		for _, msg := range m.message {
+			b.WriteString(dimStyle.Render(fmt.Sprintf("  • %s", msg)))
+			b.WriteString("\n")
+		}
 	}
 
 	b.WriteString("\n")
 	return b.String()
+}
+
+func (m WizardModel) getStepStatus(completed bool, working bool) string {
+	if completed {
+		return "pass"
+	}
+	if working {
+		return "working"
+	}
+	return "pending"
 }
 
 func (m WizardModel) viewRemoteSetup() string {
@@ -573,20 +687,144 @@ func (m WizardModel) viewError() string {
 // Commands
 func (m WizardModel) checkSystem() tea.Cmd {
 	return func() tea.Msg {
-		os := runtime.GOOS
+		osName := runtime.GOOS
 		arch := runtime.GOARCH
 		issues := []string{}
+		checks := []RequirementCheck{}
 
-		// Check supported platforms
-		if os != "darwin" && os != "linux" && os != "windows" {
-			issues = append(issues, fmt.Sprintf("unsupported OS: %s", os))
+		// Check 1: Operating System
+		osCheck := RequirementCheck{
+			Name:        "Operating System",
+			Description: "Supported: Linux, macOS, Windows",
+			Required:    true,
+			Status:      "checking",
 		}
+
+		if osName == "darwin" {
+			osCheck.Status = "pass"
+			osCheck.Message = fmt.Sprintf("macOS (%s) supported", arch)
+		} else if osName == "linux" {
+			osCheck.Status = "pass"
+			osCheck.Message = fmt.Sprintf("Linux (%s) supported", arch)
+		} else if osName == "windows" {
+			osCheck.Status = "pass"
+			osCheck.Message = fmt.Sprintf("Windows (%s) supported", arch)
+		} else {
+			osCheck.Status = "fail"
+			osCheck.Message = fmt.Sprintf("%s is not supported", osName)
+			issues = append(issues, fmt.Sprintf("Unsupported OS: %s", osName))
+		}
+		checks = append(checks, osCheck)
+
+		// Check 2: Architecture
+		archCheck := RequirementCheck{
+			Name:        "CPU Architecture",
+			Description: "64-bit processor required",
+			Required:    true,
+			Status:      "checking",
+		}
+
+		if arch == "amd64" || arch == "arm64" {
+			archCheck.Status = "pass"
+			archCheck.Message = fmt.Sprintf("%s supported", arch)
+		} else {
+			archCheck.Status = "fail"
+			archCheck.Message = fmt.Sprintf("%s not supported (need amd64 or arm64)", arch)
+			issues = append(issues, fmt.Sprintf("Unsupported architecture: %s", arch))
+		}
+		checks = append(checks, archCheck)
+
+		// Check 3: Memory (basic check)
+		memCheck := RequirementCheck{
+			Name:        "System Memory",
+			Description: "Recommended: 8GB+ for local LLM",
+			Required:    false,
+			Status:      "warning",
+			Message:     "Cannot detect available RAM - ensure 8GB+ for local LLM",
+		}
+		checks = append(checks, memCheck)
+
+		// Check 4: Network connectivity
+		netCheck := RequirementCheck{
+			Name:        "Network Connectivity",
+			Description: "Required for model downloads and remote LLM",
+			Required:    false,
+			Status:      "pass",
+			Message:     "Network check skipped (will verify during setup)",
+		}
+		checks = append(checks, netCheck)
+
+		// Check 5: Disk space
+		diskCheck := RequirementCheck{
+			Name:        "Disk Space",
+			Description: "Recommended: 10GB+ for Ollama models",
+			Required:    false,
+			Status:      "pass",
+			Message:     "Disk space check skipped (will verify during model pull)",
+		}
+		checks = append(checks, diskCheck)
+
+		// Check 6: Package manager (for local LLM setup)
+		pkgCheck := RequirementCheck{
+			Name:        "Package Manager",
+			Description: "brew (macOS) or curl (Linux) for Ollama install",
+			Required:    false,
+			Status:      "checking",
+		}
+
+		if osName == "darwin" {
+			// Check for brew
+			if _, err := exec.LookPath("brew"); err == nil {
+				pkgCheck.Status = "pass"
+				pkgCheck.Message = "Homebrew found"
+			} else {
+				pkgCheck.Status = "warning"
+				pkgCheck.Message = "Homebrew not found - will use curl fallback"
+			}
+		} else if osName == "linux" {
+			// Check for curl
+			if _, err := exec.LookPath("curl"); err == nil {
+				pkgCheck.Status = "pass"
+				pkgCheck.Message = "curl found"
+			} else {
+				pkgCheck.Status = "warning"
+				pkgCheck.Message = "curl not found - may need manual Ollama install"
+			}
+		} else if osName == "windows" {
+			pkgCheck.Status = "warning"
+			pkgCheck.Message = "Ollama must be installed manually on Windows"
+		}
+		checks = append(checks, pkgCheck)
+
+		// Check 7: Existing Ollama installation
+		ollamaCheck := RequirementCheck{
+			Name:        "Ollama",
+			Description: "Local LLM runtime (optional - will install if needed)",
+			Required:    false,
+			Status:      "checking",
+		}
+
+		installed, running, path, _ := CheckOllama()
+		if installed {
+			if running {
+				ollamaCheck.Status = "pass"
+				ollamaCheck.Message = fmt.Sprintf("Installed and running (%s)", path)
+			} else {
+				ollamaCheck.Status = "warning"
+				ollamaCheck.Message = fmt.Sprintf("Installed but not running (%s)", path)
+			}
+		} else {
+			ollamaCheck.Status = "pass"
+			ollamaCheck.Message = "Not installed - will install during local setup"
+		}
+		checks = append(checks, ollamaCheck)
 
 		return systemCheckMsg{
 			ok:     len(issues) == 0,
-			os:     os,
+			os:     osName,
 			arch:   arch,
 			issues: issues,
+			checks: checks,
 		}
 	}
 }
