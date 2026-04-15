@@ -1,14 +1,25 @@
 package tui
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/Syfra3/vela/internal/cache"
+	"github.com/Syfra3/vela/internal/config"
+	"github.com/Syfra3/vela/internal/detect"
+	"github.com/Syfra3/vela/internal/export"
+	"github.com/Syfra3/vela/internal/extract"
+	"github.com/Syfra3/vela/internal/graph"
+	"github.com/Syfra3/vela/internal/llm"
 	"github.com/Syfra3/vela/internal/setup"
+	"github.com/Syfra3/vela/pkg/types"
 )
 
 // ---------------------------------------------------------------------------
@@ -24,6 +35,8 @@ const (
 	screenQuery
 	screenConfig
 	screenDoctor
+	screenObsidian
+	screenGraphStatus
 )
 
 type menuItem struct {
@@ -42,11 +55,14 @@ type MenuModel struct {
 	installed  bool   // MCP installation status
 
 	// Nested screens can inject themselves here
-	extractModel  ExtractModel
-	queryModel    QueryModel
-	doctorModel   DoctorModel
-	configModel   ConfigViewModel
-	installWizard setup.WizardModel
+	extractModel     ExtractModel
+	queryModel       QueryModel
+	doctorModel      DoctorModel
+	configModel      ConfigViewModel
+	installWizard    setup.WizardModel
+	obsidianResult   string
+	obsidianErr      error
+	graphStatusModel GraphStatusModel
 }
 
 // NewMenuModel creates the main menu TUI.
@@ -75,9 +91,19 @@ func (m *MenuModel) rebuildMenu() {
 
 	m.items = append(m.items, []menuItem{
 		{
+			label:       "Graph Status",
+			description: "View metrics: nodes, edges, connectivity, vault health",
+			key:         "graphstatus",
+		},
+		{
 			label:       "Extract",
 			description: "Extract knowledge graph from directory",
 			key:         "extract",
+		},
+		{
+			label:       "Export to Obsidian",
+			description: "Export graph.json to Obsidian vault",
+			key:         "obsidian",
 		},
 		{
 			label:       "Query",
@@ -111,6 +137,34 @@ func (m MenuModel) Init() tea.Cmd {
 }
 
 func (m MenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Handle global extraction messages
+	switch msg := msg.(type) {
+	case extractionStartMsg:
+		return m, runExtraction(msg.dir, msg.mode)
+
+	case extractionProgressMsg:
+		if m.screen == screenExtract {
+			m.extractModel.processedFiles = msg.current
+			m.extractModel.totalFiles = msg.total
+			m.extractModel.currentFile = msg.file
+		}
+		// Keep ticking for more progress updates
+		return m, tickExtractionProgress()
+
+	case extractionCompleteMsg:
+		if m.screen == screenExtract {
+			m.extractModel.extracting = false
+			if msg.success {
+				m.message = fmt.Sprintf("✓ Extraction complete: %s", msg.dir)
+			} else {
+				m.message = fmt.Sprintf("✗ Extraction failed: %v", msg.err)
+			}
+			m.screen = screenMain
+		}
+		return m, nil
+	}
+
+	// Route to screen-specific updates
 	switch m.screen {
 	case screenMain:
 		return m.updateMain(msg)
@@ -124,6 +178,10 @@ func (m MenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateConfig(msg)
 	case screenDoctor:
 		return m.updateDoctor(msg)
+	case screenObsidian:
+		return m.updateObsidian(msg)
+	case screenGraphStatus:
+		return m.updateGraphStatus(msg)
 	}
 	return m, nil
 }
@@ -142,6 +200,10 @@ func (m MenuModel) View() string {
 		return m.viewConfig()
 	case screenDoctor:
 		return m.viewDoctor()
+	case screenObsidian:
+		return m.viewObsidian()
+	case screenGraphStatus:
+		return m.viewGraphStatus()
 	}
 	return ""
 }
@@ -180,12 +242,20 @@ func (m MenuModel) updateMain(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m MenuModel) handleMenuSelect() (tea.Model, tea.Cmd) {
 	key := m.items[m.cursor].key
 	switch key {
+	case "graphstatus":
+		m.screen = screenGraphStatus
+		m.graphStatusModel = NewGraphStatusModel()
+		return m, m.graphStatusModel.Init()
 	case "install":
 		m.screen = screenInstall
 		m.installWizard = setup.NewWizard()
+		return m, m.installWizard.Init()
 	case "extract":
 		m.screen = screenExtract
 		m.extractModel = NewExtractModel()
+	case "obsidian":
+		m.screen = screenObsidian
+		return m, exportToObsidianCmd()
 	case "query":
 		m.screen = screenQuery
 		m.queryModel = NewQueryModel()
@@ -359,10 +429,14 @@ func (m MenuModel) updateExtract(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	if m.extractModel.Starting() {
-		// TODO: launch actual extraction with m.extractModel.Directory()
-		m.message = fmt.Sprintf("Extraction started for: %s", m.extractModel.Directory())
-		m.screen = screenMain
-		return m, nil
+		dir := m.extractModel.Directory()
+		mode := m.extractModel.Mode()
+		// Reset starting flag after launching
+		m.extractModel.starting = false
+		m.extractModel.extracting = true
+		m.extractModel.step = stepExtracting
+		// Launch extraction in background
+		return m, launchExtraction(dir, mode)
 	}
 
 	return m, cmd
@@ -404,9 +478,29 @@ func (m MenuModel) updateDoctor(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m MenuModel) updateGraphStatus(msg tea.Msg) (tea.Model, tea.Cmd) {
+	updated, cmd := m.graphStatusModel.Update(msg)
+	m.graphStatusModel = updated.(GraphStatusModel)
+
+	if m.graphStatusModel.Quitting() {
+		m.screen = screenMain
+		return m, nil
+	}
+
+	return m, cmd
+}
+
 // ---------------------------------------------------------------------------
-// View Screens (stubs)
+// View Screens
 // ---------------------------------------------------------------------------
+
+func (m MenuModel) viewGraphStatus() string {
+	var b strings.Builder
+	b.WriteString(m.renderHeader("Graph Status"))
+	b.WriteString(m.graphStatusModel.ViewContent())
+	b.WriteString(m.renderFooter(m.graphStatusModel.FooterHelp()))
+	return appStyle.Render(b.String())
+}
 
 func (m MenuModel) viewInstall() string {
 	var b strings.Builder
@@ -420,7 +514,7 @@ func (m MenuModel) viewExtract() string {
 	var b strings.Builder
 	b.WriteString(m.renderHeader("Extract — Knowledge Graph"))
 	b.WriteString(m.extractModel.ViewContent())
-	b.WriteString(m.renderFooter("Enter start extraction • esc back to menu"))
+	b.WriteString(m.renderFooter(m.extractModel.FooterHelp()))
 	return appStyle.Render(b.String())
 }
 
@@ -449,6 +543,356 @@ func (m MenuModel) viewDoctor() string {
 		footer = "r re-check • esc back to menu"
 	}
 	b.WriteString(m.renderFooter(footer))
+	return appStyle.Render(b.String())
+}
+
+// ---------------------------------------------------------------------------
+// Extraction Launcher
+// ---------------------------------------------------------------------------
+
+type extractionStartMsg struct {
+	dir  string
+	mode ExtractionMode
+}
+
+type extractionProgressMsg struct {
+	current int
+	total   int
+	file    string
+}
+
+type extractionCompleteMsg struct {
+	success bool
+	dir     string
+	err     error
+}
+
+func launchExtraction(dir string, mode ExtractionMode) tea.Cmd {
+	return func() tea.Msg {
+		return extractionStartMsg{dir: dir, mode: mode}
+	}
+}
+
+func runExtraction(dir string, mode ExtractionMode) tea.Cmd {
+	return tea.Batch(
+		startExtractionWorker(dir, mode),
+		tickExtractionProgress(),
+	)
+}
+
+type extractionState struct {
+	files          []string
+	processedCount int
+	currentFile    string
+	done           bool
+	err            error
+}
+
+var globalExtractionState *extractionState
+
+func startExtractionWorker(dir string, mode ExtractionMode) tea.Cmd {
+	return func() tea.Msg {
+		// Load config
+		cfg, err := config.Load()
+		if err != nil {
+			return extractionCompleteMsg{success: false, dir: dir, err: fmt.Errorf("loading config: %w", err)}
+		}
+
+		// Build LLM provider (nil = no LLM, code-only mode)
+		var provider types.LLMProvider
+		if cfg.LLM.Provider != "" && cfg.LLM.Provider != "none" {
+			llmClient, err := llm.NewClient(&cfg.LLM)
+			if err == nil {
+				provider = llmClient
+			}
+		}
+
+		// Load cache
+		fileCache, _ := cache.Load(cfg.Extraction.CacheDir)
+
+		// Ensure .velignore exists
+		_, _ = detect.EnsureVelignore(dir)
+
+		// Discover files
+		exts := []string{".go", ".py", ".ts", ".tsx", ".js", ".jsx", ".md", ".txt", ".pdf"}
+		files, err := detect.Collect(dir, exts)
+		if err != nil {
+			return extractionCompleteMsg{success: false, dir: dir, err: fmt.Errorf("detecting files: %w", err)}
+		}
+		if len(files) == 0 {
+			return extractionCompleteMsg{success: false, dir: dir, err: fmt.Errorf("no files found")}
+		}
+
+		// Initialize global state for progress tracking
+		globalExtractionState = &extractionState{
+			files:          files,
+			processedCount: 0,
+			done:           false,
+		}
+
+		// Process files in background
+		go func() {
+			const outDir = "vela-out"
+
+			// ModeRegenerate: discard cache and skip seeding so every file
+			// is re-extracted from scratch.
+			// ModeUpdate (default): seed from existing graph.json and
+			// respect the cache for unchanged files.
+			var seededNodes []types.Node
+			var seededEdges []types.Edge
+			if mode == ModeRegenerate {
+				fileCache = nil // force full re-extraction
+			} else if existing, readErr := loadExistingGraph(outDir + "/graph.json"); readErr == nil {
+				seededNodes = existing.Nodes
+				seededEdges = existing.Edges
+			} else if fileCache != nil {
+				// No existing graph — discard cache to force full re-extraction.
+				fileCache = nil
+			}
+
+			// freshNodes/freshEdges accumulate results from files that need
+			// re-extraction (cache miss). We keep them separate so the filter
+			// step below only removes stale seeded data, not new results.
+			var freshNodes []types.Node
+			var freshEdges []types.Edge
+
+			// Track which files are being re-extracted so we can remove
+			// their stale entries from the seeded baseline.
+			reextractedFiles := make(map[string]bool)
+
+			for i, f := range files {
+				rel := extract.RelPath(dir, f)
+				globalExtractionState.currentFile = rel
+
+				// Cache check — skip files that haven't changed
+				if fileCache != nil {
+					sha, shaErr := cache.SHA256File(f)
+					if shaErr == nil && fileCache.IsCached(f, sha) {
+						globalExtractionState.processedCount++
+						continue
+					}
+				}
+
+				reextractedFiles[rel] = true
+
+				// Extract nodes and edges
+				nodes, edges, extractErr := extract.ExtractAll(dir, []string{f}, provider, cfg.LLM.MaxChunkTokens)
+				if extractErr == nil {
+					freshNodes = append(freshNodes, nodes...)
+					freshEdges = append(freshEdges, edges...)
+
+					// Mark in cache
+					if fileCache != nil {
+						if sha, shaErr := cache.SHA256File(f); shaErr == nil {
+							fileCache.Mark(f, sha)
+						}
+					}
+				}
+
+				globalExtractionState.processedCount = i + 1
+			}
+
+			// Drop stale entries for re-extracted files from the seed, then
+			// combine with freshly-extracted results.
+			if len(reextractedFiles) > 0 {
+				seededNodes = filterNodesByFile(seededNodes, reextractedFiles)
+				seededEdges = filterEdgesByFile(seededEdges, reextractedFiles)
+			}
+			allNodes := append(seededNodes, freshNodes...)
+			allEdges := append(seededEdges, freshEdges...)
+
+			// Save cache
+			if fileCache != nil {
+				_ = fileCache.Save()
+			}
+
+			// Build graph and write JSON
+			g, buildErr := graph.Build(allNodes, allEdges)
+			if buildErr == nil {
+				tg := g.ToTypes()
+				if writeErr := export.WriteJSON(tg, outDir); writeErr != nil {
+					globalExtractionState.err = fmt.Errorf("writing graph.json: %w", writeErr)
+				}
+			} else {
+				globalExtractionState.err = fmt.Errorf("building graph: %w", buildErr)
+			}
+
+			globalExtractionState.done = true
+		}()
+
+		return nil
+	}
+}
+
+func tickExtractionProgress() tea.Cmd {
+	return tea.Tick(200*time.Millisecond, func(t time.Time) tea.Msg {
+		if globalExtractionState == nil {
+			return extractionProgressMsg{current: 0, total: 0, file: "Initializing..."}
+		}
+
+		if globalExtractionState.done {
+			if globalExtractionState.err != nil {
+				return extractionCompleteMsg{success: false, dir: "vela-out", err: globalExtractionState.err}
+			}
+			return extractionCompleteMsg{success: true, dir: "vela-out", err: nil}
+		}
+
+		return extractionProgressMsg{
+			current: globalExtractionState.processedCount,
+			total:   len(globalExtractionState.files),
+			file:    globalExtractionState.currentFile,
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// Graph helpers for incremental extraction
+// ---------------------------------------------------------------------------
+
+// loadExistingGraph reads a previously written graph.json and returns its
+// nodes and edges as types.Node / types.Edge slices. Used to seed the
+// accumulator so that cached (unchanged) files still contribute their data.
+//
+// graph.json uses "file" (not "source_file") for the export format — see
+// internal/export/json.go. We match that schema here explicitly.
+func loadExistingGraph(path string) (*types.Graph, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var raw struct {
+		Nodes []struct {
+			ID    string `json:"id"`
+			Label string `json:"label"`
+			Kind  string `json:"kind"`
+			File  string `json:"file"`
+		} `json:"nodes"`
+		Edges []struct {
+			From string `json:"from"`
+			To   string `json:"to"`
+			Kind string `json:"kind"`
+			File string `json:"file"`
+		} `json:"edges"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+
+	g := &types.Graph{
+		Nodes: make([]types.Node, len(raw.Nodes)),
+		Edges: make([]types.Edge, len(raw.Edges)),
+	}
+	for i, n := range raw.Nodes {
+		g.Nodes[i] = types.Node{ID: n.ID, Label: n.Label, NodeType: n.Kind, SourceFile: n.File}
+	}
+	for i, e := range raw.Edges {
+		g.Edges[i] = types.Edge{Source: e.From, Target: e.To, Relation: e.Kind, SourceFile: e.File}
+	}
+	return g, nil
+}
+
+// filterNodesByFile removes nodes whose SourceFile is in reextracted, so that
+// fresh results can be appended without duplicates.
+func filterNodesByFile(nodes []types.Node, reextracted map[string]bool) []types.Node {
+	out := nodes[:0]
+	for _, n := range nodes {
+		if !reextracted[n.SourceFile] {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// filterEdgesByFile removes edges whose SourceFile is in reextracted.
+func filterEdgesByFile(edges []types.Edge, reextracted map[string]bool) []types.Edge {
+	out := edges[:0]
+	for _, e := range edges {
+		if !reextracted[e.SourceFile] {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
+// Obsidian Export
+// ---------------------------------------------------------------------------
+
+type obsidianExportMsg struct {
+	success bool
+	path    string
+	err     error
+}
+
+func exportToObsidianCmd() tea.Cmd {
+	return func() tea.Msg {
+		const defaultGraphFile = "vela-out/graph.json"
+		const defaultOutDir = "vela-out"
+
+		// graph.json uses "from"/"to"/"kind" (export format from WriteJSON),
+		// NOT the types.Graph JSON tags ("source"/"target"/"relation"/"type").
+		// Unmarshal via the same raw struct used by loadExistingGraph.
+		g, err := loadExistingGraph(defaultGraphFile)
+		if err != nil {
+			return obsidianExportMsg{success: false, err: fmt.Errorf("reading graph.json: %w", err)}
+		}
+
+		// Export to Obsidian
+		if err := export.WriteObsidian(g, defaultOutDir); err != nil {
+			return obsidianExportMsg{success: false, err: fmt.Errorf("writing obsidian vault: %w", err)}
+		}
+
+		// Get absolute path
+		absPath, _ := filepath.Abs(defaultOutDir + "/obsidian")
+		return obsidianExportMsg{success: true, path: absPath}
+	}
+}
+
+func (m MenuModel) updateObsidian(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case tea.KeyMsg:
+		switch msg.String() {
+		case "ctrl+c", "esc":
+			m.screen = screenMain
+			return m, nil
+		}
+	case obsidianExportMsg:
+		if msg.success {
+			m.obsidianResult = fmt.Sprintf("✓ Exported to %s", msg.path)
+			m.obsidianErr = nil
+		} else {
+			m.obsidianResult = ""
+			m.obsidianErr = msg.err
+		}
+	}
+	return m, nil
+}
+
+func (m MenuModel) viewObsidian() string {
+	var b strings.Builder
+	b.WriteString(m.renderHeader("Export to Obsidian"))
+
+	textStyle := lipgloss.NewStyle().Foreground(colorText)
+	successStyle := lipgloss.NewStyle().Foreground(colorSuccess).Bold(true)
+	errorStyle := lipgloss.NewStyle().Foreground(colorErr)
+
+	if m.obsidianErr != nil {
+		b.WriteString(errorStyle.Render(fmt.Sprintf("Error: %v", m.obsidianErr)))
+		b.WriteString("\n\n")
+		b.WriteString(textStyle.Render("Ensure you have run 'vela extract' first to generate graph.json"))
+		b.WriteString("\n")
+	} else if m.obsidianResult != "" {
+		b.WriteString(successStyle.Render(m.obsidianResult))
+		b.WriteString("\n\n")
+		b.WriteString(textStyle.Render("Open the vault in Obsidian and use Graph View to visualize."))
+		b.WriteString("\n")
+	} else {
+		b.WriteString(textStyle.Render("Exporting graph.json to Obsidian vault..."))
+		b.WriteString("\n")
+	}
+
+	b.WriteString(m.renderFooter("esc back to menu"))
 	return appStyle.Render(b.String())
 }
 

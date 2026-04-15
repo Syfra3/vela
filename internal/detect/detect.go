@@ -2,6 +2,7 @@ package detect
 
 import (
 	"bufio"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -141,4 +142,83 @@ func isIgnored(rel string, isDir bool, patterns []string) bool {
 		}
 	}
 	return false
+}
+
+// EnsureVelignore creates a .velignore file at root if it doesn't exist.
+// Returns the path to the created file or empty string if already exists.
+func EnsureVelignore(root string) (string, error) {
+	path := filepath.Join(root, ".velignore")
+	if _, err := os.Stat(path); err == nil {
+		return "", nil // Already exists
+	}
+
+	template := `# Vela ignore patterns (gitignore-style syntax)
+# https://github.com/Syfra3/vela
+
+# Dependencies
+node_modules/
+vendor/
+.pnpm-store/
+
+# Build artifacts
+dist/
+build/
+target/
+*.o
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+credentials.json
+secrets.yaml
+
+# Caches
+.cache/
+.next/
+.nuxt/
+.turbo/
+*.pyc
+__pycache__/
+
+# IDE & OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Vela output
+vela-out/
+
+# Logs
+*.log
+logs/
+
+# Test coverage
+coverage/
+*.coverage
+htmlcov/
+
+# Large media (optional — uncomment if needed)
+# *.mp4
+# *.mov
+# *.avi
+# *.mkv
+# *.zip
+# *.tar.gz
+`
+
+	if err := os.WriteFile(path, []byte(template), 0644); err != nil {
+		return "", fmt.Errorf("writing .velignore: %w", err)
+	}
+
+	return path, nil
 }

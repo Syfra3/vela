@@ -117,6 +117,8 @@ type systemCheckMsg struct {
 	hardware *HardwareInfo
 }
 
+type startPullMsg struct{}
+
 type ollamaCheckMsg struct {
 	installed bool
 	running   bool
@@ -163,14 +165,11 @@ func (m WizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.hardware = msg.hardware
 		m.working = false
 
-		if msg.ok {
-			// Auto-advance after showing hardware for 2 seconds
-			time.Sleep(1 * time.Second)
-			m.step = StepProviderChoice
-		} else {
+		if !msg.ok {
 			m.step = StepError
 			m.err = fmt.Errorf("system requirements not met")
 		}
+		// Stay on StepSystemCheck — wait for user to press Enter
 
 	case ollamaCheckMsg:
 		m.ollamaInstalled = msg.installed
@@ -203,12 +202,18 @@ func (m WizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.success {
 			m.ollamaRunning = true
 			m.addMessage("✓ Ollama started")
-			time.Sleep(2 * time.Second) // Give Ollama time to start
-			return m, m.pullModel()
+			// Give Ollama time to start before pulling model
+			return m, tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+				return startPullMsg{}
+			})
 		} else {
 			m.step = StepError
 			m.err = msg.err
 		}
+
+	case startPullMsg:
+		m.working = true
+		return m, m.pullModel()
 
 	case modelPullMsg:
 		m.working = false
@@ -297,6 +302,11 @@ func (m WizardModel) handleEnter() (tea.Model, tea.Cmd) {
 		m.step = StepSystemCheck
 		m.working = true
 		return m, m.checkSystem()
+
+	case StepSystemCheck:
+		if m.sysOK && !m.working {
+			m.step = StepProviderChoice
+		}
 
 	case StepProviderChoice:
 		m.providerChoice = m.cursor
@@ -391,6 +401,11 @@ func (m WizardModel) FooterHelp() string {
 	switch m.step {
 	case StepWelcome:
 		return "Enter start setup • esc quit"
+	case StepSystemCheck:
+		if m.sysOK {
+			return "Enter continue • esc quit"
+		}
+		return "esc quit"
 	case StepProviderChoice, StepRemoteSetup, StepMCPConfig:
 		return "↑↓ navigate • Enter select • esc quit"
 	case StepComplete, StepError:
@@ -651,8 +666,8 @@ func (m WizardModel) viewMCPConfig() string {
 	b.WriteString("\n\n")
 
 	options := []string{
-		"OpenCode (Anthropic CLI)",
-		"Claude Desktop",
+		"Claude Code",
+		"OpenCode",
 		"Skip MCP setup",
 	}
 
@@ -769,13 +784,28 @@ func (m WizardModel) checkSystem() tea.Cmd {
 		}
 		checks = append(checks, archCheck)
 
-		// Check 3: Memory (basic check)
+		// Check 3: Memory (use detected hardware)
 		memCheck := RequirementCheck{
 			Name:        "System Memory",
 			Description: "Recommended: 8GB+ for local LLM",
 			Required:    false,
-			Status:      "warning",
-			Message:     "Cannot detect available RAM - ensure 8GB+ for local LLM",
+			Status:      "checking",
+		}
+
+		if hardware != nil && hardware.TotalRAMGB > 0 {
+			if hardware.TotalRAMGB >= 8 {
+				memCheck.Status = "pass"
+				memCheck.Message = fmt.Sprintf("%dGB total, %dGB available", hardware.TotalRAMGB, hardware.FreeRAMGB)
+			} else if hardware.TotalRAMGB >= 4 {
+				memCheck.Status = "warning"
+				memCheck.Message = fmt.Sprintf("%dGB total - consider remote LLM for better performance", hardware.TotalRAMGB)
+			} else {
+				memCheck.Status = "warning"
+				memCheck.Message = fmt.Sprintf("%dGB total - remote LLM recommended", hardware.TotalRAMGB)
+			}
+		} else {
+			memCheck.Status = "warning"
+			memCheck.Message = "Cannot detect RAM - ensure 8GB+ for local LLM"
 		}
 		checks = append(checks, memCheck)
 
@@ -789,13 +819,25 @@ func (m WizardModel) checkSystem() tea.Cmd {
 		}
 		checks = append(checks, netCheck)
 
-		// Check 5: Disk space
+		// Check 5: Disk space (use detected hardware)
 		diskCheck := RequirementCheck{
 			Name:        "Disk Space",
 			Description: "Recommended: 10GB+ for Ollama models",
 			Required:    false,
-			Status:      "pass",
-			Message:     "Disk space check skipped (will verify during model pull)",
+			Status:      "checking",
+		}
+
+		if hardware != nil && hardware.DiskFreeGB > 0 {
+			if hardware.DiskFreeGB >= 10 {
+				diskCheck.Status = "pass"
+				diskCheck.Message = fmt.Sprintf("%dGB available", hardware.DiskFreeGB)
+			} else {
+				diskCheck.Status = "warning"
+				diskCheck.Message = fmt.Sprintf("Only %dGB available - may not fit larger models", hardware.DiskFreeGB)
+			}
+		} else {
+			diskCheck.Status = "pass"
+			diskCheck.Message = "Disk space check skipped (will verify during model pull)"
 		}
 		checks = append(checks, diskCheck)
 
@@ -898,7 +940,7 @@ func (m WizardModel) startOllama() tea.Cmd {
 
 func (m WizardModel) pullModel() tea.Cmd {
 	return func() tea.Msg {
-		err := PullModel(m.selectedModel)
+		err := PullModelSilent(m.selectedModel)
 		return modelPullMsg{
 			success: err == nil,
 			err:     err,
@@ -911,11 +953,11 @@ func (m WizardModel) installMCP() tea.Cmd {
 		var configPath string
 
 		switch m.mcpTarget {
-		case 0:
+		case 0: // Claude Code
+			configPath = getClaudeCodeConfigPath()
+		case 1: // OpenCode
 			configPath = getOpenCodeConfigPath()
-		case 1:
-			configPath = getClaudeDesktopConfigPath()
-		case 2:
+		case 2: // Skip
 			return mcpInstallMsg{success: true, err: nil}
 		}
 

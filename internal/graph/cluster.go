@@ -33,16 +33,27 @@ func RunLeiden(g *Graph) (map[string]int, error) {
 		return nil, fmt.Errorf("leiden script not found: %w", err)
 	}
 
-	// Build input payload
+	// Build input payload using resolved edges only.
+	// e.Target is the resolved node label after Build(); Leiden needs node IDs,
+	// so we map label → nodeID via a labelIndex.
+	labelToID := make(map[string]string, len(g.Nodes))
+	for _, n := range g.Nodes {
+		labelToID[n.Label] = n.ID
+	}
+
 	input := leidenInput{
 		Nodes: make([]string, 0, len(g.Nodes)),
-		Edges: make([]leidenEdge, 0, len(g.EdgeList)),
+		Edges: make([]leidenEdge, 0, len(g.ResolvedEdges)),
 	}
 	for _, n := range g.Nodes {
 		input.Nodes = append(input.Nodes, n.ID)
 	}
-	for _, e := range g.EdgeList {
-		input.Edges = append(input.Edges, leidenEdge{From: e.Source, To: e.Target})
+	for _, e := range g.ResolvedEdges {
+		toID := labelToID[e.Target]
+		if toID == "" {
+			toID = e.Target // fallback: already an ID
+		}
+		input.Edges = append(input.Edges, leidenEdge{From: e.Source, To: toID})
 	}
 
 	payload, err := json.Marshal(input)

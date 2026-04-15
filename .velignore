@@ -1,0 +1,62 @@
+# Vela ignore patterns (gitignore-style syntax)
+# https://github.com/Syfra3/vela
+
+# Dependencies
+node_modules/
+vendor/
+.pnpm-store/
+
+# Build artifacts
+dist/
+build/
+target/
+*.o
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+credentials.json
+secrets.yaml
+
+# Caches
+.cache/
+.next/
+.nuxt/
+.turbo/
+*.pyc
+__pycache__/
+
+# IDE & OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Vela output
+vela-out/
+
+# Logs
+*.log
+logs/
+
+# Test coverage
+coverage/
+*.coverage
+htmlcov/
+
+# Large media (optional — uncomment if needed)
+# *.mp4
+# *.mov
+# *.avi
+# *.mkv
+# *.zip
+# *.tar.gz

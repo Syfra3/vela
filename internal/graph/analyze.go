@@ -48,14 +48,17 @@ func GodNodes(g *Graph, topN int) []types.Node {
 // betweenness centrality: high-degree nodes in different communities that
 // are directly connected are architecturally "surprising").
 func SurpriseEdges(g *Graph, topN int) []types.Edge {
-	if len(g.EdgeList) == 0 {
+	if len(g.ResolvedEdges) == 0 {
 		return nil
 	}
 
 	// Build community lookup: nodeID → communityID
 	commOf := make(map[string]int, len(g.Nodes))
+	// Also build label → nodeID for reverse lookup (targets are labels after resolution)
+	labelToID := make(map[string]string, len(g.Nodes))
 	for _, n := range g.Nodes {
 		commOf[n.ID] = n.Community
+		labelToID[n.Label] = n.ID
 	}
 
 	type scored struct {
@@ -64,10 +67,10 @@ func SurpriseEdges(g *Graph, topN int) []types.Edge {
 	}
 
 	var candidates []scored
-	for _, e := range g.EdgeList {
+	for _, e := range g.ResolvedEdges {
 		cFrom, okFrom := commOf[e.Source]
-		// Target is a label — resolve to node ID via NodeIndex lookup
-		toID := resolveEdgeTarget(g, e.Target)
+		// After Build(), e.Target is the resolved node label — map back to ID.
+		toID := labelToID[e.Target]
 		cTo, okTo := commOf[toID]
 
 		if !okFrom || !okTo {
@@ -124,20 +127,4 @@ func SuggestedQuestions(nodes []types.Node, edges []types.Edge) []string {
 		"Which communities are most isolated from the rest of the graph?",
 		"What are the most unexpected cross-domain connections in this codebase?",
 	}
-}
-
-// resolveEdgeTarget maps an edge Target (which may be a label or ID) to a
-// node ID string using the graph's NodeIndex and label scan.
-func resolveEdgeTarget(g *Graph, target string) string {
-	// Try direct ID hit
-	if _, ok := g.NodeIndex[target]; ok {
-		return target
-	}
-	// Scan by label
-	for _, n := range g.Nodes {
-		if n.Label == target {
-			return n.ID
-		}
-	}
-	return target // return as-is (may be unresolvable)
 }

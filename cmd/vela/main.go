@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -142,6 +143,13 @@ func extractCmd() *cobra.Command {
 				fileCache = nil
 			}
 
+			// Ensure .velignore exists (create if missing)
+			if velignorePath, vErr := detect.EnsureVelignore(root); vErr != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not create .velignore: %v\n", vErr)
+			} else if velignorePath != "" {
+				fmt.Printf("Created %s with default ignore patterns\n", velignorePath)
+			}
+
 			// Discover files
 			exts := []string{".go", ".py", ".ts", ".tsx", ".js", ".jsx", ".md", ".txt", ".pdf"}
 			files, err := detect.Collect(root, exts)
@@ -191,8 +199,27 @@ func extractCmd() *cobra.Command {
 				StartTime:   time.Now(),
 			}
 
-			var allNodes []types.Node
-			var allEdges []types.Edge
+			// Seed from the existing graph.json so that cached (unchanged)
+			// files still contribute their data. Without this, a run where
+			// all files are cache hits produces an empty graph.
+			//
+			// If graph.json does not exist (first run, or manually deleted),
+			// reset the cache so every file is re-extracted — otherwise the
+			// cache would skip all files and produce an empty graph with no
+			// seed to fall back on.
+			var seededNodes []types.Node
+			var seededEdges []types.Edge
+			if sn, se, loadErr := loadExistingGraphData(outDir + "/graph.json"); loadErr == nil {
+				seededNodes = sn
+				seededEdges = se
+			} else if fileCache != nil {
+				// No existing graph — discard cache to force full re-extraction.
+				fileCache = nil
+			}
+
+			var freshNodes []types.Node
+			var freshEdges []types.Edge
+			reextractedFiles := make(map[string]bool)
 
 			for i, f := range files {
 				rel := extract.RelPath(root, f)
@@ -210,6 +237,8 @@ func extractCmd() *cobra.Command {
 					}
 				}
 
+				reextractedFiles[rel] = true
+
 				nodes, edges, err := extract.ExtractAll(root, []string{f}, provider, cfg.LLM.MaxChunkTokens)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", rel, err)
@@ -223,11 +252,19 @@ func extractCmd() *cobra.Command {
 					}
 				}
 
-				allNodes = append(allNodes, nodes...)
-				allEdges = append(allEdges, edges...)
+				freshNodes = append(freshNodes, nodes...)
+				freshEdges = append(freshEdges, edges...)
 				progress.ProcessedFiles++
 				progress.ProcessedChunks = i + 1
 			}
+
+			// Drop stale seeded data for re-extracted files, then merge.
+			if len(reextractedFiles) > 0 {
+				seededNodes = filterBySourceFile(seededNodes, reextractedFiles)
+				seededEdges = filterEdgesBySourceFile(seededEdges, reextractedFiles)
+			}
+			allNodes := append(seededNodes, freshNodes...)
+			allEdges := append(seededEdges, freshEdges...)
 
 			// Save cache
 			if fileCache != nil {
@@ -291,7 +328,7 @@ func extractCmd() *cobra.Command {
 			}
 
 			fmt.Printf("\nGraph written to %s/\n", outDir)
-			fmt.Printf("  Nodes: %d  Edges: %d\n", len(allNodes), len(allEdges))
+			fmt.Printf("  Nodes: %d  Edges: %d\n", g.NodeCount(), g.EdgeCount())
 			fmt.Printf("  graph.json · GRAPH_REPORT.md")
 			if !noViz {
 				fmt.Printf(" · graph.html · obsidian/")
@@ -578,4 +615,62 @@ func isTTY() bool {
 		return false
 	}
 	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
+// loadExistingGraphData reads a previously-written graph.json and returns its
+// nodes and edges. graph.json uses "file" (not "source_file") for the export
+// format — see internal/export/json.go. Returns an error when no graph exists.
+func loadExistingGraphData(path string) ([]types.Node, []types.Edge, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	var raw struct {
+		Nodes []struct {
+			ID    string `json:"id"`
+			Label string `json:"label"`
+			Kind  string `json:"kind"`
+			File  string `json:"file"`
+		} `json:"nodes"`
+		Edges []struct {
+			From string `json:"from"`
+			To   string `json:"to"`
+			Kind string `json:"kind"`
+			File string `json:"file"`
+		} `json:"edges"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, nil, err
+	}
+	nodes := make([]types.Node, len(raw.Nodes))
+	for i, n := range raw.Nodes {
+		nodes[i] = types.Node{ID: n.ID, Label: n.Label, NodeType: n.Kind, SourceFile: n.File}
+	}
+	edges := make([]types.Edge, len(raw.Edges))
+	for i, e := range raw.Edges {
+		edges[i] = types.Edge{Source: e.From, Target: e.To, Relation: e.Kind, SourceFile: e.File}
+	}
+	return nodes, edges, nil
+}
+
+// filterBySourceFile removes nodes whose SourceFile is present in reextracted.
+func filterBySourceFile(nodes []types.Node, reextracted map[string]bool) []types.Node {
+	out := nodes[:0]
+	for _, n := range nodes {
+		if !reextracted[n.SourceFile] {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// filterEdgesBySourceFile removes edges whose SourceFile is present in reextracted.
+func filterEdgesBySourceFile(edges []types.Edge, reextracted map[string]bool) []types.Edge {
+	out := edges[:0]
+	for _, e := range edges {
+		if !reextracted[e.SourceFile] {
+			out = append(out, e)
+		}
+	}
+	return out
 }

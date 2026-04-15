@@ -68,13 +68,25 @@ func installOllamaMac() error {
 	fmt.Println("Homebrew not found. Installing Ollama via curl...")
 	fmt.Println("You may be prompted for your password (sudo)...")
 	fmt.Println("This may take a few minutes...")
-	cmd := exec.Command("bash", "-c", "curl -fsSL https://ollama.com/install.sh | sh")
-	cmd.Stdout = os.Stdout // Show output
-	cmd.Stderr = os.Stderr // Show errors
-	cmd.Stdin = os.Stdin   // Allow password input
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("curl install failed: %w", err)
+
+	// Download script to temp file first (avoids stdin pipe issue)
+	downloadCmd := exec.Command("curl", "-fsSL", "-o", "/tmp/ollama-install.sh", "https://ollama.com/install.sh")
+	// Suppress curl download output
+	if err := downloadCmd.Run(); err != nil {
+		return fmt.Errorf("failed to download install script: %w", err)
 	}
+
+	// Execute script with stdin available for sudo
+	installCmd := exec.Command("sh", "/tmp/ollama-install.sh")
+	installCmd.Stdout = os.Stdout
+	installCmd.Stderr = os.Stderr
+	installCmd.Stdin = os.Stdin // NOW stdin works for sudo
+	if err := installCmd.Run(); err != nil {
+		return fmt.Errorf("install script failed: %w", err)
+	}
+
+	// Cleanup
+	os.Remove("/tmp/ollama-install.sh")
 	return nil
 }
 
@@ -82,13 +94,25 @@ func installOllamaLinux() error {
 	fmt.Println("Installing Ollama via curl...")
 	fmt.Println("You may be prompted for your password (sudo)...")
 	fmt.Println("This may take a few minutes...")
-	cmd := exec.Command("bash", "-c", "curl -fsSL https://ollama.com/install.sh | sh")
-	cmd.Stdout = os.Stdout // Show output
-	cmd.Stderr = os.Stderr // Show errors
-	cmd.Stdin = os.Stdin   // Allow password input
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("curl install failed: %w", err)
+
+	// Download script to temp file first (avoids stdin pipe issue)
+	downloadCmd := exec.Command("curl", "-fsSL", "-o", "/tmp/ollama-install.sh", "https://ollama.com/install.sh")
+	// Suppress curl download output
+	if err := downloadCmd.Run(); err != nil {
+		return fmt.Errorf("failed to download install script: %w", err)
 	}
+
+	// Execute script with stdin available for sudo
+	installCmd := exec.Command("sh", "/tmp/ollama-install.sh")
+	installCmd.Stdout = os.Stdout
+	installCmd.Stderr = os.Stderr
+	installCmd.Stdin = os.Stdin // NOW stdin works for sudo
+	if err := installCmd.Run(); err != nil {
+		return fmt.Errorf("install script failed: %w", err)
+	}
+
+	// Cleanup
+	os.Remove("/tmp/ollama-install.sh")
 	return nil
 }
 
@@ -173,11 +197,21 @@ func GetOllamaModels() ([]string, error) {
 
 // PullModel downloads an Ollama model.
 func PullModel(model string) error {
-	fmt.Printf("Pulling model: %s (~4GB download)\n", model)
-	fmt.Println("This may take 5-15 minutes depending on your connection...")
 	cmd := exec.Command("ollama", "pull", model)
-	cmd.Stdout = os.Stdout // Show progress bar from Ollama
+	cmd.Stdout = os.Stdout // Show progress from Ollama
 	cmd.Stderr = os.Stderr // Show errors
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to pull model %s: %w", model, err)
+	}
+	return nil
+}
+
+// PullModelSilent downloads an Ollama model without output (for TUI mode).
+func PullModelSilent(model string) error {
+	cmd := exec.Command("ollama", "pull", model)
+	// Suppress all output to avoid breaking TUI layout
+	cmd.Stdout = nil
+	cmd.Stderr = nil
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to pull model %s: %w", model, err)
 	}

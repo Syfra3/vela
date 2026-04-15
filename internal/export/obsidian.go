@@ -11,13 +11,16 @@ import (
 
 // WriteObsidian creates an Obsidian vault at outDir/obsidian/.
 // Each node becomes a markdown file with frontmatter and wikilinks to targets.
+// All edges in g.Edges are pre-resolved (dangling references are dropped at
+// graph build time), so every [[wikilink]] points to an existing .md file.
 func WriteObsidian(g *types.Graph, outDir string) error {
 	vaultDir := filepath.Join(outDir, "obsidian")
 	if err := os.MkdirAll(vaultDir, 0755); err != nil {
 		return fmt.Errorf("creating obsidian vault dir: %w", err)
 	}
 
-	// Build outgoing edge index: source node ID → []target labels
+	// Build outgoing edge index: source node ID → []target labels.
+	// e.Target is already the resolved node label after Build().
 	outEdges := make(map[string][]string, len(g.Nodes))
 	for _, e := range g.Edges {
 		outEdges[e.Source] = append(outEdges[e.Source], e.Target)

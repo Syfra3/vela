@@ -21,7 +21,7 @@ func Generate(g *igraph.Graph, outDir string) error {
 
 	godNodes := igraph.GodNodes(g, 5)
 	surprises := igraph.SurpriseEdges(g, 5)
-	questions := igraph.SuggestedQuestions(g.Nodes, g.EdgeList)
+	questions := igraph.SuggestedQuestions(g.Nodes, g.ResolvedEdges)
 	communities := communityMap(g)
 
 	var sb strings.Builder

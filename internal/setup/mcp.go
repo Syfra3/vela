@@ -74,6 +74,7 @@ func getOpenCodeConfigPath() string {
 		return ""
 	}
 
+	// OpenCode uses different config structure than Claude Code
 	switch runtime.GOOS {
 	case "linux":
 		return filepath.Join(home, ".config", "opencode", "mcp_settings.json")
@@ -84,6 +85,17 @@ func getOpenCodeConfigPath() string {
 	default:
 		return ""
 	}
+}
+
+func getClaudeCodeConfigPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	// Claude Code uses ~/.claude/mcp/ directory for MCP server configs
+	// Each server gets its own JSON file (e.g., vela.json)
+	return filepath.Join(home, ".claude", "mcp", "vela.json")
 }
 
 func getClaudeDesktopConfigPath() string {
