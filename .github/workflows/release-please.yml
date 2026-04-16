@@ -41,35 +41,33 @@ jobs:
   build-and-upload:
     needs: release-please
     if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
           - goos: linux
             goarch: amd64
             platform: linux-amd64
-            runner: ubuntu-latest
             zig_target: x86_64-linux-musl
           - goos: linux
             goarch: arm64
             platform: linux-arm64
-            runner: ubuntu-latest
             zig_target: aarch64-linux-musl
           - goos: darwin
             goarch: amd64
             platform: darwin-amd64
-            runner: macos-13
+            zig_target: x86_64-macos-none
           - goos: darwin
             goarch: arm64
             platform: darwin-arm64
-            runner: macos-latest
+            zig_target: aarch64-macos-none
           - goos: windows
             goarch: amd64
             platform: windows-amd64
-            runner: ubuntu-latest
             zig_target: x86_64-windows-gnu
             ext: .exe
 
-    runs-on: ${{ matrix.runner }}
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
