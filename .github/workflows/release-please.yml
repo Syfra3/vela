@@ -48,18 +48,23 @@ jobs:
           - goos: linux
             goarch: amd64
             platform: linux-amd64
+            zig_target: x86_64-linux-musl
           - goos: linux
             goarch: arm64
             platform: linux-arm64
+            zig_target: aarch64-linux-musl
           - goos: darwin
             goarch: amd64
             platform: darwin-amd64
+            zig_target: x86_64-macos-none
           - goos: darwin
             goarch: arm64
             platform: darwin-arm64
+            zig_target: aarch64-macos-none
           - goos: windows
             goarch: amd64
             platform: windows-amd64
+            zig_target: x86_64-windows-gnu
             ext: .exe
 
     steps:
@@ -71,25 +76,32 @@ jobs:
           cache: true
           cache-dependency-path: go.sum
 
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: "0.13.0"
+
       - name: Build binary
         working-directory: .
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
-          CGO_ENABLED: 0
+          CGO_ENABLED: 1
+          CC: zig cc -target ${{ matrix.zig_target }}
+          CXX: zig c++ -target ${{ matrix.zig_target }}
         run: |
           VERSION="${{ needs.release-please.outputs.tag_name }}"
           BINARY_NAME="vela${{ matrix.ext }}"
-          
+
           go build \
             -ldflags="-s -w -X main.version=${VERSION}" \
             -trimpath \
             -o "${BINARY_NAME}" \
             ./cmd/vela
-          
+
           ARCHIVE_NAME="vela-${{ needs.release-please.outputs.version }}-${{ matrix.platform }}.tar.gz"
           tar czf "${ARCHIVE_NAME}" "${BINARY_NAME}"
-          
+
           sha256sum "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
 
       - name: Upload to Release
