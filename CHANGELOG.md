@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.3](https://github.com/Syfra3/vela/compare/v1.1.2...v1.1.3) (2026-04-16)
+
+
+### Bug Fixes
+
+* remove duplicate runs-on in matrix strategy ([0865114](https://github.com/Syfra3/vela/commit/08651149e94f7380a6117d090886bd0a5437bced))
+* use ubuntu for all builds with Zig cross-compilation ([d929bee](https://github.com/Syfra3/vela/commit/d929bee873e76cc77f47e5850f771360f58470d5))
+
 ## [1.1.2](https://github.com/Syfra3/vela/compare/v1.1.1...v1.1.2) (2026-04-16)
 
 
