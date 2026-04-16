@@ -1,0 +1,32 @@
+# Changelog
+
+## [1.0.1](https://github.com/Syfra3/vela/compare/v1.0.0...v1.0.1) (2026-04-16)
+
+
+### Bug Fixes
+
+* **ci:** use zig cc for CGO cross-compilation ([cf79b3b](https://github.com/Syfra3/vela/commit/cf79b3b0e3ab434eb8543739d2a6e265594d0021))
+
+## 1.0.0 (2026-04-16)
+
+
+### Features
+
+* add detailed system requirements checks display to setup wizard ([e5057ca](https://github.com/Syfra3/vela/commit/e5057caaad1a3c79bc05bc3340be060e10331c29))
+* add model selection framework and Syfra ecosystem integration docs ([bf4d22f](https://github.com/Syfra3/vela/commit/bf4d22feef536ffea5bfb154a2a032faed10e469))
+* ancora integration with real-time IPC sync, knowledge graph reconciliation, and release pipeline ([56916a1](https://github.com/Syfra3/vela/commit/56916a140125eb74e5f0c0658a14b5896bacdfe8))
+* ancora integration, real-time IPC sync, knowledge graph, and release pipeline ([dddbcd1](https://github.com/Syfra3/vela/commit/dddbcd1f49eb2329b743696ce44a4c562c00ca6d))
+* bootstrap Vela project structure ([3d3a384](https://github.com/Syfra3/vela/commit/3d3a38400650845bb9296e13bd6ce2bf2f990207))
+* implement Phase 0 PoC — file detect, tree-sitter Go AST, gonum graph, JSON export, TUI, CLI ([1853461](https://github.com/Syfra3/vela/commit/1853461e3fe1fab4bf7fbfb7f89c0e46e2e5c166))
+* implement Phase 1 — Python/TS AST, LLM providers, doc/PDF extraction, chunking, cache, config, doctor ([a7c2465](https://github.com/Syfra3/vela/commit/a7c246565c6208f3ab8343bd180395e873b5feba))
+* implement Phase 2 — Leiden clustering, god nodes, surprise edges, GRAPH_REPORT.md, HTML, Obsidian ([bc01928](https://github.com/Syfra3/vela/commit/bc01928901004e3b8692c29c8e4a9bab7ea0b76d))
+* implement Phase 3 — full Bubbletea TUI with worker pool, query mode, CLI path/explain/query commands ([0d13195](https://github.com/Syfra3/vela/commit/0d1319596d434f2b2090bfcab5bc3a55946aa96f))
+* implement Phase 4 — watch mode, MCP server, Neo4j export, git hooks ([4faff65](https://github.com/Syfra3/vela/commit/4faff65585553d3abdda132bdb3ddbc399b1de77))
+* implement TUI integration with install wizard, extract, query, doctor, and config screens ([58e6ed9](https://github.com/Syfra3/vela/commit/58e6ed9100a764c280da7c38d0b074e4c41f3a28))
+* rebuild setup wizard with comprehensive Ollama dependency management ([b05e116](https://github.com/Syfra3/vela/commit/b05e116a8476327d5346406939b6afc2b2847e54))
+* unify TUI dashboard layout and rebuild setup wizard with linear step-by-step flow ([af6bb21](https://github.com/Syfra3/vela/commit/af6bb21804d024a5497424f71c0564e9ce09b25c))
+
+
+### Bug Fixes
+
+* **wizard:** auto-run system check with hardware detection and show install progress ([ede454b](https://github.com/Syfra3/vela/commit/ede454bc1a6dd5bc53b52328d7c409b92102baa9))
