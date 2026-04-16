@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.2](https://github.com/Syfra3/vela/compare/v1.1.1...v1.1.2) (2026-04-16)
+
+
+### Bug Fixes
+
+* use macos-latest instead of deprecated macos-13 runner ([8ce906f](https://github.com/Syfra3/vela/commit/8ce906fc7d8a76debe552988b7647fb64fc059f0))
+
 ## [1.1.1](https://github.com/Syfra3/vela/compare/v1.1.0...v1.1.1) (2026-04-16)
 
 
