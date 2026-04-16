@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/Syfra3/vela/compare/v1.1.0...v1.1.1) (2026-04-16)
+
+
+### Bug Fixes
+
+* **detect:** add missing Collect and EnsureVelignore functions ([cb8903e](https://github.com/Syfra3/vela/commit/cb8903e1cd5669115c9c6470fd1a73abe0b9a76a))
+
 ## [1.1.0](https://github.com/Syfra3/vela/compare/v1.0.1...v1.1.0) (2026-04-16)
 
 
