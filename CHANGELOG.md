@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.4](https://github.com/Syfra3/vela/compare/v1.1.3...v1.1.4) (2026-04-16)
+
+
+### Bug Fixes
+
+* use macos-14 runners for darwin builds ([a8e2e92](https://github.com/Syfra3/vela/commit/a8e2e92187ab2c0917d2f0e3a0294e4a094bfed6))
+
 ## [1.1.3](https://github.com/Syfra3/vela/compare/v1.1.2...v1.1.3) (2026-04-16)
 
 
