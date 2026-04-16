@@ -41,31 +41,35 @@ jobs:
   build-and-upload:
     needs: release-please
     if: needs.release-please.outputs.release_created == 'true'
-    runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
           - goos: linux
             goarch: amd64
             platform: linux-amd64
+            runner: ubuntu-latest
             zig_target: x86_64-linux-musl
           - goos: linux
             goarch: arm64
             platform: linux-arm64
+            runner: ubuntu-latest
             zig_target: aarch64-linux-musl
           - goos: darwin
             goarch: amd64
             platform: darwin-amd64
-            zig_target: x86_64-macos.12.0-none
+            runner: macos-13
           - goos: darwin
             goarch: arm64
             platform: darwin-arm64
-            zig_target: aarch64-macos.12.0-none
+            runner: macos-latest
           - goos: windows
             goarch: amd64
             platform: windows-amd64
+            runner: ubuntu-latest
             zig_target: x86_64-windows-gnu
             ext: .exe
+
+    runs-on: ${{ matrix.runner }}
 
     steps:
       - uses: actions/checkout@v4
@@ -77,21 +81,25 @@ jobs:
           cache-dependency-path: go.sum
 
       - name: Install Zig
+        if: matrix.zig_target != ''
         uses: goto-bus-stop/setup-zig@v2
         with:
           version: "0.14.0"
 
       - name: Build binary
-        working-directory: .
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: 1
-          CC: zig cc -target ${{ matrix.zig_target }}
-          CXX: zig c++ -target ${{ matrix.zig_target }}
+          ZIG_TARGET: ${{ matrix.zig_target }}
         run: |
           VERSION="${{ needs.release-please.outputs.tag_name }}"
           BINARY_NAME="vela${{ matrix.ext }}"
+
+          if [ -n "$ZIG_TARGET" ]; then
+            export CC="zig cc -target $ZIG_TARGET"
+            export CXX="zig c++ -target $ZIG_TARGET"
+          fi
 
           go build \
             -ldflags="-s -w -X main.version=${VERSION}" \
@@ -102,7 +110,11 @@ jobs:
           ARCHIVE_NAME="vela-${{ needs.release-please.outputs.version }}-${{ matrix.platform }}.tar.gz"
           tar czf "${ARCHIVE_NAME}" "${BINARY_NAME}"
 
-          sha256sum "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
+          if command -v sha256sum &>/dev/null; then
+            sha256sum "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
+          else
+            shasum -a 256 "${ARCHIVE_NAME}" > "${ARCHIVE_NAME}.sha256"
+          fi
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
