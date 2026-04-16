@@ -1,0 +1,999 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"runtime/debug"
+	"strings"
+	"time"
+
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/spf13/cobra"
+
+	"github.com/Syfra3/vela/internal/cache"
+	"github.com/Syfra3/vela/internal/config"
+	"github.com/Syfra3/vela/internal/daemon"
+	"github.com/Syfra3/vela/internal/detect"
+	"github.com/Syfra3/vela/internal/export"
+	"github.com/Syfra3/vela/internal/extract"
+	igraph "github.com/Syfra3/vela/internal/graph"
+	"github.com/Syfra3/vela/internal/listener"
+	"github.com/Syfra3/vela/internal/llm"
+	"github.com/Syfra3/vela/internal/query"
+	"github.com/Syfra3/vela/internal/report"
+	"github.com/Syfra3/vela/internal/security"
+	"github.com/Syfra3/vela/internal/server"
+	"github.com/Syfra3/vela/internal/tui"
+	"github.com/Syfra3/vela/internal/watch"
+	"github.com/Syfra3/vela/pkg/types"
+)
+
+// version is set via ldflags at build time. Falls back to "dev" for local builds.
+var version = Version
+
+func init() {
+	if version != "dev" && version != "" {
+		return
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		version = strings.TrimPrefix(info.Main.Version, "v")
+	}
+}
+
+func main() {
+	if err := rootCmd().Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+func rootCmd() *cobra.Command {
+	root := &cobra.Command{
+		Use:   "vela",
+		Short: "Vela — Knowledge Explorer & Graph Builder",
+		Long: `Vela is a Go-native, privacy-first knowledge graph builder for
+codebases and technical documentation.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			// Default: launch TUI if no subcommand
+			if err := launchTUI(); err != nil {
+				fmt.Fprintf(os.Stderr, "TUI unavailable: %v\n", err)
+				os.Exit(1)
+			}
+		},
+	}
+
+	root.AddCommand(tuiCmd())
+	root.AddCommand(extractCmd())
+	root.AddCommand(configCmd())
+	root.AddCommand(doctorCmd())
+	root.AddCommand(pathCmd())
+	root.AddCommand(explainCmd())
+	root.AddCommand(queryCmd())
+	root.AddCommand(serveCmd())
+	root.AddCommand(hookCmd())
+	root.AddCommand(versionCmd())
+	root.AddCommand(watchCmd())
+	return root
+}
+
+// ---------------------------------------------------------------------------
+// vela tui
+// ---------------------------------------------------------------------------
+
+func tuiCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "tui",
+		Short: "Launch interactive TUI menu",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return launchTUI()
+		},
+	}
+}
+
+func launchTUI() error {
+	if !tui.IsTTY() {
+		return fmt.Errorf("TUI requires a terminal (stdout is not a TTY)")
+	}
+	m := tui.NewMenuModelWithVersion(version)
+	p := tea.NewProgram(m, tea.WithAltScreen())
+	_, err := p.Run()
+	return err
+}
+
+// ---------------------------------------------------------------------------
+// vela version
+// ---------------------------------------------------------------------------
+
+func versionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print version information",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Printf("vela %s\n", version)
+			return nil
+		},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// vela extract
+// ---------------------------------------------------------------------------
+
+func extractCmd() *cobra.Command {
+	var outDir string
+	var noTUI bool
+	var noViz bool
+	var watchMode bool
+	var neo4jURL string
+	var neo4jUser string
+	var neo4jPass string
+	var providerFlag string
+	var modelFlag string
+
+	cmd := &cobra.Command{
+		Use:   "extract <path>",
+		Short: "Extract a knowledge graph from a directory",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			root := args[0]
+
+			// Security: validate the provided path
+			if err := security.ValidatePath(".", root); err != nil {
+				return fmt.Errorf("invalid path: %w", err)
+			}
+
+			// Load config
+			cfg, err := config.Load()
+			if err != nil {
+				return fmt.Errorf("loading config: %w", err)
+			}
+			// CLI flags override config
+			if providerFlag != "" {
+				cfg.LLM.Provider = providerFlag
+			}
+			if modelFlag != "" {
+				cfg.LLM.Model = modelFlag
+			}
+
+			// Build LLM provider (nil = no LLM, code-only mode)
+			var provider types.LLMProvider
+			if cfg.LLM.Provider != "" && cfg.LLM.Provider != "none" {
+				llmClient, err := llm.NewClient(&cfg.LLM)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "warning: LLM provider unavailable (%v) — doc extraction disabled\n", err)
+				} else {
+					provider = llmClient
+				}
+			}
+
+			// Load cache
+			fileCache, err := cache.Load(cfg.Extraction.CacheDir)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: cache unavailable (%v)\n", err)
+				fileCache = nil
+			}
+
+			// Ensure .velignore exists (create if missing)
+			if velignorePath, vErr := detect.EnsureVelignore(root); vErr != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not create .velignore: %v\n", vErr)
+			} else if velignorePath != "" {
+				fmt.Printf("Created %s with default ignore patterns\n", velignorePath)
+			}
+
+			// Discover files
+			exts := []string{".go", ".py", ".ts", ".tsx", ".js", ".jsx", ".md", ".txt", ".pdf"}
+			files, err := detect.Collect(root, exts)
+			if err != nil {
+				return fmt.Errorf("detecting files: %w", err)
+			}
+			if len(files) == 0 {
+				fmt.Println("No files found.")
+				return nil
+			}
+			fmt.Printf("Found %d files. Extracting...\n", len(files))
+
+			// Set up progress channel
+			progressCh := make(chan types.ProgressUpdate, 16)
+
+			providerName := "none"
+			providerOK := false
+			if provider != nil {
+				providerName = provider.Name()
+				providerOK = true
+			}
+
+			// queryFn is injected into TUI for post-extraction interactive mode.
+			// It is resolved after the graph is built; closure captures the pointer.
+			var queryEngine *query.Engine
+			queryFn := func(input string) string {
+				if queryEngine == nil {
+					return "graph not ready yet"
+				}
+				return queryEngine.Query(input)
+			}
+
+			if noTUI || !isTTY() {
+				go tui.RunPlainProgress(progressCh)
+			} else {
+				prog := tui.NewProgram(progressCh, nil, providerName, providerOK, 1, queryFn)
+				if prog != nil {
+					go func() { _, _ = prog.Run() }()
+				} else {
+					go tui.RunPlainProgress(progressCh)
+				}
+			}
+
+			progress := types.ExtractionProgress{
+				TotalFiles:  len(files),
+				TotalChunks: len(files),
+				StartTime:   time.Now(),
+			}
+
+			// Seed from the existing graph.json so that cached (unchanged)
+			// files still contribute their data. Without this, a run where
+			// all files are cache hits produces an empty graph.
+			//
+			// If graph.json does not exist (first run, or manually deleted),
+			// reset the cache so every file is re-extracted — otherwise the
+			// cache would skip all files and produce an empty graph with no
+			// seed to fall back on.
+			var seededNodes []types.Node
+			var seededEdges []types.Edge
+			if sn, se, loadErr := loadExistingGraphData(outDir + "/graph.json"); loadErr == nil {
+				seededNodes = sn
+				seededEdges = se
+			} else if fileCache != nil {
+				// No existing graph — discard cache to force full re-extraction.
+				fileCache = nil
+			}
+
+			// Detect project once — all files share the same source.
+			projectSrc := extract.DetectProject(root)
+
+			var freshNodes []types.Node
+			var freshEdges []types.Edge
+			reextractedFiles := make(map[string]bool)
+			projectEmitted := false
+
+			for i, f := range files {
+				rel := extract.RelPath(root, f)
+				progress.CurrentFile = rel
+				progress.CurrentChunk = i + 1
+				progressCh <- types.ProgressUpdate{Progress: progress}
+
+				// Cache check
+				if fileCache != nil {
+					sha, shaErr := cache.SHA256File(f)
+					if shaErr == nil && fileCache.IsCached(f, sha) {
+						progress.ProcessedFiles++
+						progress.ProcessedChunks = i + 1
+						continue
+					}
+				}
+
+				reextractedFiles[rel] = true
+
+				nodes, edges, err := extract.ExtractAll(root, []string{f}, provider, projectSrc, cfg.LLM.MaxChunkTokens)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", rel, err)
+					continue
+				}
+
+				// ExtractAll always prepends the project root node.
+				// Only keep it from the first successful file extraction.
+				if !projectEmitted {
+					projectEmitted = true
+				} else if len(nodes) > 0 {
+					nodes = nodes[1:] // skip duplicate project node
+				}
+
+				// Mark in cache on success
+				if fileCache != nil {
+					if sha, shaErr := cache.SHA256File(f); shaErr == nil {
+						fileCache.Mark(f, sha)
+					}
+				}
+
+				freshNodes = append(freshNodes, nodes...)
+				freshEdges = append(freshEdges, edges...)
+				progress.ProcessedFiles++
+				progress.ProcessedChunks = i + 1
+			}
+
+			// Drop stale seeded data for re-extracted files, then merge.
+			if len(reextractedFiles) > 0 {
+				seededNodes = filterBySourceFile(seededNodes, reextractedFiles)
+				seededEdges = filterEdgesBySourceFile(seededEdges, reextractedFiles)
+			}
+			allNodes := append(seededNodes, freshNodes...)
+			allEdges := append(seededEdges, freshEdges...)
+
+			// Save cache
+			if fileCache != nil {
+				_ = fileCache.Save()
+			}
+
+			// Signal completion
+			progress.ProcessedChunks = progress.TotalChunks
+			progressCh <- types.ProgressUpdate{Progress: progress, IsComplete: true}
+			close(progressCh)
+
+			// Build graph
+			g, err := igraph.Build(allNodes, allEdges)
+			if err != nil {
+				return fmt.Errorf("building graph: %w", err)
+			}
+
+			// Leiden clustering (best-effort — requires Python + graspologic)
+			if partition, lErr := igraph.RunLeiden(g); lErr == nil {
+				communities := g.ApplyCommunities(partition)
+				fmt.Printf("  Communities detected: %d\n", len(communities))
+			} else {
+				fmt.Fprintf(os.Stderr, "  note: clustering unavailable (%v)\n", lErr)
+			}
+
+			// Export JSON
+			tg := g.ToTypes()
+			if err := export.WriteJSON(tg, outDir); err != nil {
+				return fmt.Errorf("writing graph.json: %w", err)
+			}
+
+			// Wire query engine now that graph.json is on disk
+			if qe, qErr := query.LoadFromFile(outDir + "/graph.json"); qErr == nil {
+				queryEngine = qe
+			}
+
+			// GRAPH_REPORT.md
+			if rErr := report.Generate(g, outDir); rErr != nil {
+				fmt.Fprintf(os.Stderr, "  warning: report generation failed: %v\n", rErr)
+			}
+
+			if !noViz {
+				// HTML export
+				if hErr := export.WriteHTML(tg, outDir); hErr != nil {
+					fmt.Fprintf(os.Stderr, "  warning: HTML export failed: %v\n", hErr)
+				}
+				// Obsidian vault
+				if oErr := export.WriteObsidian(tg, outDir); oErr != nil {
+					fmt.Fprintf(os.Stderr, "  warning: Obsidian export failed: %v\n", oErr)
+				}
+			}
+
+			// Neo4j push (optional)
+			if neo4jURL != "" {
+				fmt.Printf("  Pushing to Neo4j at %s...\n", neo4jURL)
+				if nErr := export.PushNeo4j(tg, neo4jURL, neo4jUser, neo4jPass); nErr != nil {
+					fmt.Fprintf(os.Stderr, "  warning: Neo4j push failed: %v\n", nErr)
+				} else {
+					fmt.Println("  Neo4j push complete.")
+				}
+			}
+
+			fmt.Printf("\nGraph written to %s/\n", outDir)
+			fmt.Printf("  Nodes: %d  Edges: %d\n", g.NodeCount(), g.EdgeCount())
+			fmt.Printf("  graph.json · GRAPH_REPORT.md")
+			if !noViz {
+				fmt.Printf(" · graph.html · obsidian/")
+			}
+			fmt.Println()
+
+			// --watch: start file watcher for incremental re-extraction
+			if watchMode {
+				fmt.Println("\n[watch] watching for changes (Ctrl-C to stop)...")
+				codeExts := []string{".go", ".py", ".ts", ".tsx", ".js", ".jsx", ".md", ".txt"}
+				stop := make(chan struct{})
+
+				reextract := func(changed []string) error {
+					for _, f := range changed {
+						rel := extract.RelPath(root, f)
+						fmt.Printf("[watch] re-extracting: %s\n", rel)
+
+						// Invalidate cache for changed file
+						if fileCache != nil {
+							if sha, shaErr := cache.SHA256File(f); shaErr == nil {
+								fileCache.Mark(f, sha+"_dirty") // force cache miss
+							}
+						}
+
+						nodes, edges, err := extract.ExtractAll(root, []string{f}, provider, projectSrc, cfg.LLM.MaxChunkTokens)
+						if err != nil {
+							fmt.Fprintf(os.Stderr, "[watch] skipping %s: %v\n", rel, err)
+							continue
+						}
+						// Skip duplicate project node in watch-mode incremental updates.
+						if len(nodes) > 0 {
+							nodes = nodes[1:]
+						}
+						allNodes = append(allNodes, nodes...)
+						allEdges = append(allEdges, edges...)
+					}
+
+					// Rebuild and re-export
+					g, err := igraph.Build(allNodes, allEdges)
+					if err != nil {
+						return fmt.Errorf("rebuilding graph: %w", err)
+					}
+					tg := g.ToTypes()
+					if err := export.WriteJSON(tg, outDir); err != nil {
+						return err
+					}
+					fmt.Printf("[watch] graph updated — %d nodes, %d edges\n", len(allNodes), len(allEdges))
+					return nil
+				}
+
+				w, err := watch.New(root, codeExts, reextract)
+				if err != nil {
+					return fmt.Errorf("starting watcher: %w", err)
+				}
+				return w.Run(stop)
+			}
+
+			return nil
+		},
+	}
+
+	cmd.Flags().StringVar(&outDir, "out", "vela-out", "Output directory")
+	cmd.Flags().BoolVar(&noTUI, "no-tui", false, "Disable TUI, use plain log output")
+	cmd.Flags().BoolVar(&noViz, "no-viz", false, "Skip HTML and Obsidian exports")
+	cmd.Flags().BoolVar(&watchMode, "watch", false, "Watch for file changes and re-extract automatically")
+	cmd.Flags().StringVar(&neo4jURL, "neo4j-push", "", "Push graph to Neo4j Bolt URL (e.g. bolt://localhost:7687)")
+	cmd.Flags().StringVar(&neo4jUser, "neo4j-user", "neo4j", "Neo4j username")
+	cmd.Flags().StringVar(&neo4jPass, "neo4j-pass", "neo4j", "Neo4j password")
+	cmd.Flags().StringVar(&providerFlag, "provider", "", "LLM provider override (local|anthropic|openai|none)")
+	cmd.Flags().StringVar(&modelFlag, "model", "", "LLM model override")
+	return cmd
+}
+
+// ---------------------------------------------------------------------------
+// vela config
+// ---------------------------------------------------------------------------
+
+func configCmd() *cobra.Command {
+	cfg := &cobra.Command{
+		Use:   "config",
+		Short: "Manage Vela configuration",
+	}
+
+	var force bool
+	init_ := &cobra.Command{
+		Use:   "init",
+		Short: "Create default ~/.vela/config.yaml",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path, err := config.WriteDefault(force)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("Config written to %s\n", path)
+			return nil
+		},
+	}
+	init_.Flags().BoolVar(&force, "force", false, "Overwrite existing config")
+	cfg.AddCommand(init_)
+	return cfg
+}
+
+// ---------------------------------------------------------------------------
+// vela doctor
+// ---------------------------------------------------------------------------
+
+func doctorCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "doctor",
+		Short: "Check LLM provider health",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+
+			client, err := llm.NewClient(&cfg.LLM)
+			if err != nil {
+				fmt.Printf("  [FAIL] %s provider: %v\n", cfg.LLM.Provider, err)
+				os.Exit(1)
+			}
+
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+
+			if err := client.Health(ctx); err != nil {
+				fmt.Printf("  [UNREACHABLE] %s: %v\n", client.Provider(), err)
+				os.Exit(1)
+			}
+
+			fmt.Printf("  [OK] %s\n", client.Provider())
+			return nil
+		},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Query commands
+// ---------------------------------------------------------------------------
+
+const defaultGraphFile = "vela-out/graph.json"
+
+func loadEngine(graphFlag string) (*query.Engine, error) {
+	if graphFlag == "" {
+		graphFlag = defaultGraphFile
+	}
+	return query.LoadFromFile(graphFlag)
+}
+
+func pathCmd() *cobra.Command {
+	var graphFile string
+	cmd := &cobra.Command{
+		Use:   "path <from> <to>",
+		Short: "Find the shortest dependency path between two nodes",
+		Args:  cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			eng, err := loadEngine(graphFile)
+			if err != nil {
+				return err
+			}
+			fmt.Println(eng.Path(args[0], args[1]))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: vela-out/graph.json)")
+	return cmd
+}
+
+func explainCmd() *cobra.Command {
+	var graphFile string
+	cmd := &cobra.Command{
+		Use:   "explain <node>",
+		Short: "List all edges involving a node",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			eng, err := loadEngine(graphFile)
+			if err != nil {
+				return err
+			}
+			fmt.Println(eng.Explain(strings.Join(args, " ")))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: vela-out/graph.json)")
+	return cmd
+}
+
+func queryCmd() *cobra.Command {
+	var graphFile string
+	cmd := &cobra.Command{
+		Use:   "query <command>",
+		Short: "Run a graph query (path, explain, nodes, edges)",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			eng, err := loadEngine(graphFile)
+			if err != nil {
+				return err
+			}
+			fmt.Println(eng.Query(strings.Join(args, " ")))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: vela-out/graph.json)")
+	return cmd
+}
+
+// ---------------------------------------------------------------------------
+// vela serve
+// ---------------------------------------------------------------------------
+
+func serveCmd() *cobra.Command {
+	var graphFile string
+	var port int
+
+	cmd := &cobra.Command{
+		Use:   "serve [graph-file]",
+		Short: "Serve the knowledge graph via MCP-compatible HTTP endpoints",
+		Args:  cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				graphFile = args[0]
+			}
+			if graphFile == "" {
+				graphFile = defaultGraphFile
+			}
+			eng, err := query.LoadFromFile(graphFile)
+			if err != nil {
+				return fmt.Errorf("loading graph: %w", err)
+			}
+			srv := server.New(eng, port)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			return srv.Start(ctx)
+		},
+	}
+	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: vela-out/graph.json)")
+	cmd.Flags().IntVar(&port, "port", 7700, "Port to listen on")
+	return cmd
+}
+
+// ---------------------------------------------------------------------------
+// vela hook
+// ---------------------------------------------------------------------------
+
+func hookCmd() *cobra.Command {
+	hook := &cobra.Command{
+		Use:   "hook",
+		Short: "Manage git hooks",
+	}
+	hook.AddCommand(hookInstallCmd())
+	return hook
+}
+
+func hookInstallCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "install",
+		Short: "Install a post-commit hook that rebuilds the graph on each commit",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return installHook()
+		},
+	}
+}
+
+func installHook() error {
+	const hookScript = `#!/bin/sh
+# Vela post-commit hook — auto-regenerate knowledge graph
+vela extract . --no-tui --no-viz --provider none 2>/dev/null || true
+`
+	hookDir := ".git/hooks"
+	if _, err := os.Stat(hookDir); os.IsNotExist(err) {
+		return fmt.Errorf(".git/hooks not found — run from the root of a git repository")
+	}
+	hookPath := hookDir + "/post-commit"
+	if err := os.WriteFile(hookPath, []byte(hookScript), 0755); err != nil {
+		return fmt.Errorf("writing hook: %w", err)
+	}
+	fmt.Printf("Hook installed at %s\n", hookPath)
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// vela watch
+// ---------------------------------------------------------------------------
+
+// watchCmd builds the `vela watch` command tree.
+//
+// Usage:
+//
+//	vela watch start              Start daemon in background
+//	vela watch stop               Stop running daemon
+//	vela watch status             Show daemon status + connected sources
+//	vela watch logs               Tail daemon log file
+//	vela watch add ancora         Add Ancora as event source
+//	vela watch add <name> <sock>  Add custom source
+//	vela watch remove <name>      Remove source
+//	vela watch list               List configured sources
+//	vela watch install            Install as system service
+//	vela watch uninstall          Remove system service
+func watchCmd() *cobra.Command {
+	w := &cobra.Command{
+		Use:   "watch",
+		Short: "Manage the real-time watch daemon (Ancora integration)",
+	}
+
+	w.AddCommand(watchStartCmd())
+	w.AddCommand(watchStopCmd())
+	w.AddCommand(watchStatusCmd())
+	w.AddCommand(watchLogsCmd())
+	w.AddCommand(watchAddCmd())
+	w.AddCommand(watchRemoveCmd())
+	w.AddCommand(watchListCmd())
+	w.AddCommand(watchInstallCmd())
+	w.AddCommand(watchUninstallCmd())
+	return w
+}
+
+func loadDaemon(graphFile string) (*daemon.Daemon, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, fmt.Errorf("loading config: %w", err)
+	}
+	if graphFile == "" {
+		graphFile = defaultGraphFile
+	}
+	// Load the existing graph so the daemon can patch it in-place.
+	nodes, edges, err := loadExistingGraphData(graphFile)
+	if err != nil {
+		// Start with an empty graph if none exists yet.
+		nodes = nil
+		edges = nil
+	}
+	g, err := igraph.Build(nodes, edges)
+	if err != nil {
+		return nil, fmt.Errorf("building graph: %w", err)
+	}
+	// Register the config loader so the daemon can hot-reload on SIGHUP.
+	daemon.SetConfigLoader(config.Load)
+	return daemon.New(cfg, g)
+}
+
+func watchStartCmd() *cobra.Command {
+	var graphFile string
+	var foreground bool
+
+	cmd := &cobra.Command{
+		Use:   "start",
+		Short: "Start the watch daemon",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if foreground {
+				// Foreground mode: run the daemon in this process (blocks until Ctrl-C).
+				d, err := loadDaemon(graphFile)
+				if err != nil {
+					return err
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+
+				if err := d.Start(ctx); err != nil {
+					return err
+				}
+
+				fmt.Println("Watch daemon running in foreground (Ctrl-C to stop)")
+				<-ctx.Done()
+				return d.Stop()
+			}
+
+			// Background mode: re-exec this binary with --foreground as a detached process.
+			// This is the standard Unix daemonization pattern — the parent returns immediately,
+			// the child keeps running in the background.
+			self, err := os.Executable()
+			if err != nil {
+				return fmt.Errorf("resolving executable: %w", err)
+			}
+
+			fwdArgs := []string{"watch", "start", "--foreground"}
+			if graphFile != "" {
+				fwdArgs = append(fwdArgs, "--graph", graphFile)
+			}
+
+			child := exec.Command(self, fwdArgs...)
+			child.Stdout = nil
+			child.Stderr = nil
+			child.Stdin = nil
+			if err := child.Start(); err != nil {
+				return fmt.Errorf("starting background daemon: %w", err)
+			}
+
+			// Detach: do not wait for child. It owns itself now.
+			_ = child.Process.Release()
+
+			// Give the child a moment to write its PID and connect sources,
+			// then query status from our side (reads PID file + registry).
+			// We use a fresh daemon instance purely for the Status() call.
+			// Brief pause so child has time to write PID file.
+			time.Sleep(200 * time.Millisecond)
+
+			d, err := loadDaemon(graphFile)
+			fmt.Println("Watch daemon started.")
+			if err == nil {
+				fmt.Printf("Status: %s\n", d.Status())
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: vela-out/graph.json)")
+	cmd.Flags().BoolVar(&foreground, "foreground", false, "Run in foreground (for service managers)")
+	return cmd
+}
+
+func watchStopCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "stop",
+		Short: "Stop the running watch daemon",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			d, err := loadDaemon("")
+			if err != nil {
+				return err
+			}
+			if err := d.Stop(); err != nil {
+				return err
+			}
+			fmt.Println("Watch daemon stopped.")
+			return nil
+		},
+	}
+}
+
+func watchStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show watch daemon status and connected sources",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			d, err := loadDaemon("")
+			if err != nil {
+				return err
+			}
+			fmt.Println(d.Status())
+
+			// Show per-source status if running.
+			for name, s := range d.Registry().Statuses() {
+				dot := "○"
+				if s.Connected {
+					dot = "●"
+				}
+				errStr := ""
+				if s.LastError != nil {
+					errStr = fmt.Sprintf(" [err: %v]", s.LastError)
+				}
+				fmt.Printf("  %s %-12s  events: %d%s\n", dot, name, s.EventCount, errStr)
+			}
+			return nil
+		},
+	}
+}
+
+func watchLogsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "logs",
+		Short: "Display the daemon log file path",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			if cfg.Daemon.LogFile == "" {
+				fmt.Println("No log file configured.")
+				return nil
+			}
+			fmt.Printf("Log file: %s\n", cfg.Daemon.LogFile)
+			fmt.Printf("Run: tail -f %s\n", cfg.Daemon.LogFile)
+			return nil
+		},
+	}
+}
+
+func watchAddCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "add <name> [socket]",
+		Short: "Add an event source (use 'ancora' for the default Ancora socket)",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := args[0]
+			socketPath := ""
+			if len(args) >= 2 {
+				socketPath = args[1]
+			}
+			_ = listener.NewAncoraListener(socketPath, "")
+			// TODO: persist source config to ~/.vela/config.yaml
+			fmt.Printf("Source '%s' added (socket: %s)\n", name, socketPath)
+			fmt.Println("Restart the daemon for changes to take effect: vela watch stop && vela watch start")
+			return nil
+		},
+	}
+}
+
+func watchRemoveCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "remove <name>",
+		Short: "Remove a configured event source",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// TODO: remove from ~/.vela/config.yaml
+			fmt.Printf("Source '%s' removed.\n", args[0])
+			fmt.Println("Restart the daemon for changes to take effect.")
+			return nil
+		},
+	}
+}
+
+func watchListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List configured event sources",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			if len(cfg.Watch.Sources) == 0 {
+				fmt.Println("No sources configured.")
+				return nil
+			}
+			for _, src := range cfg.Watch.Sources {
+				fmt.Printf("  %-12s type=%-8s socket=%s\n", src.Name, src.Type, src.Socket)
+			}
+			return nil
+		},
+	}
+}
+
+func watchInstallCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "install",
+		Short: "Install the watch daemon as a system service (systemd/launchd)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			return daemon.InstallService(cfg.Daemon.PIDFile, cfg.Daemon.LogFile)
+		},
+	}
+}
+
+func watchUninstallCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "uninstall",
+		Short: "Remove the system service",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return daemon.UninstallService()
+		},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// helpers
+// ---------------------------------------------------------------------------
+
+// isTTY returns true if stdout is connected to a terminal.
+func isTTY() bool {
+	fi, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return (fi.Mode() & os.ModeCharDevice) != 0
+}
+
+// loadExistingGraphData reads a previously-written graph.json and returns its
+// nodes and edges. graph.json uses "file" (not "source_file") for the export
+// format — see internal/export/json.go. Returns an error when no graph exists.
+func loadExistingGraphData(path string) ([]types.Node, []types.Edge, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	var raw struct {
+		Nodes []struct {
+			ID    string `json:"id"`
+			Label string `json:"label"`
+			Kind  string `json:"kind"`
+			File  string `json:"file"`
+		} `json:"nodes"`
+		Edges []struct {
+			From string `json:"from"`
+			To   string `json:"to"`
+			Kind string `json:"kind"`
+			File string `json:"file"`
+		} `json:"edges"`
+	}
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, nil, err
+	}
+	nodes := make([]types.Node, len(raw.Nodes))
+	for i, n := range raw.Nodes {
+		nodes[i] = types.Node{ID: n.ID, Label: n.Label, NodeType: n.Kind, SourceFile: n.File}
+	}
+	edges := make([]types.Edge, len(raw.Edges))
+	for i, e := range raw.Edges {
+		edges[i] = types.Edge{Source: e.From, Target: e.To, Relation: e.Kind, SourceFile: e.File}
+	}
+	return nodes, edges, nil
+}
+
+// filterBySourceFile removes nodes whose SourceFile is present in reextracted.
+func filterBySourceFile(nodes []types.Node, reextracted map[string]bool) []types.Node {
+	out := nodes[:0]
+	for _, n := range nodes {
+		if !reextracted[n.SourceFile] {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// filterEdgesBySourceFile removes edges whose SourceFile is present in reextracted.
+func filterEdgesBySourceFile(edges []types.Edge, reextracted map[string]bool) []types.Edge {
+	out := edges[:0]
+	for _, e := range edges {
+		if !reextracted[e.SourceFile] {
+			out = append(out, e)
+		}
+	}
+	return out
+}

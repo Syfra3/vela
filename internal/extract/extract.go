@@ -1,0 +1,201 @@
+package extract
+
+import (
+	"log"
+	"path/filepath"
+	"strings"
+
+	"github.com/Syfra3/vela/pkg/types"
+)
+
+// codeExtensions are file extensions handled by AST extractors (no LLM needed).
+var codeExtensions = map[string]bool{
+	".go":  true,
+	".py":  true,
+	".ts":  true,
+	".tsx": true,
+	".js":  true,
+	".jsx": true,
+}
+
+// docExtensions are file extensions handled by LLM-based extraction.
+var docExtensions = map[string]bool{
+	".md":  true,
+	".txt": true,
+	".pdf": true,
+}
+
+// ExtractAll dispatches each file to the appropriate extractor and returns the
+// merged set of nodes and edges.
+//
+// src describes which project this extraction belongs to. If nil, DetectProject
+// is called using root. All returned nodes carry src in Node.Source and have
+// their IDs prefixed with "<project>:". A project root node and one file node
+// per extracted file are also created and linked via "contains" edges.
+//
+// provider may be nil; if so, doc files are skipped.
+// maxChunkTokens controls chunking for local LLMs (0 = default 8000).
+func ExtractAll(
+	root string,
+	files []string,
+	provider types.LLMProvider,
+	src *types.Source,
+	maxChunkTokens ...int,
+) ([]types.Node, []types.Edge, error) {
+	chunkTokens := 8000
+	if len(maxChunkTokens) > 0 && maxChunkTokens[0] > 0 {
+		chunkTokens = maxChunkTokens[0]
+	}
+
+	if src == nil {
+		src = DetectProject(root)
+	}
+
+	// Project root node — one per extraction run.
+	projectNode := CreateProjectNode(src)
+
+	var allNodes []types.Node
+	var allEdges []types.Edge
+
+	// Track which file nodes we've already emitted (multiple symbols per file).
+	emittedFiles := make(map[string]bool)
+
+	for _, path := range files {
+		ext := filepath.Ext(path)
+		rel := RelPath(root, path)
+
+		var rawNodes []types.Node
+		var rawEdges []types.Edge
+
+		switch {
+		case codeExtensions[ext]:
+			n, e, err := extractCode(path, rel)
+			if err != nil {
+				log.Printf("[debug] skipping %s: %v", rel, err)
+				continue
+			}
+			rawNodes, rawEdges = n, e
+
+		case docExtensions[ext]:
+			if provider == nil {
+				log.Printf("[debug] skipping doc %s (no LLM provider configured)", rel)
+				continue
+			}
+			var err error
+			if ext == ".pdf" {
+				rawNodes, rawEdges, err = ExtractPDF(path, rel, provider, chunkTokens)
+			} else {
+				rawNodes, rawEdges, err = ExtractDoc(path, rel, provider, chunkTokens)
+			}
+			if err != nil {
+				log.Printf("[debug] skipping doc %s: %v", rel, err)
+				continue
+			}
+
+		default:
+			log.Printf("[debug] skipping unsupported extension: %s", rel)
+			continue
+		}
+
+		if len(rawNodes) == 0 {
+			continue
+		}
+
+		// Emit file node once per file.
+		if !emittedFiles[rel] {
+			emittedFiles[rel] = true
+			fileNode := types.Node{
+				ID:         fileNodeID(src.Name, rel),
+				Label:      rel,
+				NodeType:   string(types.NodeTypeFile),
+				SourceFile: rel,
+				Source:     src,
+			}
+			allNodes = append(allNodes, fileNode)
+			// project → file
+			allEdges = append(allEdges, types.Edge{
+				Source:   projectNode.ID,
+				Target:   fileNode.ID,
+				Relation: "contains",
+			})
+		}
+
+		// Prefix all node IDs and stamp Source.
+		prefixed := make([]types.Node, 0, len(rawNodes))
+		for _, n := range rawNodes {
+			n.ID = prefixID(src.Name, n.ID)
+			n.Source = src
+			prefixed = append(prefixed, n)
+			// file → symbol
+			allEdges = append(allEdges, types.Edge{
+				Source:     fileNodeID(src.Name, rel),
+				Target:     n.ID,
+				Relation:   "contains",
+				SourceFile: rel,
+			})
+		}
+		allNodes = append(allNodes, prefixed...)
+
+		// Rewrite edge Sources (always file-qualified IDs); keep Targets bare
+		// so Build() can resolve them — cross-file and cross-project calls resolve
+		// by label in the label index.
+		for _, e := range rawEdges {
+			e.Source = prefixID(src.Name, e.Source)
+			// Target stays as bare callee label — Build() resolves via labelIndex.
+			allEdges = append(allEdges, e)
+		}
+	}
+
+	// Prepend project node so it's always ID 1 in the graph (stable ordering).
+	result := make([]types.Node, 0, 1+len(allNodes))
+	result = append(result, projectNode)
+	result = append(result, allNodes...)
+
+	return result, allEdges, nil
+}
+
+// ── ID helpers ────────────────────────────────────────────────────────────────
+
+// prefixID prepends "<project>:" to a raw node ID produced by an AST extractor.
+// If the ID already has the prefix, it is returned unchanged.
+func prefixID(project, id string) string {
+	prefix := project + ":"
+	if strings.HasPrefix(id, prefix) {
+		return id
+	}
+	return prefix + id
+}
+
+// fileNodeID returns the canonical node ID for a file node.
+func fileNodeID(project, relPath string) string {
+	return project + ":file:" + relPath
+}
+
+// ── Raw code extraction (unchanged signatures — project prefix applied above) ──
+
+func extractCode(path, rel string) ([]types.Node, []types.Edge, error) {
+	ext := filepath.Ext(path)
+	switch ext {
+	case ".go":
+		root, src, err := ParseGoFile(path)
+		if err != nil {
+			return nil, nil, err
+		}
+		return ExtractGoNodes(root, src, rel), ExtractGoEdges(root, src, rel), nil
+
+	case ".py":
+		root, src, err := ParsePythonFile(path)
+		if err != nil || root == nil {
+			return nil, nil, err
+		}
+		return ExtractPythonNodes(root, src, rel), ExtractPythonEdges(root, src, rel), nil
+
+	case ".ts", ".tsx", ".js", ".jsx":
+		root, src, err := ParseTSFile(path)
+		if err != nil || root == nil {
+			return nil, nil, err
+		}
+		return ExtractTSNodes(root, src, rel), ExtractTSEdges(root, src, rel), nil
+	}
+	return nil, nil, nil
+}
