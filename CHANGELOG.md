@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/Syfra3/vela/compare/v1.0.0...v1.0.1) (2026-04-16)
+
+
+### Bug Fixes
+
+* **ci:** use zig cc for CGO cross-compilation ([cf79b3b](https://github.com/Syfra3/vela/commit/cf79b3b0e3ab434eb8543739d2a6e265594d0021))
+
 ## 1.0.0 (2026-04-16)
 
 
