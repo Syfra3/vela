@@ -1,5 +1,18 @@
 # Changelog
 
+## [1.1.0](https://github.com/Syfra3/vela/compare/v1.0.1...v1.1.0) (2026-04-16)
+
+
+### Features
+
+* **detect:** add recursive file walker with gitignore and tech-aware defaults ([02701d6](https://github.com/Syfra3/vela/commit/02701d6625a8cfef3787e8725bd5547b17918d34))
+* **detect:** recursive file walker with gitignore and tech-aware defaults ([f6dcf06](https://github.com/Syfra3/vela/commit/f6dcf06a9b8203912fe05344ee0b2ac503fad7d5))
+
+
+### Bug Fixes
+
+* release-please build binary ([275db45](https://github.com/Syfra3/vela/commit/275db45ead03e00eed03933c4fc8cdfe754fdd11))
+
 ## [1.0.1](https://github.com/Syfra3/vela/compare/v1.0.0...v1.0.1) (2026-04-16)
 
 
