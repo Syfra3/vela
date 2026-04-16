@@ -22,7 +22,7 @@ jobs:
         with:
           release-type: go
           package-name: vela
-          
+
           changelog-types: |
             [
               {"type":"feat","section":"Features","hidden":false},
@@ -66,8 +66,6 @@ jobs:
             platform: windows-amd64
             zig_target: x86_64-windows-gnu
             ext: .exe
-
-    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
