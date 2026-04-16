@@ -36,6 +36,37 @@ func defaults() *types.Config {
 			ShowProgress: true,
 			EnableColors: true,
 		},
+		Watch: types.WatchConfig{
+			Enabled: false,
+			Sources: []types.WatchSourceConfig{
+				{
+					Name:   "ancora",
+					Type:   "syfra",
+					Socket: filepath.Join(home, ".syfra", "ancora.sock"),
+				},
+			},
+			Reconciler: types.ReconcilerConfig{
+				DebounceMs:   100,
+				MaxBatchSize: 50,
+			},
+			Extractor: types.ExtractorConfig{
+				Enabled:   true,
+				Workers:   2,
+				WriteBack: true,
+				Provider:  "local",
+				Model:     "llama3",
+			},
+		},
+		Daemon: types.DaemonConfig{
+			PIDFile:    filepath.Join(home, ".vela", "watch.pid"),
+			LogFile:    filepath.Join(home, ".vela", "watch.log"),
+			LogLevel:   "info",
+			StatusFile: filepath.Join(home, ".vela", "watch-status.json"),
+		},
+		Obsidian: types.ObsidianConfig{
+			AutoSync: false,
+			VaultDir: "vela-out",
+		},
 	}
 }
 

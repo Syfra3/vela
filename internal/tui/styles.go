@@ -76,6 +76,28 @@ var (
 			Padding(0, 1)
 )
 
+// nodeKindColor returns a lipgloss color for a given node kind/type.
+func nodeKindColor(kind string) lipgloss.Color {
+	switch kind {
+	case "function":
+		return lipgloss.Color("#4ec9b0") // teal — functions
+	case "struct":
+		return lipgloss.Color("#4e9ae8") // blue — structs/classes
+	case "interface":
+		return lipgloss.Color("#9b6fd6") // purple — interfaces/contracts
+	case "file":
+		return lipgloss.Color("#d4a05e") // amber — files
+	case "package":
+		return lipgloss.Color("#f28e2b") // orange — packages
+	case "observation":
+		return lipgloss.Color("#59a14f") // green — ancora memories
+	case "concept":
+		return lipgloss.Color("#e15759") // red — concepts
+	default:
+		return colorAccentLight // fallback
+	}
+}
+
 // bar renders a filled/empty progress bar of the given width.
 func bar(pct, width int) string {
 	if width < 4 {

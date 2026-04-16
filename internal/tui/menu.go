@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/Syfra3/vela/internal/ancora"
 	"github.com/Syfra3/vela/internal/cache"
 	"github.com/Syfra3/vela/internal/config"
 	"github.com/Syfra3/vela/internal/detect"
@@ -37,6 +38,7 @@ const (
 	screenDoctor
 	screenObsidian
 	screenGraphStatus
+	screenWatch
 )
 
 type menuItem struct {
@@ -53,6 +55,11 @@ type MenuModel struct {
 	termHeight int
 	message    string // status/error message
 	installed  bool   // MCP installation status
+	version    string // version string to display
+
+	// Global integration status shown in every screen header
+	ancoraOK bool // ancora mcp socket alive
+	daemonOK bool // vela watch daemon running
 
 	// Nested screens can inject themselves here
 	extractModel     ExtractModel
@@ -63,6 +70,7 @@ type MenuModel struct {
 	obsidianResult   string
 	obsidianErr      error
 	graphStatusModel GraphStatusModel
+	watchModel       WatchModel
 }
 
 // NewMenuModel creates the main menu TUI.
@@ -75,6 +83,13 @@ func NewMenuModel() MenuModel {
 		installed:  setup.CheckMCPInstalled(),
 	}
 	m.rebuildMenu()
+	return m
+}
+
+// NewMenuModelWithVersion creates the main menu TUI with version info.
+func NewMenuModelWithVersion(ver string) MenuModel {
+	m := NewMenuModel()
+	m.version = ver
 	return m
 }
 
@@ -111,6 +126,11 @@ func (m *MenuModel) rebuildMenu() {
 			key:         "query",
 		},
 		{
+			label:       "Watch",
+			description: "Manage real-time Ancora integration daemon",
+			key:         "watch",
+		},
+		{
 			label:       "Doctor",
 			description: "Check LLM provider health",
 			key:         "doctor",
@@ -140,7 +160,7 @@ func (m MenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// Handle global extraction messages
 	switch msg := msg.(type) {
 	case extractionStartMsg:
-		return m, runExtraction(msg.dir, msg.mode)
+		return m, runExtraction(msg.dir, msg.mode, msg.source)
 
 	case extractionProgressMsg:
 		if m.screen == screenExtract {
@@ -182,6 +202,8 @@ func (m MenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateObsidian(msg)
 	case screenGraphStatus:
 		return m.updateGraphStatus(msg)
+	case screenWatch:
+		return m.updateWatch(msg)
 	}
 	return m, nil
 }
@@ -204,6 +226,8 @@ func (m MenuModel) View() string {
 		return m.viewObsidian()
 	case screenGraphStatus:
 		return m.viewGraphStatus()
+	case screenWatch:
+		return m.viewWatch()
 	}
 	return ""
 }
@@ -246,6 +270,10 @@ func (m MenuModel) handleMenuSelect() (tea.Model, tea.Cmd) {
 		m.screen = screenGraphStatus
 		m.graphStatusModel = NewGraphStatusModel()
 		return m, m.graphStatusModel.Init()
+	case "watch":
+		m.screen = screenWatch
+		m.watchModel = NewWatchModel()
+		return m, m.watchModel.Init()
 	case "install":
 		m.screen = screenInstall
 		m.installWizard = setup.NewWizard()
@@ -321,7 +349,7 @@ func (m MenuModel) renderHeader(sectionTitle string) string {
 	// Logo
 	b.WriteString(renderAsciiLogo())
 	b.WriteString("\n")
-	b.WriteString(renderTagline())
+	b.WriteString(m.renderTagline())
 	b.WriteString("\n\n")
 
 	// Status line
@@ -342,17 +370,41 @@ func (m MenuModel) renderHeader(sectionTitle string) string {
 }
 
 func (m MenuModel) renderStatusLine() string {
-	statusDot := lipgloss.NewStyle().Foreground(colorSuccess).Render("●")
-	statusText := lipgloss.NewStyle().Foreground(colorSubtext).Render("ready")
+	dot := func(ok bool) string {
+		if ok {
+			return lipgloss.NewStyle().Foreground(colorSuccess).Render("●")
+		}
+		return lipgloss.NewStyle().Foreground(colorErr).Render("○")
+	}
+	dim := lipgloss.NewStyle().Foreground(colorSubtext)
 
-	mcpDot := lipgloss.NewStyle().Foreground(colorErr).Render("●")
-	mcpText := lipgloss.NewStyle().Foreground(colorSubtext).Render("offline")
+	// Vela: always ready
+	velaStr := dim.Render("ready")
+
+	// Vela MCP: installed in agent config
+	mcpStr := dim.Render("offline")
 	if m.installed {
-		mcpDot = lipgloss.NewStyle().Foreground(colorSuccess).Render("●")
-		mcpText = lipgloss.NewStyle().Foreground(colorSuccess).Render("operational")
+		mcpStr = lipgloss.NewStyle().Foreground(colorSuccess).Render("operational")
 	}
 
-	return fmt.Sprintf("Status: %s %s  | MCP Status: %s %s", statusDot, statusText, mcpDot, mcpText)
+	// Ancora MCP: socket probe
+	ancoraStr := dim.Render("offline")
+	if m.ancoraOK {
+		ancoraStr = lipgloss.NewStyle().Foreground(colorSuccess).Render("online")
+	}
+
+	// Vela daemon
+	daemonStr := dim.Render("stopped")
+	if m.daemonOK {
+		daemonStr = lipgloss.NewStyle().Foreground(colorSuccess).Render("running")
+	}
+
+	return fmt.Sprintf("%s %s  |  MCP %s  |  Ancora %s  |  Daemon %s",
+		dot(true), velaStr,
+		mcpStr,
+		ancoraStr,
+		daemonStr,
+	)
 }
 
 func (m MenuModel) renderFooter(helpText string) string {
@@ -387,12 +439,17 @@ func renderAsciiLogo() string {
 	return b.String()
 }
 
-func renderTagline() string {
+func (m MenuModel) renderTagline() string {
 	brandStyle := lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
 	taglineStyle := lipgloss.NewStyle().Foreground(colorSubtext)
 
-	return brandStyle.Render("Vela ") +
-		taglineStyle.Render("— Privacy-first knowledge graph builder for codebases")
+	versionStr := ""
+	if m.version != "" {
+		versionStr = " " + m.version
+	}
+
+	return brandStyle.Render("Vela"+versionStr) +
+		taglineStyle.Render(" — Privacy-first knowledge graph builder for codebases")
 }
 
 func renderSeparator() string {
@@ -431,12 +488,13 @@ func (m MenuModel) updateExtract(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.extractModel.Starting() {
 		dir := m.extractModel.Directory()
 		mode := m.extractModel.Mode()
+		src := m.extractModel.Source()
 		// Reset starting flag after launching
 		m.extractModel.starting = false
 		m.extractModel.extracting = true
 		m.extractModel.step = stepExtracting
 		// Launch extraction in background
-		return m, launchExtraction(dir, mode)
+		return m, launchExtraction(dir, mode, src)
 	}
 
 	return m, cmd
@@ -490,6 +548,22 @@ func (m MenuModel) updateGraphStatus(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m MenuModel) updateWatch(msg tea.Msg) (tea.Model, tea.Cmd) {
+	updated, cmd := m.watchModel.Update(msg)
+	m.watchModel = updated.(WatchModel)
+
+	// Bubble integration status up to the global header.
+	m.ancoraOK = m.watchModel.ancoraOK
+	m.daemonOK = m.watchModel.daemonOK
+
+	if m.watchModel.Quitting() {
+		m.screen = screenMain
+		return m, nil
+	}
+
+	return m, cmd
+}
+
 // ---------------------------------------------------------------------------
 // View Screens
 // ---------------------------------------------------------------------------
@@ -499,6 +573,14 @@ func (m MenuModel) viewGraphStatus() string {
 	b.WriteString(m.renderHeader("Graph Status"))
 	b.WriteString(m.graphStatusModel.ViewContent())
 	b.WriteString(m.renderFooter(m.graphStatusModel.FooterHelp()))
+	return appStyle.Render(b.String())
+}
+
+func (m MenuModel) viewWatch() string {
+	var b strings.Builder
+	b.WriteString(m.renderHeader("Watch — Real-Time Daemon"))
+	b.WriteString(m.watchModel.ViewContent())
+	b.WriteString(m.renderFooter(m.watchModel.FooterHelp()))
 	return appStyle.Render(b.String())
 }
 
@@ -551,8 +633,9 @@ func (m MenuModel) viewDoctor() string {
 // ---------------------------------------------------------------------------
 
 type extractionStartMsg struct {
-	dir  string
-	mode ExtractionMode
+	dir    string
+	mode   ExtractionMode
+	source ExtractSource
 }
 
 type extractionProgressMsg struct {
@@ -567,15 +650,15 @@ type extractionCompleteMsg struct {
 	err     error
 }
 
-func launchExtraction(dir string, mode ExtractionMode) tea.Cmd {
+func launchExtraction(dir string, mode ExtractionMode, src ExtractSource) tea.Cmd {
 	return func() tea.Msg {
-		return extractionStartMsg{dir: dir, mode: mode}
+		return extractionStartMsg{dir: dir, mode: mode, source: src}
 	}
 }
 
-func runExtraction(dir string, mode ExtractionMode) tea.Cmd {
+func runExtraction(dir string, mode ExtractionMode, src ExtractSource) tea.Cmd {
 	return tea.Batch(
-		startExtractionWorker(dir, mode),
+		startExtractionWorker(dir, mode, src),
 		tickExtractionProgress(),
 	)
 }
@@ -590,81 +673,135 @@ type extractionState struct {
 
 var globalExtractionState *extractionState
 
-func startExtractionWorker(dir string, mode ExtractionMode) tea.Cmd {
+func startExtractionWorker(dir string, mode ExtractionMode, src ExtractSource) tea.Cmd {
 	return func() tea.Msg {
-		// Load config
 		cfg, err := config.Load()
 		if err != nil {
 			return extractionCompleteMsg{success: false, dir: dir, err: fmt.Errorf("loading config: %w", err)}
 		}
 
-		// Build LLM provider (nil = no LLM, code-only mode)
+		// Build LLM provider (nil = structural-only mode)
 		var provider types.LLMProvider
 		if cfg.LLM.Provider != "" && cfg.LLM.Provider != "none" {
-			llmClient, err := llm.NewClient(&cfg.LLM)
-			if err == nil {
+			if llmClient, lErr := llm.NewClient(&cfg.LLM); lErr == nil {
 				provider = llmClient
 			}
 		}
 
-		// Load cache
-		fileCache, _ := cache.Load(cfg.Extraction.CacheDir)
+		if src == SourceAncora {
+			// ── Ancora memory extraction ──────────────────────────────────
+			dbPath, dbErr := ancora.DefaultDBPath()
+			if dbErr != nil {
+				return extractionCompleteMsg{success: false, dir: "ancora", err: dbErr}
+			}
 
-		// Ensure .velignore exists
+			// Count observations first so we can set up progress state.
+			r, rErr := ancora.Open(dbPath)
+			if rErr != nil {
+				return extractionCompleteMsg{success: false, dir: "ancora", err: rErr}
+			}
+			total, _ := r.Count()
+			r.Close()
+
+			globalExtractionState = &extractionState{
+				files:          make([]string, total), // placeholder for count
+				processedCount: 0,
+				done:           false,
+			}
+
+			go func() {
+				const outDir = "vela-out"
+
+				progress := func(done, _ int, title string) {
+					globalExtractionState.processedCount = done
+					globalExtractionState.currentFile = title
+				}
+
+				nodes, edges, extractErr := extract.ExtractAncora(
+					dbPath, provider, cfg.LLM.MaxChunkTokens, progress,
+				)
+				if extractErr != nil {
+					globalExtractionState.err = extractErr
+					globalExtractionState.done = true
+					return
+				}
+
+				g, buildErr := graph.Build(nodes, edges)
+				if buildErr != nil {
+					globalExtractionState.err = fmt.Errorf("building graph: %w", buildErr)
+					globalExtractionState.done = true
+					return
+				}
+
+				tg := g.ToTypes()
+				if writeErr := export.WriteJSON(tg, outDir); writeErr != nil {
+					globalExtractionState.err = fmt.Errorf("writing graph.json: %w", writeErr)
+					globalExtractionState.done = true
+					return
+				}
+
+				// Auto-sync Obsidian if enabled in config.
+				if cfg.Obsidian.AutoSync {
+					vaultDir := cfg.Obsidian.VaultDir
+					if vaultDir == "" {
+						vaultDir = outDir
+					}
+					if syncErr := export.WriteObsidian(tg, vaultDir); syncErr != nil {
+						globalExtractionState.err = fmt.Errorf("obsidian auto-sync: %w", syncErr)
+					}
+				}
+
+				globalExtractionState.done = true
+			}()
+
+			return nil
+		}
+
+		// ── Path (filesystem) extraction ──────────────────────────────────
+		fileCache, _ := cache.Load(cfg.Extraction.CacheDir)
 		_, _ = detect.EnsureVelignore(dir)
 
-		// Discover files
 		exts := []string{".go", ".py", ".ts", ".tsx", ".js", ".jsx", ".md", ".txt", ".pdf"}
-		files, err := detect.Collect(dir, exts)
-		if err != nil {
-			return extractionCompleteMsg{success: false, dir: dir, err: fmt.Errorf("detecting files: %w", err)}
+		files, collectErr := detect.Collect(dir, exts)
+		if collectErr != nil {
+			return extractionCompleteMsg{success: false, dir: dir, err: fmt.Errorf("detecting files: %w", collectErr)}
 		}
 		if len(files) == 0 {
-			return extractionCompleteMsg{success: false, dir: dir, err: fmt.Errorf("no files found")}
+			return extractionCompleteMsg{success: false, dir: dir, err: fmt.Errorf("no files found in %s", dir)}
 		}
 
-		// Initialize global state for progress tracking
 		globalExtractionState = &extractionState{
 			files:          files,
 			processedCount: 0,
 			done:           false,
 		}
 
-		// Process files in background
 		go func() {
 			const outDir = "vela-out"
 
-			// ModeRegenerate: discard cache and skip seeding so every file
-			// is re-extracted from scratch.
-			// ModeUpdate (default): seed from existing graph.json and
-			// respect the cache for unchanged files.
+			// Detect project once — all files in this run share the same source.
+			projectSrc := extract.DetectProject(dir)
+
 			var seededNodes []types.Node
 			var seededEdges []types.Edge
 			if mode == ModeRegenerate {
-				fileCache = nil // force full re-extraction
+				fileCache = nil
 			} else if existing, readErr := loadExistingGraph(outDir + "/graph.json"); readErr == nil {
 				seededNodes = existing.Nodes
 				seededEdges = existing.Edges
 			} else if fileCache != nil {
-				// No existing graph — discard cache to force full re-extraction.
 				fileCache = nil
 			}
 
-			// freshNodes/freshEdges accumulate results from files that need
-			// re-extraction (cache miss). We keep them separate so the filter
-			// step below only removes stale seeded data, not new results.
 			var freshNodes []types.Node
 			var freshEdges []types.Edge
-
-			// Track which files are being re-extracted so we can remove
-			// their stale entries from the seeded baseline.
 			reextractedFiles := make(map[string]bool)
+			projectEmitted := false
 
 			for i, f := range files {
 				rel := extract.RelPath(dir, f)
 				globalExtractionState.currentFile = rel
 
-				// Cache check — skip files that haven't changed
 				if fileCache != nil {
 					sha, shaErr := cache.SHA256File(f)
 					if shaErr == nil && fileCache.IsCached(f, sha) {
@@ -675,13 +812,17 @@ func startExtractionWorker(dir string, mode ExtractionMode) tea.Cmd {
 
 				reextractedFiles[rel] = true
 
-				// Extract nodes and edges
-				nodes, edges, extractErr := extract.ExtractAll(dir, []string{f}, provider, cfg.LLM.MaxChunkTokens)
+				nodes, edges, extractErr := extract.ExtractAll(dir, []string{f}, provider, projectSrc, cfg.LLM.MaxChunkTokens)
 				if extractErr == nil {
-					freshNodes = append(freshNodes, nodes...)
+					// ExtractAll always prepends the project root node.
+					// Only keep it from the first successful file extraction.
+					if !projectEmitted {
+						freshNodes = append(freshNodes, nodes...)
+						projectEmitted = true
+					} else if len(nodes) > 0 {
+						freshNodes = append(freshNodes, nodes[1:]...) // skip duplicate project node
+					}
 					freshEdges = append(freshEdges, edges...)
-
-					// Mark in cache
 					if fileCache != nil {
 						if sha, shaErr := cache.SHA256File(f); shaErr == nil {
 							fileCache.Mark(f, sha)
@@ -692,8 +833,6 @@ func startExtractionWorker(dir string, mode ExtractionMode) tea.Cmd {
 				globalExtractionState.processedCount = i + 1
 			}
 
-			// Drop stale entries for re-extracted files from the seed, then
-			// combine with freshly-extracted results.
 			if len(reextractedFiles) > 0 {
 				seededNodes = filterNodesByFile(seededNodes, reextractedFiles)
 				seededEdges = filterEdgesByFile(seededEdges, reextractedFiles)
@@ -701,17 +840,24 @@ func startExtractionWorker(dir string, mode ExtractionMode) tea.Cmd {
 			allNodes := append(seededNodes, freshNodes...)
 			allEdges := append(seededEdges, freshEdges...)
 
-			// Save cache
 			if fileCache != nil {
 				_ = fileCache.Save()
 			}
 
-			// Build graph and write JSON
 			g, buildErr := graph.Build(allNodes, allEdges)
 			if buildErr == nil {
 				tg := g.ToTypes()
 				if writeErr := export.WriteJSON(tg, outDir); writeErr != nil {
 					globalExtractionState.err = fmt.Errorf("writing graph.json: %w", writeErr)
+				} else if cfg.Obsidian.AutoSync {
+					// Auto-sync Obsidian if enabled in config.
+					vaultDir := cfg.Obsidian.VaultDir
+					if vaultDir == "" {
+						vaultDir = outDir
+					}
+					if syncErr := export.WriteObsidian(tg, vaultDir); syncErr != nil {
+						globalExtractionState.err = fmt.Errorf("obsidian auto-sync: %w", syncErr)
+					}
 				}
 			} else {
 				globalExtractionState.err = fmt.Errorf("building graph: %w", buildErr)

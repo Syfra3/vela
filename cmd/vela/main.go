@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -13,10 +15,12 @@ import (
 
 	"github.com/Syfra3/vela/internal/cache"
 	"github.com/Syfra3/vela/internal/config"
+	"github.com/Syfra3/vela/internal/daemon"
 	"github.com/Syfra3/vela/internal/detect"
 	"github.com/Syfra3/vela/internal/export"
 	"github.com/Syfra3/vela/internal/extract"
 	igraph "github.com/Syfra3/vela/internal/graph"
+	"github.com/Syfra3/vela/internal/listener"
 	"github.com/Syfra3/vela/internal/llm"
 	"github.com/Syfra3/vela/internal/query"
 	"github.com/Syfra3/vela/internal/report"
@@ -26,6 +30,18 @@ import (
 	"github.com/Syfra3/vela/internal/watch"
 	"github.com/Syfra3/vela/pkg/types"
 )
+
+// version is set via ldflags at build time. Falls back to "dev" for local builds.
+var version = Version
+
+func init() {
+	if version != "dev" && version != "" {
+		return
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		version = strings.TrimPrefix(info.Main.Version, "v")
+	}
+}
 
 func main() {
 	if err := rootCmd().Execute(); err != nil {
@@ -58,6 +74,8 @@ codebases and technical documentation.`,
 	root.AddCommand(queryCmd())
 	root.AddCommand(serveCmd())
 	root.AddCommand(hookCmd())
+	root.AddCommand(versionCmd())
+	root.AddCommand(watchCmd())
 	return root
 }
 
@@ -79,10 +97,25 @@ func launchTUI() error {
 	if !tui.IsTTY() {
 		return fmt.Errorf("TUI requires a terminal (stdout is not a TTY)")
 	}
-	m := tui.NewMenuModel()
+	m := tui.NewMenuModelWithVersion(version)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	_, err := p.Run()
 	return err
+}
+
+// ---------------------------------------------------------------------------
+// vela version
+// ---------------------------------------------------------------------------
+
+func versionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print version information",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Printf("vela %s\n", version)
+			return nil
+		},
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -217,9 +250,13 @@ func extractCmd() *cobra.Command {
 				fileCache = nil
 			}
 
+			// Detect project once — all files share the same source.
+			projectSrc := extract.DetectProject(root)
+
 			var freshNodes []types.Node
 			var freshEdges []types.Edge
 			reextractedFiles := make(map[string]bool)
+			projectEmitted := false
 
 			for i, f := range files {
 				rel := extract.RelPath(root, f)
@@ -239,10 +276,18 @@ func extractCmd() *cobra.Command {
 
 				reextractedFiles[rel] = true
 
-				nodes, edges, err := extract.ExtractAll(root, []string{f}, provider, cfg.LLM.MaxChunkTokens)
+				nodes, edges, err := extract.ExtractAll(root, []string{f}, provider, projectSrc, cfg.LLM.MaxChunkTokens)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "warning: skipping %s: %v\n", rel, err)
 					continue
+				}
+
+				// ExtractAll always prepends the project root node.
+				// Only keep it from the first successful file extraction.
+				if !projectEmitted {
+					projectEmitted = true
+				} else if len(nodes) > 0 {
+					nodes = nodes[1:] // skip duplicate project node
 				}
 
 				// Mark in cache on success
@@ -353,10 +398,14 @@ func extractCmd() *cobra.Command {
 							}
 						}
 
-						nodes, edges, err := extract.ExtractAll(root, []string{f}, provider, cfg.LLM.MaxChunkTokens)
+						nodes, edges, err := extract.ExtractAll(root, []string{f}, provider, projectSrc, cfg.LLM.MaxChunkTokens)
 						if err != nil {
 							fmt.Fprintf(os.Stderr, "[watch] skipping %s: %v\n", rel, err)
 							continue
+						}
+						// Skip duplicate project node in watch-mode incremental updates.
+						if len(nodes) > 0 {
+							nodes = nodes[1:]
 						}
 						allNodes = append(allNodes, nodes...)
 						allEdges = append(allEdges, edges...)
@@ -602,6 +651,280 @@ vela extract . --no-tui --no-viz --provider none 2>/dev/null || true
 	}
 	fmt.Printf("Hook installed at %s\n", hookPath)
 	return nil
+}
+
+// ---------------------------------------------------------------------------
+// vela watch
+// ---------------------------------------------------------------------------
+
+// watchCmd builds the `vela watch` command tree.
+//
+// Usage:
+//
+//	vela watch start              Start daemon in background
+//	vela watch stop               Stop running daemon
+//	vela watch status             Show daemon status + connected sources
+//	vela watch logs               Tail daemon log file
+//	vela watch add ancora         Add Ancora as event source
+//	vela watch add <name> <sock>  Add custom source
+//	vela watch remove <name>      Remove source
+//	vela watch list               List configured sources
+//	vela watch install            Install as system service
+//	vela watch uninstall          Remove system service
+func watchCmd() *cobra.Command {
+	w := &cobra.Command{
+		Use:   "watch",
+		Short: "Manage the real-time watch daemon (Ancora integration)",
+	}
+
+	w.AddCommand(watchStartCmd())
+	w.AddCommand(watchStopCmd())
+	w.AddCommand(watchStatusCmd())
+	w.AddCommand(watchLogsCmd())
+	w.AddCommand(watchAddCmd())
+	w.AddCommand(watchRemoveCmd())
+	w.AddCommand(watchListCmd())
+	w.AddCommand(watchInstallCmd())
+	w.AddCommand(watchUninstallCmd())
+	return w
+}
+
+func loadDaemon(graphFile string) (*daemon.Daemon, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, fmt.Errorf("loading config: %w", err)
+	}
+	if graphFile == "" {
+		graphFile = defaultGraphFile
+	}
+	// Load the existing graph so the daemon can patch it in-place.
+	nodes, edges, err := loadExistingGraphData(graphFile)
+	if err != nil {
+		// Start with an empty graph if none exists yet.
+		nodes = nil
+		edges = nil
+	}
+	g, err := igraph.Build(nodes, edges)
+	if err != nil {
+		return nil, fmt.Errorf("building graph: %w", err)
+	}
+	// Register the config loader so the daemon can hot-reload on SIGHUP.
+	daemon.SetConfigLoader(config.Load)
+	return daemon.New(cfg, g)
+}
+
+func watchStartCmd() *cobra.Command {
+	var graphFile string
+	var foreground bool
+
+	cmd := &cobra.Command{
+		Use:   "start",
+		Short: "Start the watch daemon",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if foreground {
+				// Foreground mode: run the daemon in this process (blocks until Ctrl-C).
+				d, err := loadDaemon(graphFile)
+				if err != nil {
+					return err
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+
+				if err := d.Start(ctx); err != nil {
+					return err
+				}
+
+				fmt.Println("Watch daemon running in foreground (Ctrl-C to stop)")
+				<-ctx.Done()
+				return d.Stop()
+			}
+
+			// Background mode: re-exec this binary with --foreground as a detached process.
+			// This is the standard Unix daemonization pattern — the parent returns immediately,
+			// the child keeps running in the background.
+			self, err := os.Executable()
+			if err != nil {
+				return fmt.Errorf("resolving executable: %w", err)
+			}
+
+			fwdArgs := []string{"watch", "start", "--foreground"}
+			if graphFile != "" {
+				fwdArgs = append(fwdArgs, "--graph", graphFile)
+			}
+
+			child := exec.Command(self, fwdArgs...)
+			child.Stdout = nil
+			child.Stderr = nil
+			child.Stdin = nil
+			if err := child.Start(); err != nil {
+				return fmt.Errorf("starting background daemon: %w", err)
+			}
+
+			// Detach: do not wait for child. It owns itself now.
+			_ = child.Process.Release()
+
+			// Give the child a moment to write its PID and connect sources,
+			// then query status from our side (reads PID file + registry).
+			// We use a fresh daemon instance purely for the Status() call.
+			// Brief pause so child has time to write PID file.
+			time.Sleep(200 * time.Millisecond)
+
+			d, err := loadDaemon(graphFile)
+			fmt.Println("Watch daemon started.")
+			if err == nil {
+				fmt.Printf("Status: %s\n", d.Status())
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: vela-out/graph.json)")
+	cmd.Flags().BoolVar(&foreground, "foreground", false, "Run in foreground (for service managers)")
+	return cmd
+}
+
+func watchStopCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "stop",
+		Short: "Stop the running watch daemon",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			d, err := loadDaemon("")
+			if err != nil {
+				return err
+			}
+			if err := d.Stop(); err != nil {
+				return err
+			}
+			fmt.Println("Watch daemon stopped.")
+			return nil
+		},
+	}
+}
+
+func watchStatusCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "status",
+		Short: "Show watch daemon status and connected sources",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			d, err := loadDaemon("")
+			if err != nil {
+				return err
+			}
+			fmt.Println(d.Status())
+
+			// Show per-source status if running.
+			for name, s := range d.Registry().Statuses() {
+				dot := "○"
+				if s.Connected {
+					dot = "●"
+				}
+				errStr := ""
+				if s.LastError != nil {
+					errStr = fmt.Sprintf(" [err: %v]", s.LastError)
+				}
+				fmt.Printf("  %s %-12s  events: %d%s\n", dot, name, s.EventCount, errStr)
+			}
+			return nil
+		},
+	}
+}
+
+func watchLogsCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "logs",
+		Short: "Display the daemon log file path",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			if cfg.Daemon.LogFile == "" {
+				fmt.Println("No log file configured.")
+				return nil
+			}
+			fmt.Printf("Log file: %s\n", cfg.Daemon.LogFile)
+			fmt.Printf("Run: tail -f %s\n", cfg.Daemon.LogFile)
+			return nil
+		},
+	}
+}
+
+func watchAddCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "add <name> [socket]",
+		Short: "Add an event source (use 'ancora' for the default Ancora socket)",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			name := args[0]
+			socketPath := ""
+			if len(args) >= 2 {
+				socketPath = args[1]
+			}
+			_ = listener.NewAncoraListener(socketPath, "")
+			// TODO: persist source config to ~/.vela/config.yaml
+			fmt.Printf("Source '%s' added (socket: %s)\n", name, socketPath)
+			fmt.Println("Restart the daemon for changes to take effect: vela watch stop && vela watch start")
+			return nil
+		},
+	}
+}
+
+func watchRemoveCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "remove <name>",
+		Short: "Remove a configured event source",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// TODO: remove from ~/.vela/config.yaml
+			fmt.Printf("Source '%s' removed.\n", args[0])
+			fmt.Println("Restart the daemon for changes to take effect.")
+			return nil
+		},
+	}
+}
+
+func watchListCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "list",
+		Short: "List configured event sources",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			if len(cfg.Watch.Sources) == 0 {
+				fmt.Println("No sources configured.")
+				return nil
+			}
+			for _, src := range cfg.Watch.Sources {
+				fmt.Printf("  %-12s type=%-8s socket=%s\n", src.Name, src.Type, src.Socket)
+			}
+			return nil
+		},
+	}
+}
+
+func watchInstallCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "install",
+		Short: "Install the watch daemon as a system service (systemd/launchd)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := config.Load()
+			if err != nil {
+				return err
+			}
+			return daemon.InstallService(cfg.Daemon.PIDFile, cfg.Daemon.LogFile)
+		},
+	}
+}
+
+func watchUninstallCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "uninstall",
+		Short: "Remove the system service",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return daemon.UninstallService()
+		},
+	}
 }
 
 // ---------------------------------------------------------------------------

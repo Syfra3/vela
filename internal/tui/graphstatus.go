@@ -48,6 +48,7 @@ type GraphMetrics struct {
 type nodeRank struct {
 	Label  string
 	File   string
+	Kind   string
 	OutDeg int
 	InDeg  int
 }
@@ -135,12 +136,13 @@ func loadGraphMetrics(outDir string) GraphMetrics {
 		id    string
 		label string
 		file  string
+		kind  string
 		out   int
 		in    int
 	}
 	var ranked5 []ranked
 	for _, n := range raw.Nodes {
-		ranked5 = append(ranked5, ranked{n.ID, n.Label, n.File, outDeg[n.ID], inDeg[n.ID]})
+		ranked5 = append(ranked5, ranked{n.ID, n.Label, n.File, n.Kind, outDeg[n.ID], inDeg[n.ID]})
 	}
 	// simple top-5 selection (avoid sorting the whole slice)
 	for i := 0; i < 5 && len(ranked5) > 0; i++ {
@@ -151,7 +153,7 @@ func loadGraphMetrics(outDir string) GraphMetrics {
 			}
 		}
 		r := ranked5[best]
-		m.TopNodes = append(m.TopNodes, nodeRank{r.label, r.file, r.out, r.in})
+		m.TopNodes = append(m.TopNodes, nodeRank{r.label, r.file, r.kind, r.out, r.in})
 		ranked5 = append(ranked5[:best], ranked5[best+1:]...)
 	}
 
@@ -321,15 +323,18 @@ func (m GraphStatusModel) ViewContent() string {
 		b.WriteString("\n\n")
 
 		rankStyle := lipgloss.NewStyle().Foreground(colorSubtext).Width(3)
-		nameStyle := lipgloss.NewStyle().Foreground(colorAccentLight).Width(24)
 		degStyle := lipgloss.NewStyle().Foreground(colorText)
 		fileStyle := lipgloss.NewStyle().Foreground(colorSubtext)
 
 		for i, n := range mx.TopNodes {
 			shortFile := filepath.Base(n.File)
-			b.WriteString(fmt.Sprintf("  %s %s %s  %s\n",
+			kindColor := nodeKindColor(n.Kind)
+			nameStyle := lipgloss.NewStyle().Foreground(kindColor).Width(24)
+			kindTag := lipgloss.NewStyle().Foreground(kindColor).Faint(true).Render("[" + n.Kind + "]")
+			b.WriteString(fmt.Sprintf("  %s %s %s %s  %s\n",
 				rankStyle.Render(fmt.Sprintf("%d.", i+1)),
 				nameStyle.Render(n.Label),
+				kindTag,
 				degStyle.Render(fmt.Sprintf("out:%d in:%d", n.OutDeg, n.InDeg)),
 				fileStyle.Render(shortFile),
 			))
