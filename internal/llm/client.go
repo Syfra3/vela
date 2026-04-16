@@ -40,26 +40,30 @@ func NewClient(config *types.LLMConfig) (*Client, error) {
 	}, nil
 }
 
-// ExtractGraph extracts graph from text using the configured LLM provider
-func (c *Client) ExtractGraph(ctx context.Context, text string) (*types.ExtractionResult, error) {
-	// Define the JSON schema for extraction
-	schema := extractionSchema()
-
+// ExtractGraph implements types.LLMProvider. The schema parameter is forwarded
+// to the underlying provider; if empty, the default schema is used.
+func (c *Client) ExtractGraph(ctx context.Context, text string, schema string) (*types.ExtractionResult, error) {
+	if schema == "" {
+		schema = extractionSchema()
+	}
 	ctx, cancel := context.WithTimeout(ctx, c.config.Timeout)
 	defer cancel()
-
 	return c.provider.ExtractGraph(ctx, text, schema)
 }
 
-// Health checks if the LLM provider is accessible
+// Health implements types.LLMProvider.
 func (c *Client) Health(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-
 	return c.provider.Health(ctx)
 }
 
-// Provider returns the current LLM provider name
+// Name implements types.LLMProvider.
+func (c *Client) Name() string {
+	return c.provider.Name()
+}
+
+// Provider returns the underlying provider name (alias for Name).
 func (c *Client) Provider() string {
 	return c.provider.Name()
 }

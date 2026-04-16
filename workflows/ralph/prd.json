@@ -1,0 +1,533 @@
+{
+  "project": "Vela",
+  "branchName": "feature/poc-go-graph",
+  "description": "Vela — Go-native knowledge graph builder. Extracts concepts and dependencies from code and docs via Tree-sitter AST and pluggable LLM, builds a gonum graph, clusters with Leiden (Python subprocess), and exports to JSON/HTML/Obsidian with a Bubbletea TUI.",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "File detection with .velignore support",
+      "description": "As a developer, I need Vela to walk a directory, collect files by extension, and respect a .velignore file so that only relevant files are processed.",
+      "acceptanceCriteria": [
+        "Implement internal/detect/detect.go with a Collect(root string, exts []string) ([]string, error) function",
+        "Walk the directory tree recursively using filepath.WalkDir",
+        "Skip paths matching .velignore patterns (same syntax as .gitignore)",
+        "Return only files whose extension matches the provided list",
+        "Unit tests in internal/detect/detect_test.go cover: empty dir, single match, velignore exclusion, nested dirs",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 1,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-002",
+      "title": "Bootstrap go-tree-sitter for Go AST extraction",
+      "description": "As a developer, I need go-tree-sitter installed and a working Go grammar so that subsequent stories can use it for AST parsing.",
+      "acceptanceCriteria": [
+        "Add github.com/smacker/go-tree-sitter to go.mod",
+        "Add tree-sitter Go grammar (smacker/go-tree-sitter/golang)",
+        "Create internal/extract/code.go with a ParseGoFile(path string) (*sitter.Node, []byte, error) function that parses a .go file and returns the root AST node",
+        "Smoke test: parse cmd/vela/main.go without error",
+        "Unit test in internal/extract/code_test.go: parse a fixture Go file and assert root node kind is 'source_file'",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 2,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-003",
+      "title": "Go AST extraction — functions, structs, interfaces",
+      "description": "As a developer, I need to extract named functions, struct definitions, and interface definitions from Go source files so that they become graph nodes.",
+      "acceptanceCriteria": [
+        "Implement ExtractGoNodes(root *sitter.Node, src []byte) []types.Node in internal/extract/code.go",
+        "Extract: function declarations (kind=function_declaration), type declarations for struct and interface types",
+        "Each extracted Node has: ID (file:name), Label (name), Kind (Function|Struct|Interface), File (relative path)",
+        "Unit tests cover: file with 1 function, file with 1 struct, file with 1 interface, mixed file",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 3,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-004",
+      "title": "Go AST extraction — function call edges",
+      "description": "As a developer, I need to extract function call relationships from Go files so that graph edges represent actual call dependencies.",
+      "acceptanceCriteria": [
+        "Implement ExtractGoEdges(root *sitter.Node, src []byte, file string) []types.Edge in internal/extract/code.go",
+        "Walk call_expression nodes; record Caller (enclosing function) → Callee (called function) edges",
+        "Each Edge has: From (caller ID), To (callee label), Kind='calls', File",
+        "Skip stdlib/external calls where callee cannot be resolved to a local node (store as unresolved label, not error)",
+        "Unit tests: file with 2 functions where A calls B, assert edge A→B exists",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 4,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-005",
+      "title": "Extraction dispatcher — code vs doc routing",
+      "description": "As a developer, I need a dispatcher that routes each file to the correct extractor (AST for code, LLM for docs) so that the pipeline is extensible.",
+      "acceptanceCriteria": [
+        "Implement internal/extract/extract.go with ExtractAll(files []string, provider types.LLMProvider) ([]types.Node, []types.Edge, error)",
+        "Route .go files to ExtractGoNodes + ExtractGoEdges",
+        "Route .md, .txt files to a stub DocExtractor that returns empty slices (LLM provider not wired in Phase 0)",
+        "Dispatcher logs skipped files at debug level",
+        "Typecheck passes"
+      ],
+      "priority": 5,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-006",
+      "title": "Graph construction with gonum",
+      "description": "As a developer, I need to build a gonum directed graph from extracted nodes and edges so that graph algorithms can run on it.",
+      "acceptanceCriteria": [
+        "Add gonum.org/v1/gonum to go.mod",
+        "Implement internal/graph/build.go with Build(nodes []types.Node, edges []types.Edge) (*graph.Graph, error)",
+        "types.Graph wraps gonum simple.DirectedGraph with a NodeIndex map[string]int64 for label lookup",
+        "Edges whose To node is not in NodeIndex are added as dangling references (not an error)",
+        "Unit tests: 3 nodes + 2 edges, assert node count=3, edge count=2",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 6,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-007",
+      "title": "JSON export — graph.json",
+      "description": "As a developer, I need to serialize the graph to graph.json so that downstream tools and phases can consume it.",
+      "acceptanceCriteria": [
+        "Implement internal/export/json.go with WriteJSON(g *types.Graph, outDir string) error",
+        "Output path: outDir/graph.json",
+        "JSON schema: { nodes: [{id, label, kind, file}], edges: [{from, to, kind, file}], meta: {nodeCount, edgeCount, generatedAt} }",
+        "Create outDir if it does not exist",
+        "Unit test: build a 2-node graph, call WriteJSON, read back and assert node count matches",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 7,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-008",
+      "title": "Minimal Bubbletea TUI progress display",
+      "description": "As a user running vela extract, I want to see real-time progress (current file, % done, elapsed, ETA) so I know the extraction is running and not stuck.",
+      "acceptanceCriteria": [
+        "Wire internal/tui/progress.go into the extraction pipeline via a channel of types.ExtractionProgress",
+        "Progress display shows: current file (truncated to 40 chars), chunks done/total, percentage bar, elapsed, ETA",
+        "TUI renders without blocking the extraction goroutine",
+        "Falls back to plain log output if stdout is not a TTY (CI-safe)",
+        "Typecheck passes"
+      ],
+      "priority": 8,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-009",
+      "title": "CLI — vela extract command (Phase 0 integration)",
+      "description": "As a user, I want to run `vela extract <path>` and get a graph.json in vela-out/ so that the Phase 0 PoC success gate is met.",
+      "acceptanceCriteria": [
+        "Wire detect → extract → graph build → JSON export into cmd/vela/main.go via cobra command 'extract'",
+        "Default output dir: vela-out/",
+        "Flags: --out (output dir), --no-tui (disable TUI, plain logs)",
+        "`vela extract .` on the Vela repo itself produces a valid vela-out/graph.json with at least 5 nodes and 1 edge",
+        "Non-zero exit code on fatal errors",
+        "Typecheck passes"
+      ],
+      "priority": 9,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-010",
+      "title": "Input validation and security hardening",
+      "description": "As a developer, I need path containment checks and label sanitization so that Vela cannot be abused with path traversal inputs.",
+      "acceptanceCriteria": [
+        "Implement internal/security/security.go with ValidatePath(root, target string) error — reject paths that escape root via ../",
+        "Implement SanitizeLabel(label string) string — strip non-printable characters and limit to 256 chars",
+        "Apply ValidatePath in detect.Collect before walking",
+        "Apply SanitizeLabel to all Node.Label values in ExtractGoNodes",
+        "Unit tests: path traversal attempt returns error, valid path returns nil, label with special chars is sanitized",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 10,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-011",
+      "title": "Multi-language AST — Python support",
+      "description": "As a developer, I want Vela to extract functions and classes from Python files using Tree-sitter so that Python repos are supported.",
+      "acceptanceCriteria": [
+        "Add tree-sitter Python grammar (smacker/go-tree-sitter/python)",
+        "Implement ExtractPythonNodes and ExtractPythonEdges in internal/extract/code.go (same signature pattern as Go)",
+        "Extract: function_definition → Node{Kind:Function}, class_definition → Node{Kind:Struct}",
+        "Extract call edges: call nodes within function bodies",
+        "Register .py extension in dispatcher",
+        "Unit test: parse a fixture Python file with 1 function and 1 class, assert 2 nodes extracted",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 11,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-012",
+      "title": "Multi-language AST — TypeScript/JavaScript support",
+      "description": "As a developer, I want Vela to extract functions, classes, and interfaces from TypeScript and JavaScript files.",
+      "acceptanceCriteria": [
+        "Add tree-sitter TypeScript grammar (smacker/go-tree-sitter/typescript)",
+        "Implement ExtractTSNodes and ExtractTSEdges in internal/extract/code.go",
+        "Extract: function_declaration, arrow_function (assigned to variable), class_declaration, interface_declaration",
+        "Register .ts, .tsx, .js, .jsx extensions in dispatcher",
+        "Unit test: fixture .ts file with 1 class and 1 interface → 2 nodes",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 12,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-013",
+      "title": "LLM provider interface and local Ollama implementation",
+      "description": "As a developer, I need the LLMProvider interface wired with a working Ollama implementation so that document extraction can use a local model.",
+      "acceptanceCriteria": [
+        "types.LLMProvider interface: Extract(ctx, prompt string) ([]types.Node, []types.Edge, error)",
+        "Implement internal/llm/local.go: OllamaProvider hitting http://localhost:11434/api/generate",
+        "Request body includes model name and prompt; response is parsed as JSON matching extraction schema",
+        "Timeout from config (default 60s)",
+        "Return clear error if Ollama is unreachable (not a panic)",
+        "Typecheck passes"
+      ],
+      "priority": 13,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-014",
+      "title": "LLM provider — Anthropic Claude implementation",
+      "description": "As a developer, I need a Claude provider so that users can use frontier model quality for document extraction.",
+      "acceptanceCriteria": [
+        "Implement internal/llm/anthropic.go: AnthropicProvider using messages API",
+        "Read API key from config or ANTHROPIC_API_KEY env var",
+        "System prompt instructs extraction of nodes and edges as JSON",
+        "Parse response into []types.Node, []types.Edge",
+        "Return error (not panic) on API failure or malformed response",
+        "Typecheck passes"
+      ],
+      "priority": 14,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-015",
+      "title": "LLM provider — OpenAI GPT-4o implementation",
+      "description": "As a developer, I need an OpenAI-compatible provider for GPT-4o and self-hosted OpenAI-compatible endpoints.",
+      "acceptanceCriteria": [
+        "Implement internal/llm/openai.go: OpenAIProvider using chat completions API",
+        "Read API key from config or OPENAI_API_KEY env var",
+        "Endpoint configurable (default api.openai.com, overridable for local OpenAI-compatible servers)",
+        "Parse response into []types.Node, []types.Edge",
+        "Return error (not panic) on API failure",
+        "Typecheck passes"
+      ],
+      "priority": 15,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-016",
+      "title": "Document extraction — Markdown and text files via LLM",
+      "description": "As a developer, I need Vela to send markdown and text files to the configured LLM provider for NER and relationship extraction.",
+      "acceptanceCriteria": [
+        "Implement internal/extract/doc.go with ExtractDoc(path string, provider types.LLMProvider) ([]types.Node, []types.Edge, error)",
+        "Read file content, build extraction prompt with few-shot examples for NER + RE",
+        "Call provider.Extract and merge returned nodes/edges",
+        "Register .md, .txt in dispatcher, routing to ExtractDoc when provider != nil",
+        "Typecheck passes"
+      ],
+      "priority": 16,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-017",
+      "title": "Document chunking for local LLMs",
+      "description": "As a developer, I need large documents split into chunks so that models with limited context windows can process them without truncation.",
+      "acceptanceCriteria": [
+        "Implement ChunkText(text string, maxTokens int) []string in internal/extract/doc.go",
+        "Use word-boundary splitting (not mid-word); each chunk fits within maxTokens (estimate: 1 token ≈ 4 chars)",
+        "Overlap between chunks: last 10% of previous chunk prepended to next chunk for context continuity",
+        "ExtractDoc calls ChunkText when len(content) > maxChunkTokens*4 and merges results",
+        "Unit tests: short text returns 1 chunk, long text returns N chunks each within limit",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 17,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-018",
+      "title": "PDF extraction via text conversion",
+      "description": "As a developer, I need PDF files converted to text and sent to the LLM provider for extraction so that architecture docs in PDF format are supported.",
+      "acceptanceCriteria": [
+        "Add github.com/ledongthuc/pdf to go.mod",
+        "Implement ExtractPDF(path string, provider types.LLMProvider) ([]types.Node, []types.Edge, error) in internal/extract/doc.go",
+        "Convert PDF pages to plain text using ledongthuc/pdf reader",
+        "Pass text through ChunkText then to provider.Extract",
+        "Register .pdf in dispatcher",
+        "Typecheck passes"
+      ],
+      "priority": 18,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-019",
+      "title": "SHA256 incremental cache",
+      "description": "As a developer, I need a file-level SHA256 cache so that unchanged files are skipped on re-runs, making repeated extractions fast.",
+      "acceptanceCriteria": [
+        "Implement internal/cache/cache.go with Load(dir string), Save(dir string), IsCached(path, sha string) bool, Mark(path, sha string)",
+        "Cache stored as JSON file at cacheDir/cache.json",
+        "Before extracting a file, compute SHA256 of its content; skip if IsCached returns true",
+        "After successful extraction, call Mark",
+        "Unit tests: cache miss on first call, cache hit on second call with same SHA",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 19,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-020",
+      "title": "Config file — ~/.vela/config.yaml",
+      "description": "As a user, I need a config file at ~/.vela/config.yaml so that LLM provider, model, and extraction settings persist across runs without CLI flags.",
+      "acceptanceCriteria": [
+        "Implement config loading in internal/config/config.go (new file)",
+        "Load ~/.vela/config.yaml using yaml.v3; fall back to defaults if file missing",
+        "Config struct covers: llm.provider, llm.model, llm.endpoint, llm.api_key, llm.timeout, llm.max_chunk_tokens, extraction.code_languages, extraction.include_docs, extraction.cache_dir, ui.show_progress",
+        "Implement `vela config init` subcommand that writes default config to ~/.vela/config.yaml",
+        "Typecheck passes"
+      ],
+      "priority": 20,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-021",
+      "title": "vela doctor — LLM provider health check",
+      "description": "As a user, I want to run `vela doctor` to check whether my configured LLM provider is reachable before starting a long extraction.",
+      "acceptanceCriteria": [
+        "Implement `vela doctor` cobra command",
+        "Ping the configured LLM provider endpoint with a minimal request",
+        "Print status per provider: OK (green) or UNREACHABLE (red) with endpoint shown",
+        "Exit code 0 if all providers healthy, 1 if any unreachable",
+        "Typecheck passes"
+      ],
+      "priority": 21,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-022",
+      "title": "Leiden clustering via Python subprocess",
+      "description": "As a developer, I need Vela to call a Python subprocess running graspologic to run Leiden community detection on the graph and return community assignments.",
+      "acceptanceCriteria": [
+        "Implement internal/graph/cluster.go with RunLeiden(g *types.Graph) (map[string]int, error)",
+        "Serialize graph edges to JSON, pass to a bundled Python script via os/exec",
+        "Python script (scripts/leiden.py): reads edges JSON from stdin, runs graspologic Leiden, outputs node→community JSON to stdout",
+        "Parse Python stdout into map[string]int (node ID → community ID)",
+        "Return clear error if Python or graspologic is not installed (not a panic)",
+        "Typecheck passes"
+      ],
+      "priority": 22,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-023",
+      "title": "Graph analysis — god nodes and surprise edges",
+      "description": "As a developer, I need god node detection (highest-degree nodes) and surprise edge scoring so that GRAPH_REPORT.md highlights the most important architectural insights.",
+      "acceptanceCriteria": [
+        "Implement internal/graph/analyze.go with GodNodes(g *types.Graph, topN int) []types.Node",
+        "God nodes = topN nodes by total degree (in + out)",
+        "Implement SurpriseEdges(g *types.Graph, topN int) []types.Edge — score = cross-community edges ranked by betweenness centrality proxy (degree product of endpoints in different communities)",
+        "Implement SuggestedQuestions(nodes []types.Node, edges []types.Edge) []string — return 4 canned question templates populated with actual god node names",
+        "Unit tests: 5-node graph, assert top-1 god node is the highest-degree node",
+        "Typecheck passes",
+        "Tests pass"
+      ],
+      "priority": 23,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-024",
+      "title": "GRAPH_REPORT.md generation",
+      "description": "As a user, I want a human-readable GRAPH_REPORT.md generated after extraction so I can quickly understand the architecture without opening a graph tool.",
+      "acceptanceCriteria": [
+        "Implement internal/report/report.go with Generate(g *types.Graph, outDir string) error",
+        "Report sections: Summary (node/edge count, community count), God Nodes (top 5 with degree), Communities (list with member count), Surprise Edges (top 5 cross-community connections), Suggested Questions (4 questions)",
+        "Write to outDir/GRAPH_REPORT.md",
+        "Typecheck passes"
+      ],
+      "priority": 24,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-025",
+      "title": "HTML export — interactive vis.js visualization",
+      "description": "As a user, I want to open graph.html in a browser and interactively explore the knowledge graph with nodes, edges, and community coloring.",
+      "acceptanceCriteria": [
+        "Implement internal/export/html.go with WriteHTML(g *types.Graph, outDir string) error",
+        "Embed vis.js Network from CDN in the generated HTML (single self-contained file)",
+        "Nodes colored by community ID; god nodes rendered larger",
+        "Edges shown as directed arrows",
+        "Output: outDir/graph.html",
+        "Typecheck passes"
+      ],
+      "priority": 25,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-026",
+      "title": "Obsidian vault export",
+      "description": "As a user, I want to export the graph as an Obsidian vault so I can explore the knowledge graph using Obsidian's graph view.",
+      "acceptanceCriteria": [
+        "Implement internal/export/obsidian.go with WriteObsidian(g *types.Graph, outDir string) error",
+        "Create outDir/obsidian/ directory",
+        "Each node becomes a .md file named {label}.md",
+        "File content: frontmatter (kind, file, community), body lists outgoing edges as [[wikilinks]]",
+        "Typecheck passes"
+      ],
+      "priority": 26,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-027",
+      "title": "Full Bubbletea TUI — worker pool and provider health",
+      "description": "As a user, I want the TUI to show a live worker pool status and LLM provider health so I can monitor concurrent extraction without guessing.",
+      "acceptanceCriteria": [
+        "Implement internal/tui/app.go as a full Bubbletea Model with Init/Update/View",
+        "Show: provider name + health status (ready/offline), worker pool activity (N workers, N idle), per-file progress rows (file, %, status), overall progress bar",
+        "Worker pool: configurable 1-N goroutines via config.workers (default: 2)",
+        "TUI updates via tea.Msg channel from extraction goroutines",
+        "Typecheck passes"
+      ],
+      "priority": 27,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-028",
+      "title": "TUI — interactive graph query mode",
+      "description": "As a user, I want to switch the TUI to a query mode after extraction completes so I can query the graph interactively without leaving the terminal.",
+      "acceptanceCriteria": [
+        "After extraction completes, TUI enters query mode with a text input field",
+        "Commands: 'path A B' → shortest path between two node labels, 'explain X' → list all edges involving node X, 'quit' → exit",
+        "Results displayed in scrollable list below the input",
+        "Typecheck passes"
+      ],
+      "priority": 28,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-029",
+      "title": "CLI query commands — vela query, vela path, vela explain",
+      "description": "As a user, I want CLI query commands that read an existing graph.json so I can query the graph from scripts without the TUI.",
+      "acceptanceCriteria": [
+        "Implement cobra commands: 'vela query <question>', 'vela path <from> <to>', 'vela explain <node>'",
+        "All commands read from vela-out/graph.json by default; --graph flag overrides path",
+        "'vela path A B' prints the shortest path as a list of node labels",
+        "'vela explain X' prints all edges where X is from or to",
+        "Typecheck passes"
+      ],
+      "priority": 29,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-030",
+      "title": "watch mode — auto-update graph on file changes",
+      "description": "As a developer, I want `vela extract --watch` to automatically re-run extraction when source files change so my graph stays current.",
+      "acceptanceCriteria": [
+        "Add github.com/fsnotify/fsnotify to go.mod",
+        "Implement watch loop in cmd/vela: on file change event, re-run extraction for changed file only (incremental via cache invalidation)",
+        "Debounce rapid file saves (300ms window)",
+        "Print '[watch] re-extracting: <file>' on each update",
+        "Typecheck passes"
+      ],
+      "priority": 30,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-031",
+      "title": "MCP server — vela serve",
+      "description": "As a developer, I want to run `vela serve graph.json` to expose the graph via MCP protocol so that AI assistants and tools can query it programmatically.",
+      "acceptanceCriteria": [
+        "Implement `vela serve <graph-file>` cobra command",
+        "Start an HTTP server on port 7700 (configurable via --port)",
+        "Expose MCP-compatible endpoints: GET /graph (full graph), GET /node/:id (single node), GET /path?from=A&to=B (shortest path)",
+        "Serve graph.json content with appropriate Content-Type: application/json",
+        "Typecheck passes"
+      ],
+      "priority": 31,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-032",
+      "title": "Neo4j export",
+      "description": "As a developer, I want to push the graph to a Neo4j instance via Bolt so that I can use Neo4j's query language and visualization.",
+      "acceptanceCriteria": [
+        "Add neo4j-go-driver to go.mod",
+        "Implement internal/export/neo4j.go with PushNeo4j(g *types.Graph, boltURL string) error",
+        "Create nodes as Neo4j nodes with labels matching types.Node.Kind",
+        "Create edges as Neo4j relationships with type matching types.Edge.Kind",
+        "Expose via --neo4j-push flag on vela extract command",
+        "Return clear error if Neo4j is unreachable",
+        "Typecheck passes"
+      ],
+      "priority": 32,
+      "passes": false,
+      "notes": ""
+    },
+    {
+      "id": "US-033",
+      "title": "Git hooks — vela hook install",
+      "description": "As a developer, I want `vela hook install` to install a post-commit git hook that rebuilds the graph on each commit so the graph is always up to date.",
+      "acceptanceCriteria": [
+        "Implement `vela hook install` cobra command",
+        "Write .git/hooks/post-commit script that runs `vela extract .` in the repo root",
+        "Make the hook file executable (0755)",
+        "Print confirmation: 'Hook installed at .git/hooks/post-commit'",
+        "Typecheck passes"
+      ],
+      "priority": 33,
+      "passes": false,
+      "notes": ""
+    }
+  ]
+}

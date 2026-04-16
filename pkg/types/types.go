@@ -16,6 +16,9 @@ type Node struct {
 	Degree         int                    `json:"degree,omitempty"`
 	Description    string                 `json:"description,omitempty"`
 	Metadata       map[string]interface{} `json:"metadata,omitempty"`
+	// Source identifies where this node came from (codebase, memory, webhook).
+	// Nodes from the same extraction share the same Source.
+	Source *Source `json:"source,omitempty"`
 }
 
 // Edge represents a relationship between two nodes
@@ -42,6 +45,178 @@ type Graph struct {
 	Communities map[int][]string       `json:"communities"`
 	Metadata    map[string]interface{} `json:"metadata"`
 	ExtractedAt time.Time              `json:"extracted_at"`
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge node types (Ancora integration — spec §7)
+// ---------------------------------------------------------------------------
+
+// NodeType is a discriminated string for all node varieties in the graph.
+type NodeType string
+
+const (
+	// Code-derived node types (existing conventions)
+	NodeTypeFunction  NodeType = "function"
+	NodeTypeStruct    NodeType = "struct"
+	NodeTypeInterface NodeType = "interface"
+	NodeTypeFile      NodeType = "file"
+	NodeTypePackage   NodeType = "package"
+
+	// Knowledge node types (Ancora integration)
+	NodeTypeObservation  NodeType = "observation"
+	NodeTypeConcept      NodeType = "concept"
+	NodeTypeWorkspace    NodeType = "workspace"
+	NodeTypeVisibility   NodeType = "visibility"
+	NodeTypeOrganization NodeType = "organization"
+)
+
+// EdgeType is a discriminated string for graph relationships.
+type EdgeType string
+
+const (
+	// Code-derived edge types (existing conventions)
+	EdgeTypeCalls      EdgeType = "calls"
+	EdgeTypeImports    EdgeType = "imports"
+	EdgeTypeImplements EdgeType = "implements"
+
+	// Knowledge edge types (Ancora integration)
+	EdgeTypeReferences EdgeType = "references" // obs -> file/function
+	EdgeTypeRelatedTo  EdgeType = "related_to" // obs -> obs
+	EdgeTypeDefines    EdgeType = "defines"    // obs -> concept
+	EdgeTypeBelongsTo  EdgeType = "belongs_to" // obs -> concept
+)
+
+// ---------------------------------------------------------------------------
+// Source attribution — where knowledge came from
+// ---------------------------------------------------------------------------
+
+// SourceType discriminates knowledge sources.
+type SourceType string
+
+const (
+	// SourceTypeCodebase is a local or git-tracked codebase (files, functions, deps).
+	SourceTypeCodebase SourceType = "codebase"
+	// SourceTypeMemory is Ancora persistent memory (observations, decisions).
+	SourceTypeMemory SourceType = "memory"
+	// SourceTypeWebhook is external event sources (future: Jira, GitHub, etc.).
+	SourceTypeWebhook SourceType = "webhook"
+)
+
+// Source describes where a node or extraction result originated.
+// For codebases: detected from git remote or folder name.
+// For memory: always "ancora" with workspace/visibility metadata on nodes.
+type Source struct {
+	// Type discriminates the source category.
+	Type SourceType `json:"type"`
+	// Name is the project/repo name (e.g., "vela", "glim", "ancora").
+	Name string `json:"name"`
+	// Path is the local filesystem path (codebase only).
+	Path string `json:"path,omitempty"`
+	// Remote is the git remote URL if detected (codebase only).
+	Remote string `json:"remote,omitempty"`
+}
+
+// NodeTypeProject is the root node for a codebase extraction.
+const NodeTypeProject NodeType = "project"
+
+// NodeTypeMemorySource is the root node for all ancora memory.
+const NodeTypeMemorySource NodeType = "memory_source"
+
+// ObsReference describes a relationship from an observation to another artifact.
+// It mirrors the wire format used by Ancora but lives in the Vela type system.
+type ObsReference struct {
+	// Type is one of: "file", "observation", "concept", "function"
+	Type string `json:"type"`
+	// Target is the referenced artifact (path, ID, name, etc.)
+	Target string `json:"target"`
+}
+
+// ObservationNode represents an Ancora memory observation as a graph node.
+type ObservationNode struct {
+	// ID is the Vela node ID — "ancora:obs:<ancoraID>"
+	ID       string
+	NodeType NodeType
+	// AncoraID is the original Ancora observation primary key.
+	AncoraID int64
+	Title    string
+	Content  string
+	// ObsType is the Ancora observation category: "decision", "bugfix", etc.
+	ObsType    string
+	Workspace  string
+	References []ObsReference
+	CreatedAt  time.Time
+	UpdatedAt  time.Time
+}
+
+// ToNode converts an ObservationNode to a generic types.Node for graph storage.
+func (o *ObservationNode) ToNode() Node {
+	return Node{
+		ID:       o.ID,
+		Label:    o.Title,
+		NodeType: string(o.NodeType),
+		Metadata: map[string]interface{}{
+			"ancora_id": o.AncoraID,
+			"obs_type":  o.ObsType,
+			"workspace": o.Workspace,
+			"content":   o.Content,
+		},
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Watch / Daemon configuration (spec §8)
+// ---------------------------------------------------------------------------
+
+// WatchSourceConfig configures a single event source for the daemon.
+type WatchSourceConfig struct {
+	Name   string `yaml:"name"`
+	Type   string `yaml:"type"`   // "syfra" | "webhook"
+	Socket string `yaml:"socket"` // path for syfra sources
+}
+
+// ReconcilerConfig controls event batching behaviour.
+type ReconcilerConfig struct {
+	DebounceMs   int `yaml:"debounce_ms"`
+	MaxBatchSize int `yaml:"max_batch_size"`
+}
+
+// ExtractorConfig controls LLM-based reference extraction.
+type ExtractorConfig struct {
+	Enabled   bool   `yaml:"enabled"`
+	Workers   int    `yaml:"workers"`
+	WriteBack bool   `yaml:"write_back"`
+	Provider  string `yaml:"provider"`
+	Model     string `yaml:"model"`
+}
+
+// WatchConfig is the top-level daemon watch configuration.
+type WatchConfig struct {
+	Enabled    bool                `yaml:"enabled"`
+	Sources    []WatchSourceConfig `yaml:"sources"`
+	Reconciler ReconcilerConfig    `yaml:"reconciler"`
+	Extractor  ExtractorConfig     `yaml:"extractor"`
+}
+
+// DaemonConfig configures the background daemon process.
+type DaemonConfig struct {
+	PIDFile    string `yaml:"pid_file"`
+	LogFile    string `yaml:"log_file"`
+	LogLevel   string `yaml:"log_level"`
+	StatusFile string `yaml:"status_file"`
+}
+
+// DaemonSourceStatus holds per-source connectivity info written to the status file.
+type DaemonSourceStatus struct {
+	Connected  bool  `json:"connected"`
+	EventCount int64 `json:"event_count"`
+}
+
+// DaemonStatus is written by the daemon to StatusFile so the CLI can read
+// source connectivity without cross-process registry access.
+type DaemonStatus struct {
+	PID       int                           `json:"pid"`
+	Sources   map[string]DaemonSourceStatus `json:"sources"` // name -> status
+	UpdatedAt string                        `json:"updated_at"`
 }
 
 // LLMProvider defines the interface for pluggable LLM backends
@@ -82,11 +257,23 @@ type UIConfig struct {
 	EnableColors bool   `yaml:"enable_colors"`
 }
 
+// ObsidianConfig controls automatic Obsidian vault sync.
+// When AutoSync is true the daemon writes the vault after every successful
+// reconcile. VaultDir is the OUTPUT directory — Vela writes into
+// <VaultDir>/obsidian/ mirroring the manual `vela extract` layout.
+type ObsidianConfig struct {
+	AutoSync bool   `yaml:"auto_sync"`
+	VaultDir string `yaml:"vault_dir"` // e.g. "vela-out"
+}
+
 // Config is the global configuration for Vela
 type Config struct {
 	LLM        LLMConfig        `yaml:"llm"`
 	Extraction ExtractionConfig `yaml:"extraction"`
 	UI         UIConfig         `yaml:"ui"`
+	Watch      WatchConfig      `yaml:"watch"`
+	Daemon     DaemonConfig     `yaml:"daemon"`
+	Obsidian   ObsidianConfig   `yaml:"obsidian"`
 }
 
 // ExtractionProgress tracks the progress of document extraction
