@@ -56,11 +56,11 @@ jobs:
           - goos: darwin
             goarch: amd64
             platform: darwin-amd64
-            zig_target: x86_64-macos-none
+            zig_target: x86_64-macos.12.0-none
           - goos: darwin
             goarch: arm64
             platform: darwin-arm64
-            zig_target: aarch64-macos-none
+            zig_target: aarch64-macos.12.0-none
           - goos: windows
             goarch: amd64
             platform: windows-amd64
@@ -79,7 +79,7 @@ jobs:
       - name: Install Zig
         uses: goto-bus-stop/setup-zig@v2
         with:
-          version: "0.13.0"
+          version: "0.14.0"
 
       - name: Build binary
         working-directory: .
