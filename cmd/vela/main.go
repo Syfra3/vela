@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -67,6 +68,7 @@ codebases and technical documentation.`,
 
 	root.AddCommand(tuiCmd())
 	root.AddCommand(extractCmd())
+	root.AddCommand(benchCmd())
 	root.AddCommand(configCmd())
 	root.AddCommand(doctorCmd())
 	root.AddCommand(pathCmd())
@@ -145,6 +147,10 @@ func extractCmd() *cobra.Command {
 				return fmt.Errorf("invalid path: %w", err)
 			}
 
+			if outDir == "" {
+				outDir = config.OutDir(root)
+			}
+
 			// Load config
 			cfg, err := config.Load()
 			if err != nil {
@@ -176,18 +182,20 @@ func extractCmd() *cobra.Command {
 				fileCache = nil
 			}
 
-			// Ensure .velignore exists (create if missing)
-			if velignorePath, vErr := detect.EnsureVelignore(root); vErr != nil {
-				fmt.Fprintf(os.Stderr, "warning: could not create .velignore: %v\n", vErr)
-			} else if velignorePath != "" {
-				fmt.Printf("Created %s with default ignore patterns\n", velignorePath)
-			}
-
-			// Discover files
-			exts := []string{".go", ".py", ".ts", ".tsx", ".js", ".jsx", ".md", ".txt", ".pdf"}
-			files, err := detect.Collect(root, exts)
+			// Discover files (respects .gitignore, .velignore, and tech defaults)
+			detected, err := detect.Files(root)
 			if err != nil {
 				return fmt.Errorf("detecting files: %w", err)
+			}
+			extSet := map[string]bool{
+				".go": true, ".py": true, ".ts": true, ".tsx": true,
+				".js": true, ".jsx": true, ".md": true, ".txt": true, ".pdf": true,
+			}
+			var files []string
+			for _, e := range detected.Files {
+				if extSet[filepath.Ext(e.AbsPath)] {
+					files = append(files, e.AbsPath)
+				}
 			}
 			if len(files) == 0 {
 				fmt.Println("No files found.")
@@ -342,7 +350,7 @@ func extractCmd() *cobra.Command {
 			}
 
 			// Wire query engine now that graph.json is on disk
-			if qe, qErr := query.LoadFromFile(outDir + "/graph.json"); qErr == nil {
+			if qe, qErr := query.LoadFromFile(config.GraphFilePath(outDir)); qErr == nil {
 				queryEngine = qe
 			}
 
@@ -357,7 +365,11 @@ func extractCmd() *cobra.Command {
 					fmt.Fprintf(os.Stderr, "  warning: HTML export failed: %v\n", hErr)
 				}
 				// Obsidian vault
-				if oErr := export.WriteObsidian(tg, outDir); oErr != nil {
+				obsVaultDir := cfg.Obsidian.VaultDir
+				if obsVaultDir == "" {
+					obsVaultDir = config.DefaultVaultDir()
+				}
+				if oErr := export.WriteObsidian(tg, obsVaultDir); oErr != nil {
 					fmt.Fprintf(os.Stderr, "  warning: Obsidian export failed: %v\n", oErr)
 				}
 			}
@@ -435,7 +447,7 @@ func extractCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&outDir, "out", "vela-out", "Output directory")
+	cmd.Flags().StringVar(&outDir, "out", "", "Output directory (default: <root>/.vela)")
 	cmd.Flags().BoolVar(&noTUI, "no-tui", false, "Disable TUI, use plain log output")
 	cmd.Flags().BoolVar(&noViz, "no-viz", false, "Skip HTML and Obsidian exports")
 	cmd.Flags().BoolVar(&watchMode, "watch", false, "Watch for file changes and re-extract automatically")
@@ -513,11 +525,13 @@ func doctorCmd() *cobra.Command {
 // Query commands
 // ---------------------------------------------------------------------------
 
-const defaultGraphFile = "vela-out/graph.json"
-
 func loadEngine(graphFlag string) (*query.Engine, error) {
 	if graphFlag == "" {
-		graphFlag = defaultGraphFile
+		var err error
+		graphFlag, err = config.FindGraphFile(".")
+		if err != nil {
+			return nil, err
+		}
 	}
 	return query.LoadFromFile(graphFlag)
 }
@@ -596,7 +610,11 @@ func serveCmd() *cobra.Command {
 				graphFile = args[0]
 			}
 			if graphFile == "" {
-				graphFile = defaultGraphFile
+				var err error
+				graphFile, err = config.FindGraphFile(".")
+				if err != nil {
+					return err
+				}
 			}
 			eng, err := query.LoadFromFile(graphFile)
 			if err != nil {
@@ -695,7 +713,7 @@ func loadDaemon(graphFile string) (*daemon.Daemon, error) {
 		return nil, fmt.Errorf("loading config: %w", err)
 	}
 	if graphFile == "" {
-		graphFile = defaultGraphFile
+		graphFile, _ = config.FindGraphFile(".")
 	}
 	// Load the existing graph so the daemon can patch it in-place.
 	nodes, edges, err := loadExistingGraphData(graphFile)

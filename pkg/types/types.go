@@ -80,10 +80,17 @@ const (
 	EdgeTypeImplements EdgeType = "implements"
 
 	// Knowledge edge types (Ancora integration)
-	EdgeTypeReferences EdgeType = "references" // obs -> file/function
-	EdgeTypeRelatedTo  EdgeType = "related_to" // obs -> obs
-	EdgeTypeDefines    EdgeType = "defines"    // obs -> concept
-	EdgeTypeBelongsTo  EdgeType = "belongs_to" // obs -> concept
+	EdgeTypeReferences EdgeType = "references"  // obs -> file/function (generic fallback)
+	EdgeTypeRelatedTo  EdgeType = "related_to"  // obs -> obs
+	EdgeTypeDefines    EdgeType = "defines"     // obs -> concept
+	EdgeTypeBelongsTo  EdgeType = "belongs_to"  // obs -> workspace/visibility
+
+	// Typed cross-source relations (derived from observation ObsType)
+	EdgeTypeDocuments  EdgeType = "documents"   // architecture/discovery obs -> code
+	EdgeTypeDecidesOn  EdgeType = "decides_on"  // decision obs -> code
+	EdgeTypeConstrains EdgeType = "constrains"  // bugfix obs -> code
+	EdgeTypeExemplifies EdgeType = "exemplifies" // pattern obs -> code
+	EdgeTypeDeprecates EdgeType = "deprecates"  // deprecation obs -> code
 )
 
 // ---------------------------------------------------------------------------
@@ -146,6 +153,8 @@ type ObservationNode struct {
 	References []ObsReference
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
+	// Source identifies this node as memory-derived (set by the patcher/extractor).
+	Source *Source
 }
 
 // ToNode converts an ObservationNode to a generic types.Node for graph storage.
@@ -154,6 +163,7 @@ func (o *ObservationNode) ToNode() Node {
 		ID:       o.ID,
 		Label:    o.Title,
 		NodeType: string(o.NodeType),
+		Source:   o.Source,
 		Metadata: map[string]interface{}{
 			"ancora_id": o.AncoraID,
 			"obs_type":  o.ObsType,

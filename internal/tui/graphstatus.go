@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,180 +10,21 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/Syfra3/vela/internal/config"
+	igraph "github.com/Syfra3/vela/internal/graph"
 )
 
 // ---------------------------------------------------------------------------
-// GraphMetrics — computed from graph.json + obsidian vault
+// TUI-specific vault stats (not part of HealthMetrics)
 // ---------------------------------------------------------------------------
 
-type GraphMetrics struct {
-	// Graph
-	Nodes         int
-	Edges         int
-	BrokenEdges   int
-	IsolatedNodes int // nodes with no edges at all
-	ConnectedPct  int // % nodes with at least one edge
-
-	// Connectivity buckets
-	HubNodes  int // degree >= 10
-	LeafNodes int // degree == 1
-
-	// Top 5 nodes by out-degree
-	TopNodes []nodeRank
-
-	// Obsidian vault
-	VaultNotes   int
-	VaultLinks   int
-	BrokenLinks  int
-	VaultHealthy bool
-
-	// Meta
-	GeneratedAt string
-	GraphPath   string
-	VaultPath   string
-	LoadErr     error
-}
-
-type nodeRank struct {
-	Label  string
-	File   string
-	Kind   string
-	OutDeg int
-	InDeg  int
-}
-
-// loadGraphMetrics reads graph.json and the obsidian vault and computes metrics.
-func loadGraphMetrics(outDir string) GraphMetrics {
-	m := GraphMetrics{
-		GraphPath: filepath.Join(outDir, "graph.json"),
-		VaultPath: filepath.Join(outDir, "obsidian"),
-	}
-
-	// ── graph.json ──────────────────────────────────────────────────────────
-	data, err := os.ReadFile(m.GraphPath)
-	if err != nil {
-		m.LoadErr = fmt.Errorf("graph.json not found — run Extract first")
-		return m
-	}
-
-	var raw struct {
-		Nodes []struct {
-			ID    string `json:"id"`
-			Label string `json:"label"`
-			Kind  string `json:"kind"`
-			File  string `json:"file"`
-		} `json:"nodes"`
-		Edges []struct {
-			From string `json:"from"`
-			To   string `json:"to"`
-		} `json:"edges"`
-		Meta struct {
-			GeneratedAt string `json:"generatedAt"`
-		} `json:"meta"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		m.LoadErr = fmt.Errorf("corrupt graph.json: %w", err)
-		return m
-	}
-
-	m.Nodes = len(raw.Nodes)
-	m.Edges = len(raw.Edges)
-	m.GeneratedAt = raw.Meta.GeneratedAt
-
-	// Build label set and degree maps
-	labelSet := make(map[string]bool, m.Nodes)
-	outDeg := make(map[string]int, m.Nodes)
-	inDeg := make(map[string]int, m.Nodes)
-	for _, n := range raw.Nodes {
-		labelSet[n.Label] = true
-	}
-	for _, e := range raw.Edges {
-		if !labelSet[e.To] {
-			m.BrokenEdges++
-		}
-		outDeg[e.From]++
-		// resolve target id for in-degree
-		for _, n := range raw.Nodes {
-			if n.Label == e.To {
-				inDeg[n.ID]++
-				break
-			}
-		}
-	}
-
-	// Per-node stats
-	for _, n := range raw.Nodes {
-		od := outDeg[n.ID]
-		id := inDeg[n.ID]
-		total := od + id
-		if total == 0 {
-			m.IsolatedNodes++
-		}
-		if total >= 10 {
-			m.HubNodes++
-		}
-		if total == 1 {
-			m.LeafNodes++
-		}
-	}
-	if m.Nodes > 0 {
-		m.ConnectedPct = 100 * (m.Nodes - m.IsolatedNodes) / m.Nodes
-	}
-
-	// Top 5 by out-degree
-	type ranked struct {
-		id    string
-		label string
-		file  string
-		kind  string
-		out   int
-		in    int
-	}
-	var ranked5 []ranked
-	for _, n := range raw.Nodes {
-		ranked5 = append(ranked5, ranked{n.ID, n.Label, n.File, n.Kind, outDeg[n.ID], inDeg[n.ID]})
-	}
-	// simple top-5 selection (avoid sorting the whole slice)
-	for i := 0; i < 5 && len(ranked5) > 0; i++ {
-		best := 0
-		for j := 1; j < len(ranked5); j++ {
-			if ranked5[j].out > ranked5[best].out {
-				best = j
-			}
-		}
-		r := ranked5[best]
-		m.TopNodes = append(m.TopNodes, nodeRank{r.label, r.file, r.kind, r.out, r.in})
-		ranked5 = append(ranked5[:best], ranked5[best+1:]...)
-	}
-
-	// ── Obsidian vault ───────────────────────────────────────────────────────
-	entries, err := os.ReadDir(m.VaultPath)
-	if err == nil {
-		re := regexp.MustCompile(`\[\[(.+?)\]\]`)
-		mdFiles := make(map[string]bool)
-		for _, e := range entries {
-			if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
-				mdFiles[strings.TrimSuffix(e.Name(), ".md")] = true
-			}
-		}
-		m.VaultNotes = len(mdFiles)
-
-		for name := range mdFiles {
-			content, rerr := os.ReadFile(filepath.Join(m.VaultPath, name+".md"))
-			if rerr != nil {
-				continue
-			}
-			for _, match := range re.FindAllSubmatch(content, -1) {
-				m.VaultLinks++
-				if !mdFiles[string(match[1])] {
-					m.BrokenLinks++
-				}
-			}
-		}
-		m.VaultHealthy = m.BrokenLinks == 0 && m.VaultNotes > 0
-	}
-
-	return m
+type vaultStats struct {
+	Notes   int
+	Links   int
+	Broken  int
+	Healthy bool
+	Path    string
 }
 
 // ---------------------------------------------------------------------------
@@ -192,12 +32,16 @@ func loadGraphMetrics(outDir string) GraphMetrics {
 // ---------------------------------------------------------------------------
 
 type graphStatusLoadedMsg struct {
-	metrics GraphMetrics
+	metrics igraph.HealthMetrics
+	vault   vaultStats
+	loadErr error
 }
 
 type GraphStatusModel struct {
-	metrics  GraphMetrics
-	loading  bool
+	metrics igraph.HealthMetrics
+	vault   vaultStats
+	loadErr error
+	loading bool
 	quitting bool
 }
 
@@ -213,14 +57,53 @@ func (m GraphStatusModel) Init() tea.Cmd {
 
 func loadMetricsCmd() tea.Cmd {
 	return func() tea.Msg {
-		return graphStatusLoadedMsg{metrics: loadGraphMetrics("vela-out")}
+		graphPath, err := config.FindGraphFile(".")
+		if err != nil {
+			return graphStatusLoadedMsg{loadErr: err}
+		}
+		outDir := filepath.Dir(graphPath)
+		mx, loadErr := igraph.LoadHealthMetrics(graphPath, 5)
+		vs := loadVaultStats(filepath.Join(outDir, "obsidian"))
+		return graphStatusLoadedMsg{metrics: mx, vault: vs, loadErr: loadErr}
 	}
+}
+
+func loadVaultStats(vaultPath string) vaultStats {
+	vs := vaultStats{Path: vaultPath}
+	entries, err := os.ReadDir(vaultPath)
+	if err != nil {
+		return vs
+	}
+	re := regexp.MustCompile(`\[\[(.+?)\]\]`)
+	mdFiles := make(map[string]bool)
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+			mdFiles[strings.TrimSuffix(e.Name(), ".md")] = true
+		}
+	}
+	vs.Notes = len(mdFiles)
+	for name := range mdFiles {
+		content, rerr := os.ReadFile(filepath.Join(vaultPath, name+".md"))
+		if rerr != nil {
+			continue
+		}
+		for _, match := range re.FindAllSubmatch(content, -1) {
+			vs.Links++
+			if !mdFiles[string(match[1])] {
+				vs.Broken++
+			}
+		}
+	}
+	vs.Healthy = vs.Broken == 0 && vs.Notes > 0
+	return vs
 }
 
 func (m GraphStatusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case graphStatusLoadedMsg:
 		m.metrics = msg.metrics
+		m.vault = msg.vault
+		m.loadErr = msg.loadErr
 		m.loading = false
 		return m, nil
 	case tea.KeyMsg:
@@ -251,48 +134,43 @@ func (m GraphStatusModel) ViewContent() string {
 		return b.String()
 	}
 
-	mx := m.metrics
-
-	if mx.LoadErr != nil {
-		b.WriteString(errS.Render("✗ " + mx.LoadErr.Error()))
+	if m.loadErr != nil {
+		b.WriteString(errS.Render("✗ " + m.loadErr.Error()))
 		return b.String()
 	}
+
+	mx := m.metrics
+	vs := m.vault
 
 	// ── Graph section ────────────────────────────────────────────────────────
 	b.WriteString(accent.Render("Graph"))
 	b.WriteString("\n\n")
 
-	// Generated at
 	if mx.GeneratedAt != "" {
 		t, err := time.Parse(time.RFC3339, mx.GeneratedAt)
 		if err == nil {
-			b.WriteString(fmt.Sprintf("  %s %s\n\n", label.Render("Generated"), dim.Render(t.Format("2006-01-02 15:04 UTC"))))
+			b.WriteString(fmt.Sprintf("  %s %s\n\n",
+				label.Render("Generated"),
+				dim.Render(t.Format("2006-01-02 15:04 UTC")),
+			))
 		}
 	}
 
-	// Nodes / Edges row
-	b.WriteString(fmt.Sprintf("  %s %s\n",
-		label.Render("Nodes"),
-		text.Render(fmt.Sprintf("%d", mx.Nodes)),
-	))
-	b.WriteString(fmt.Sprintf("  %s %s\n",
-		label.Render("Edges"),
-		text.Render(fmt.Sprintf("%d", mx.Edges)),
-	))
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Nodes"), text.Render(fmt.Sprintf("%d", mx.Nodes))))
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Edges"), text.Render(fmt.Sprintf("%d", mx.Edges))))
 
-	// Broken edges
 	brokenEdgeS := ok.Render("0 ✓")
 	if mx.BrokenEdges > 0 {
 		brokenEdgeS = errS.Render(fmt.Sprintf("%d ✗", mx.BrokenEdges))
 	}
-	b.WriteString(fmt.Sprintf("  %s %s\n",
-		label.Render("Broken edges"),
-		brokenEdgeS,
-	))
-
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Broken edges"), brokenEdgeS))
 	b.WriteString("\n")
 
-	// Connectivity bar
+	// ── Coverage ─────────────────────────────────────────────────────────────
+	b.WriteString(accent.Render("Coverage"))
+	b.WriteString("\n\n")
+
+	// Connected bar
 	connColor := colorSuccess
 	if mx.ConnectedPct < 50 {
 		connColor = colorWarn
@@ -300,25 +178,91 @@ func (m GraphStatusModel) ViewContent() string {
 	connBar := bar(mx.ConnectedPct, 24)
 	connLabel := lipgloss.NewStyle().Foreground(connColor).Bold(true).
 		Render(fmt.Sprintf("%d%%", mx.ConnectedPct))
-	b.WriteString(fmt.Sprintf("  %s %s %s\n",
-		label.Render("Connected nodes"),
-		connBar,
-		connLabel,
-	))
-	b.WriteString(fmt.Sprintf("  %s %s\n",
-		label.Render("Isolated nodes"),
-		dim.Render(fmt.Sprintf("%d", mx.IsolatedNodes)),
-	))
+	b.WriteString(fmt.Sprintf("  %s %s %s\n", label.Render("Connected nodes"), connBar, connLabel))
 	b.WriteString(fmt.Sprintf("  %s %s   %s %s\n",
 		label.Render("Hub nodes (≥10 edges)"),
 		text.Render(fmt.Sprintf("%d", mx.HubNodes)),
 		dim.Render("leaf (1 edge)"),
 		dim.Render(fmt.Sprintf("%d", mx.LeafNodes)),
 	))
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Isolated nodes"), dim.Render(fmt.Sprintf("%d", mx.IsolatedNodes))))
+	b.WriteString("\n")
 
-	// ── Top nodes ────────────────────────────────────────────────────────────
-	if len(mx.TopNodes) > 0 {
-		b.WriteString("\n")
+	// ── Quality ───────────────────────────────────────────────────────────────
+	b.WriteString(accent.Render("Quality"))
+	b.WriteString("\n\n")
+
+	// Resolution rate bar
+	resRate := int(mx.ResolutionRate * 100)
+	resColor := colorSuccess
+	if resRate < 85 {
+		resColor = colorWarn
+	}
+	if resRate < 60 {
+		resColor = colorErr
+	}
+	resBar := bar(resRate, 24)
+	resLabel := lipgloss.NewStyle().Foreground(resColor).Bold(true).Render(fmt.Sprintf("%d%%", resRate))
+	b.WriteString(fmt.Sprintf("  %s %s %s\n", label.Render("Resolution rate"), resBar, resLabel))
+
+	// Confidence distribution
+	total := mx.Edges - mx.BrokenEdges
+	if total > 0 {
+		extracted := mx.ConfidenceDist["EXTRACTED"]
+		inferred := mx.ConfidenceDist["INFERRED"]
+		ambiguous := mx.ConfidenceDist["AMBIGUOUS"]
+		extRate := int(mx.ExtractedRate * 100)
+
+		extColor := colorSuccess
+		if extRate < 50 {
+			extColor = colorWarn
+		}
+		extBar := bar(extRate, 24)
+		extLabel := lipgloss.NewStyle().Foreground(extColor).Bold(true).Render(fmt.Sprintf("%d%%", extRate))
+		b.WriteString(fmt.Sprintf("  %s %s %s\n", label.Render("EXTRACTED rate"), extBar, extLabel))
+
+		if inferred > 0 || ambiguous > 0 {
+			b.WriteString(fmt.Sprintf("  %s EXTRACTED:%d  INFERRED:%d  AMBIGUOUS:%d\n",
+				label.Render(""),
+				extracted, inferred, ambiguous,
+			))
+		}
+	}
+
+	// Degree stats
+	b.WriteString(fmt.Sprintf("  %s avg:%.1f  median:%d  p95:%d  max:%d\n",
+		label.Render("Degree stats"),
+		mx.AvgDegree, mx.MedianDegree, mx.P95Degree, mx.MaxDegree,
+	))
+	b.WriteString("\n")
+
+	// ── Communities ───────────────────────────────────────────────────────────
+	b.WriteString(accent.Render("Communities"))
+	b.WriteString("\n\n")
+
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Communities"), text.Render(fmt.Sprintf("%d", mx.Communities))))
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Largest"), dim.Render(fmt.Sprintf("%d nodes", mx.LargestCommunitySize))))
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Singletons"), dim.Render(fmt.Sprintf("%d", mx.SingletonCommunities))))
+
+	modColor := colorWarn
+	modNote := "none"
+	if mx.Modularity > 0.3 {
+		modColor = colorSuccess
+		modNote = "strong ✓"
+	} else if mx.Modularity > 0.1 {
+		modColor = colorText
+		modNote = "weak"
+	}
+	modStyle := lipgloss.NewStyle().Foreground(modColor).Bold(true)
+	b.WriteString(fmt.Sprintf("  %s %s  %s\n",
+		label.Render("Modularity (Q)"),
+		text.Render(fmt.Sprintf("%.3f", mx.Modularity)),
+		modStyle.Render(modNote),
+	))
+	b.WriteString("\n")
+
+	// ── Top nodes ─────────────────────────────────────────────────────────────
+	if len(mx.TopByOutDegree) > 0 {
 		b.WriteString(accent.Render("Top Nodes by Out-Degree"))
 		b.WriteString("\n\n")
 
@@ -326,7 +270,7 @@ func (m GraphStatusModel) ViewContent() string {
 		degStyle := lipgloss.NewStyle().Foreground(colorText)
 		fileStyle := lipgloss.NewStyle().Foreground(colorSubtext)
 
-		for i, n := range mx.TopNodes {
+		for i, n := range mx.TopByOutDegree {
 			shortFile := filepath.Base(n.File)
 			kindColor := nodeKindColor(n.Kind)
 			nameStyle := lipgloss.NewStyle().Foreground(kindColor).Width(24)
@@ -339,46 +283,33 @@ func (m GraphStatusModel) ViewContent() string {
 				fileStyle.Render(shortFile),
 			))
 		}
+		b.WriteString("\n")
 	}
 
-	// ── Obsidian vault section ───────────────────────────────────────────────
-	b.WriteString("\n")
+	// ── Obsidian vault section ────────────────────────────────────────────────
 	b.WriteString(accent.Render("Obsidian Vault"))
 	b.WriteString("\n\n")
 
-	if mx.VaultNotes == 0 {
+	if vs.Notes == 0 {
 		b.WriteString(fmt.Sprintf("  %s\n", warn.Render("No vault found — run Export to Obsidian")))
 	} else {
-		b.WriteString(fmt.Sprintf("  %s %s\n",
-			label.Render("Notes"),
-			text.Render(fmt.Sprintf("%d", mx.VaultNotes)),
-		))
-		b.WriteString(fmt.Sprintf("  %s %s\n",
-			label.Render("Wikilinks"),
-			text.Render(fmt.Sprintf("%d", mx.VaultLinks)),
-		))
+		b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Notes"), text.Render(fmt.Sprintf("%d", vs.Notes))))
+		b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Wikilinks"), text.Render(fmt.Sprintf("%d", vs.Links))))
 
 		brokenLinkS := ok.Render("0 ✓")
-		if mx.BrokenLinks > 0 {
-			brokenLinkS = errS.Render(fmt.Sprintf("%d ✗", mx.BrokenLinks))
+		if vs.Broken > 0 {
+			brokenLinkS = errS.Render(fmt.Sprintf("%d ✗", vs.Broken))
 		}
-		b.WriteString(fmt.Sprintf("  %s %s\n",
-			label.Render("Broken links"),
-			brokenLinkS,
-		))
+		b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Broken links"), brokenLinkS))
 
 		healthS := ok.Render("healthy ✓")
-		if !mx.VaultHealthy {
+		if !vs.Healthy {
 			healthS = warn.Render("degraded — re-export")
 		}
-		b.WriteString(fmt.Sprintf("  %s %s\n",
-			label.Render("Vault status"),
-			healthS,
-		))
+		b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Vault status"), healthS))
 	}
 
 	b.WriteString("\n")
-
 	return b.String()
 }
 

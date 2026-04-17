@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/Syfra3/vela/internal/ancora"
@@ -211,7 +212,12 @@ func ExtractAncora(
 		}
 
 		// Explicit references stored in the observation
-		edges = append(edges, parseObsReferences(o.ID, o.References)...)
+		refEdges := parseObsReferences(o.ID, o.Type, o.References)
+		if len(refEdges) == 0 {
+			// Fallback: extract file paths from the **Where**: section of content
+			refEdges = parseWhereReferences(o.ID, o.Type, o.Content)
+		}
+		edges = append(edges, refEdges...)
 	}
 
 	// ── LLM-inferred semantic edges ───────────────────────────────────────
@@ -228,7 +234,8 @@ func ExtractAncora(
 
 // parseObsReferences decodes the JSON references string stored in an
 // observation and returns graph edges for each explicit reference.
-func parseObsReferences(obsID int64, refsJSON string) []types.Edge {
+// obsType is used to derive the semantic edge relation for code references.
+func parseObsReferences(obsID int64, obsType, refsJSON string) []types.Edge {
 	if refsJSON == "" {
 		return nil
 	}
@@ -238,18 +245,90 @@ func parseObsReferences(obsID int64, refsJSON string) []types.Edge {
 	}
 	var edges []types.Edge
 	for _, r := range refs {
-		relation := "references"
-		switch r.Type {
-		case "observation":
-			relation = "related_to"
-		case "concept":
-			relation = "defines"
-		}
+		relation := obsRefRelation(r.Type, obsType)
 		edges = append(edges, types.Edge{
 			Source:     obsNodeID(obsID),
 			Target:     r.Target,
 			Relation:   relation,
 			SourceFile: fmt.Sprintf("ancora:obs:%d", obsID),
+		})
+	}
+	return edges
+}
+
+// obsRefRelation maps a reference type + observation category to a semantic EdgeType.
+func obsRefRelation(refType, obsType string) string {
+	switch refType {
+	case "observation":
+		return string(types.EdgeTypeRelatedTo)
+	case "concept":
+		return string(types.EdgeTypeDefines)
+	default:
+		// file, function — derive from observation category
+		switch obsType {
+		case "decision":
+			return string(types.EdgeTypeDecidesOn)
+		case "bugfix":
+			return string(types.EdgeTypeConstrains)
+		case "pattern":
+			return string(types.EdgeTypeExemplifies)
+		case "architecture", "discovery", "learning":
+			return string(types.EdgeTypeDocuments)
+		default:
+			return string(types.EdgeTypeReferences)
+		}
+	}
+}
+
+// knownCodeExts is the set of file extensions recognized as code/doc targets
+// when parsing free-text **Where**: sections.
+var knownCodeExts = map[string]bool{
+	".go": true, ".ts": true, ".tsx": true, ".js": true, ".jsx": true,
+	".py": true, ".rs": true, ".java": true, ".kt": true, ".swift": true,
+	".md": true, ".yaml": true, ".yml": true, ".json": true, ".toml": true,
+}
+
+// parseWhereReferences extracts file-path references from the **Where**: section
+// of an observation's content. Used as a fallback when explicit references[] is empty.
+func parseWhereReferences(obsID int64, obsType, content string) []types.Edge {
+	// Find the **Where**: section.
+	const marker = "**Where**:"
+	idx := strings.Index(content, marker)
+	if idx == -1 {
+		return nil
+	}
+	section := content[idx+len(marker):]
+
+	// Take only text until the next **<field>**: header.
+	if next := strings.Index(section, "**"); next != -1 {
+		// skip if it's immediately after (e.g. inline bold text inside the value)
+		if next > 0 {
+			section = section[:next]
+		}
+	}
+
+	relation := obsRefRelation("file", obsType)
+	srcFile := fmt.Sprintf("ancora:obs:%d", obsID)
+
+	var edges []types.Edge
+	seen := make(map[string]bool)
+	for _, token := range strings.Fields(section) {
+		// Strip trailing punctuation/list markers.
+		token = strings.Trim(token, ",-•*`\"'()")
+		if token == "" || seen[token] {
+			continue
+		}
+		ext := filepath.Ext(token)
+		if ext == "" || !knownCodeExts[ext] {
+			continue
+		}
+		seen[token] = true
+		edges = append(edges, types.Edge{
+			Source:     obsNodeID(obsID),
+			Target:     token,
+			Relation:   relation,
+			Confidence: "INFERRED",
+			SourceFile: srcFile,
 		})
 	}
 	return edges

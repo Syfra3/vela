@@ -65,7 +65,7 @@ func defaults() *types.Config {
 		},
 		Obsidian: types.ObsidianConfig{
 			AutoSync: false,
-			VaultDir: "vela-out",
+			VaultDir: DefaultVaultDir(),
 		},
 	}
 }

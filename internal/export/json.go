@@ -18,11 +18,13 @@ type graphJSON struct {
 }
 
 type nodeJSON struct {
-	ID        string `json:"id"`
-	Label     string `json:"label"`
-	Kind      string `json:"kind"`
-	File      string `json:"file,omitempty"`
-	Community int    `json:"community,omitempty"`
+	ID         string `json:"id"`
+	Label      string `json:"label"`
+	Kind       string `json:"kind"`
+	File       string `json:"file,omitempty"`
+	Community  int    `json:"community,omitempty"`
+	SourceType string `json:"source_type,omitempty"` // "codebase" | "memory" | "webhook"
+	SourceName string `json:"source_name,omitempty"` // repo/project name
 }
 
 type edgeJSON struct {
@@ -57,13 +59,18 @@ func WriteJSON(g *types.Graph, outDir string) error {
 	}
 
 	for i, n := range g.Nodes {
-		out.Nodes[i] = nodeJSON{
+		nj := nodeJSON{
 			ID:        n.ID,
 			Label:     n.Label,
 			Kind:      n.NodeType,
 			File:      n.SourceFile,
 			Community: n.Community,
 		}
+		if n.Source != nil {
+			nj.SourceType = string(n.Source.Type)
+			nj.SourceName = n.Source.Name
+		}
+		out.Nodes[i] = nj
 	}
 
 	for i, e := range g.Edges {
