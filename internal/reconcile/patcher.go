@@ -9,6 +9,14 @@ import (
 	"gonum.org/v1/gonum/graph/simple"
 )
 
+// memorySrc is the Source stamped on all observation nodes entering via the
+// streaming path (Ancora IPC). Mirrors extract.memorySrc but lives here to
+// avoid an import cycle.
+var memorySrc = &types.Source{
+	Type: types.SourceTypeMemory,
+	Name: "ancora",
+}
+
 // Patcher applies a ChangeSet to the in-memory graph using minimal mutations.
 // It maintains indexes so it can quickly locate existing nodes and edges
 // without scanning the full graph on every event.
@@ -69,6 +77,7 @@ func (p *Patcher) LLMQueue() <-chan types.ObservationNode {
 
 // addNode inserts a new ObservationNode into the graph.
 func (p *Patcher) addNode(obs *types.ObservationNode) error {
+	obs.Source = memorySrc
 	node := obs.ToNode()
 
 	// Upsert: if a node with this ID already exists, treat as update.
@@ -166,13 +175,11 @@ func (p *Patcher) deleteNode(ancoraID int64) {
 // ObservationNode. Targets that cannot be resolved are silently skipped.
 func (p *Patcher) addReferenceEdges(obs *types.ObservationNode) {
 	for _, ref := range obs.References {
-		edgeRelation := referenceRelation(ref.Type)
 		edge := types.Edge{
 			Source:   obs.ID,
 			Target:   ref.Target,
-			Relation: edgeRelation,
+			Relation: referenceRelation(ref.Type, obs.ObsType),
 		}
-
 		// Only add to ResolvedEdges — the gonum graph is not updated here
 		// because the target may be a bare label (file path, concept) that
 		// does not correspond to an existing gonum node.
@@ -191,15 +198,33 @@ func (p *Patcher) removeReferenceEdges(nodeID string) {
 	p.graph.ResolvedEdges = filtered
 }
 
-// referenceRelation maps a Reference.Type to an EdgeType string.
-func referenceRelation(refType string) string {
+// referenceRelation maps a Reference.Type + observation ObsType to an EdgeType.
+// For obs→obs and obs→concept the ref type is authoritative.
+// For obs→code (file/function), the observation type drives the semantic relation.
+func referenceRelation(refType, obsType string) string {
 	switch refType {
 	case "observation":
 		return string(types.EdgeTypeRelatedTo)
 	case "concept":
 		return string(types.EdgeTypeDefines)
 	default:
-		// "file", "function", or unknown
+		// file, function, or unknown — derive from observation category
+		return obsTypeRelation(obsType)
+	}
+}
+
+// obsTypeRelation returns the cross-source edge type for a given observation ObsType.
+func obsTypeRelation(obsType string) string {
+	switch obsType {
+	case "decision":
+		return string(types.EdgeTypeDecidesOn)
+	case "bugfix":
+		return string(types.EdgeTypeConstrains)
+	case "pattern":
+		return string(types.EdgeTypeExemplifies)
+	case "architecture", "discovery", "learning":
+		return string(types.EdgeTypeDocuments)
+	default:
 		return string(types.EdgeTypeReferences)
 	}
 }

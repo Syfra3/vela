@@ -1,9 +1,15 @@
 package main
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -42,13 +48,32 @@ Use --baseline to compare against a previous bench run (JSON output).`,
 				return fmt.Errorf("loading graph: %w", err)
 			}
 
+			historyDir, err := benchHistoryDir(graphFile)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: cannot resolve bench history dir: %v\n", err)
+			}
+
+			baselinePath := baseline
+			if baselinePath == "" && historyDir != "" {
+				baselinePath, err = latestBenchSnapshot(historyDir)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "warning: cannot resolve previous bench snapshot: %v\n", err)
+				}
+			}
+
+			if historyDir != "" {
+				if _, err := writeBenchSnapshot(historyDir, m); err != nil {
+					fmt.Fprintf(os.Stderr, "warning: cannot persist bench snapshot: %v\n", err)
+				}
+			}
+
 			if jsonOut {
 				enc := json.NewEncoder(os.Stdout)
 				enc.SetIndent("", "  ")
 				return enc.Encode(m)
 			}
 
-			printBenchReport(m, baseline)
+			printBenchReport(m, baselinePath)
 			return nil
 		},
 	}
@@ -58,6 +83,107 @@ Use --baseline to compare against a previous bench run (JSON output).`,
 	cmd.Flags().StringVar(&baseline, "baseline", "", "Path to a previous bench JSON to diff against")
 	cmd.Flags().IntVar(&topN, "top", 10, "Number of top nodes to list")
 	return cmd
+}
+
+func benchHistoryDir(graphFile string) (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolving home directory: %w", err)
+	}
+
+	absPath, err := filepath.Abs(graphFile)
+	if err != nil {
+		absPath = graphFile
+	}
+
+	base := filepath.Base(absPath)
+	base = strings.TrimSuffix(base, filepath.Ext(base))
+	base = sanitizeHistoryName(base)
+	if base == "" {
+		base = "graph"
+	}
+
+	sum := sha1.Sum([]byte(absPath))
+	hash := hex.EncodeToString(sum[:])[:10]
+	return filepath.Join(home, ".vela", "bench-history", base+"-"+hash), nil
+}
+
+func sanitizeHistoryName(s string) string {
+	var b strings.Builder
+	lastDash := false
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastDash = false
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r + ('a' - 'A'))
+			lastDash = false
+		default:
+			if !lastDash && b.Len() > 0 {
+				b.WriteByte('-')
+				lastDash = true
+			}
+		}
+	}
+	return strings.Trim(b.String(), "-")
+}
+
+func latestBenchSnapshot(historyDir string) (string, error) {
+	entries, err := os.ReadDir(historyDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+
+	files := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		files = append(files, entry.Name())
+	}
+	if len(files) == 0 {
+		return "", nil
+	}
+
+	sort.Strings(files)
+	return filepath.Join(historyDir, files[len(files)-1]), nil
+}
+
+func writeBenchSnapshot(historyDir string, m igraph.HealthMetrics) (string, error) {
+	if err := os.MkdirAll(historyDir, 0755); err != nil {
+		return "", err
+	}
+
+	ts := m.GeneratedAt
+	if ts == "" {
+		ts = time.Now().UTC().Format(time.RFC3339)
+	}
+	parsed, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		parsed = time.Now().UTC()
+	}
+
+	baseName := "bench-" + parsed.UTC().Format("20060102T150405Z")
+	path := filepath.Join(historyDir, baseName+".json")
+	for i := 1; ; i++ {
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			break
+		}
+		path = filepath.Join(historyDir, fmt.Sprintf("%s-%d.json", baseName, i))
+	}
+
+	data, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return "", err
+	}
+	return path, nil
 }
 
 func printBenchReport(m igraph.HealthMetrics, baselinePath string) {
@@ -81,6 +207,9 @@ func printBenchReport(m igraph.HealthMetrics, baselinePath string) {
 		fmt.Printf("  generated %s\n", m.GeneratedAt)
 	}
 	fmt.Printf("  source: %s\n", m.Path)
+	if base != nil {
+		fmt.Printf("  baseline: %s\n", baselinePath)
+	}
 	fmt.Println()
 
 	section := func(title string) {

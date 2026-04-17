@@ -38,6 +38,21 @@ func UninstallService() error {
 	}
 }
 
+// ServiceInstalled reports whether the user-level service definition exists on
+// the current platform.
+func ServiceInstalled() bool {
+	switch runtime.GOOS {
+	case "linux":
+		_, err := os.Stat(systemdUnitPath())
+		return err == nil
+	case "darwin":
+		_, err := os.Stat(launchdPlistPath())
+		return err == nil
+	default:
+		return false
+	}
+}
+
 // ---------------------------------------------------------------------------
 // systemd (Linux)
 // ---------------------------------------------------------------------------

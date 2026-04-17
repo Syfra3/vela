@@ -33,7 +33,7 @@ const (
 	watchItemToggle   watchMenuItem = iota // Start / Stop daemon
 	watchItemObsidian                      // Toggle Obsidian auto-sync
 	watchItemAdd                           // Add source
-	watchItemInstall                       // Install service
+	watchItemService                       // Install/remove service
 	watchItemLogs                          // View logs hint
 	watchItemBack                          // Back to main menu
 	watchItemCount
@@ -43,7 +43,7 @@ var watchMenuLabels = [watchItemCount]string{
 	watchItemToggle:   "Start/Stop daemon",
 	watchItemObsidian: "Obsidian auto-sync",
 	watchItemAdd:      "Add source",
-	watchItemInstall:  "Install as service",
+	watchItemService:  "Install as service",
 	watchItemLogs:     "View logs",
 	watchItemBack:     "Back",
 }
@@ -52,7 +52,7 @@ var watchMenuKeys = [watchItemCount]string{
 	watchItemToggle:   "s",
 	watchItemObsidian: "o",
 	watchItemAdd:      "a",
-	watchItemInstall:  "i",
+	watchItemService:  "i",
 	watchItemLogs:     "l",
 	watchItemBack:     "b",
 }
@@ -66,6 +66,7 @@ type watchStatusMsg struct {
 	pid         int
 	obsidianOn  bool   // obsidian.auto_sync from config
 	obsidianDir string // obsidian.vault_dir from config
+	serviceOn   bool
 }
 
 // watchActionMsg is returned after performing a daemon action (start/stop).
@@ -88,6 +89,7 @@ type WatchModel struct {
 	sources     map[string]listener.SourceStatus
 	obsidianOn  bool   // current obsidian.auto_sync value
 	obsidianDir string // current obsidian.vault_dir value
+	serviceOn   bool
 
 	d *daemon.Daemon // may be nil if daemon fails to init
 }
@@ -124,6 +126,7 @@ func (m WatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.sources = msg.sources
 		m.obsidianOn = msg.obsidianOn
 		m.obsidianDir = msg.obsidianDir
+		m.serviceOn = msg.serviceOn
 		return m, tickWatchStatus()
 
 	case watchActionMsg:
@@ -169,7 +172,7 @@ func (m WatchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cursor = int(watchItemAdd)
 		return m.handleSelect()
 	case "i":
-		m.cursor = int(watchItemInstall)
+		m.cursor = int(watchItemService)
 		return m.handleSelect()
 	}
 	return m, nil
@@ -186,7 +189,10 @@ func (m WatchModel) handleSelect() (tea.Model, tea.Cmd) {
 	case watchItemObsidian:
 		return m, toggleObsidianCmd(!m.obsidianOn)
 
-	case watchItemInstall:
+	case watchItemService:
+		if m.serviceOn {
+			return m, uninstallServiceCmd()
+		}
 		return m, installServiceCmd()
 
 	case watchItemBack:
@@ -239,6 +245,16 @@ func (m WatchModel) ViewContent() string {
 		dot(m.daemonOK),
 		label.Render("Vela Daemon"),
 		value.Render(daemonStatus),
+	))
+
+	serviceStatus := "not installed"
+	if m.serviceOn {
+		serviceStatus = "installed"
+	}
+	b.WriteString(fmt.Sprintf("  %s  %s %s\n",
+		dot(m.serviceOn),
+		label.Render("Watch Service"),
+		value.Render(serviceStatus),
 	))
 
 	// Sources rows — only when daemon is running
@@ -320,6 +336,12 @@ func (m WatchModel) ViewContent() string {
 			} else {
 				itemLabel = "Enable Obsidian sync"
 			}
+		case watchItemService:
+			if m.serviceOn {
+				itemLabel = "Remove service"
+			} else {
+				itemLabel = "Install as service"
+			}
 		}
 
 		key := keyStyle.Render("[" + watchMenuKeys[watchMenuItem(i)] + "]")
@@ -341,7 +363,7 @@ func (m WatchModel) ViewContent() string {
 }
 
 func (m WatchModel) FooterHelp() string {
-	return "↑↓ navigate • Enter select • s start/stop • b back"
+	return "↑↓ navigate • Enter select • s start/stop • i install/remove service • b back"
 }
 
 // ---------------------------------------------------------------------------
@@ -387,6 +409,7 @@ func (m WatchModel) refreshStatus() tea.Cmd {
 			sources:     srcs,
 			obsidianOn:  cfg.Obsidian.AutoSync,
 			obsidianDir: vaultDir,
+			serviceOn:   daemon.ServiceInstalled(),
 		}
 	}
 }
@@ -483,6 +506,12 @@ func installServiceCmd() tea.Cmd {
 			return watchActionMsg{err: err}
 		}
 		return watchActionMsg{err: daemon.InstallService(cfg.Daemon.PIDFile, cfg.Daemon.LogFile)}
+	}
+}
+
+func uninstallServiceCmd() tea.Cmd {
+	return func() tea.Msg {
+		return watchActionMsg{err: daemon.UninstallService()}
 	}
 }
 

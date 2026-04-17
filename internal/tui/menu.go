@@ -861,7 +861,7 @@ func startExtractionWorker(dir string, mode ExtractionMode, src ExtractSource) t
 					// Auto-sync Obsidian if enabled in config.
 					vaultDir := cfg.Obsidian.VaultDir
 					if vaultDir == "" {
-						vaultDir = outDir
+						vaultDir = config.DefaultVaultDir()
 					}
 					if syncErr := export.WriteObsidian(tg, vaultDir); syncErr != nil {
 						globalExtractionState.err = fmt.Errorf("obsidian auto-sync: %w", syncErr)
@@ -992,13 +992,18 @@ func exportToObsidianCmd() tea.Cmd {
 			return obsidianExportMsg{success: false, err: fmt.Errorf("reading graph.json: %w", err)}
 		}
 
+		cfg, _ := config.Load()
+		vaultDir := cfg.Obsidian.VaultDir
+		if vaultDir == "" {
+			vaultDir = config.DefaultVaultDir()
+		}
+
 		// Export to Obsidian
-		if err := export.WriteObsidian(g, outDir); err != nil {
+		if err := export.WriteObsidian(g, vaultDir); err != nil {
 			return obsidianExportMsg{success: false, err: fmt.Errorf("writing obsidian vault: %w", err)}
 		}
 
-		// Get absolute path
-		absPath, _ := filepath.Abs(filepath.Join(outDir, "obsidian"))
+		absPath, _ := filepath.Abs(filepath.Join(vaultDir, "obsidian"))
 		return obsidianExportMsg{success: true, path: absPath}
 	}
 }

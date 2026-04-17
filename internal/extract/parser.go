@@ -4,8 +4,20 @@ import (
 	"regexp"
 	"strings"
 
+	sitter "github.com/smacker/go-tree-sitter"
+
 	"github.com/Syfra3/vela/pkg/types"
 )
+
+// childFieldText returns the source text of the named field child of n.
+// Returns "" if the field is absent.
+func childFieldText(n *sitter.Node, src []byte, field string) string {
+	child := n.ChildByFieldName(field)
+	if child == nil {
+		return ""
+	}
+	return string(src[child.StartByte():child.EndByte()])
+}
 
 // ---------------------------------------------------------------------------
 // Explicit reference parser (spec §6.4 / task 14)

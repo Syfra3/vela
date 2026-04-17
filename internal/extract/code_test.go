@@ -24,8 +24,11 @@ func TestParseGoFile_RootNode(t *testing.T) {
 	if root == nil {
 		t.Fatal("expected non-nil root node")
 	}
-	if root.Type() != "source_file" {
-		t.Errorf("expected root kind 'source_file', got %q", root.Type())
+	if root.file == nil {
+		t.Fatal("expected parsed Go AST file")
+	}
+	if root.file.Name == nil || root.file.Name.Name != "sample" {
+		t.Errorf("expected package name 'sample', got %v", root.file.Name)
 	}
 	if len(src) == 0 {
 		t.Error("expected non-empty source bytes")

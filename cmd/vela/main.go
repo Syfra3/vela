@@ -365,7 +365,11 @@ func extractCmd() *cobra.Command {
 					fmt.Fprintf(os.Stderr, "  warning: HTML export failed: %v\n", hErr)
 				}
 				// Obsidian vault
-				if oErr := export.WriteObsidian(tg, outDir); oErr != nil {
+				obsVaultDir := cfg.Obsidian.VaultDir
+				if obsVaultDir == "" {
+					obsVaultDir = config.DefaultVaultDir()
+				}
+				if oErr := export.WriteObsidian(tg, obsVaultDir); oErr != nil {
 					fmt.Fprintf(os.Stderr, "  warning: Obsidian export failed: %v\n", oErr)
 				}
 			}

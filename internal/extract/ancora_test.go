@@ -158,14 +158,18 @@ func TestExtractAncora_ExplicitReferences(t *testing.T) {
 		t.Fatalf("ExtractAncora: %v", err)
 	}
 
-	var refEdges []string
+	relationsByTarget := make(map[string]string)
 	for _, e := range edges {
-		if e.Relation == "references" || e.Relation == "related_to" {
-			refEdges = append(refEdges, e.Target)
+		switch e.Target {
+		case "internal/store/store.go", "ancora:obs:5":
+			relationsByTarget[e.Target] = e.Relation
 		}
 	}
-	if len(refEdges) != 2 {
-		t.Errorf("reference edges = %d, want 2; edges: %v", len(refEdges), refEdges)
+	if got := relationsByTarget["internal/store/store.go"]; got != "constrains" {
+		t.Errorf("file reference relation = %q, want %q", got, "constrains")
+	}
+	if got := relationsByTarget["ancora:obs:5"]; got != "related_to" {
+		t.Errorf("observation reference relation = %q, want %q", got, "related_to")
 	}
 }
 
