@@ -282,7 +282,7 @@ func (m WatchModel) ViewContent() string {
 	// Always show vault directory — it clarifies where files land.
 	vaultPath := m.obsidianDir
 	if vaultPath == "" {
-		vaultPath = "vela-out"
+		vaultPath = config.DefaultVaultDir()
 	}
 	vaultDisplay := filepath.Join(vaultPath, "obsidian")
 	b.WriteString(fmt.Sprintf("  %s  %s %s\n",
@@ -376,7 +376,7 @@ func (m WatchModel) refreshStatus() tea.Cmd {
 
 		vaultDir := cfg.Obsidian.VaultDir
 		if vaultDir == "" {
-			vaultDir = "vela-out"
+			vaultDir = config.DefaultVaultDir()
 		}
 
 		return watchStatusMsg{
@@ -547,7 +547,7 @@ func setObsidianAutoSync(enable bool) error {
 	}
 	obs["auto_sync"] = enable
 	if _, hasDir := obs["vault_dir"]; !hasDir {
-		obs["vault_dir"] = "vela-out"
+		obs["vault_dir"] = config.DefaultVaultDir()
 	}
 	raw["obsidian"] = obs
 

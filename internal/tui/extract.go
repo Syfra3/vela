@@ -10,6 +10,8 @@ import (
 	"github.com/charmbracelet/bubbles/progress"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/Syfra3/vela/internal/config"
 )
 
 // extractStep tracks which sub-screen is active inside the Extract screen.
@@ -505,9 +507,13 @@ func (m ExtractModel) FooterHelp() string {
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-// graphExists returns true when vela-out/graph.json is present and non-empty.
+// graphExists returns true when the global graph.json is present and non-empty.
 func graphExists(_ string) bool {
-	info, err := os.Stat("vela-out/graph.json")
+	p, err := config.FindGraphFile(".")
+	if err != nil {
+		return false
+	}
+	info, err := os.Stat(p)
 	if err != nil {
 		return false
 	}

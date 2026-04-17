@@ -710,7 +710,7 @@ func startExtractionWorker(dir string, mode ExtractionMode, src ExtractSource) t
 			}
 
 			go func() {
-				const outDir = "vela-out"
+				outDir := config.OutDir(".")
 
 				progress := func(done, _ int, title string) {
 					globalExtractionState.processedCount = done
@@ -744,7 +744,7 @@ func startExtractionWorker(dir string, mode ExtractionMode, src ExtractSource) t
 				if cfg.Obsidian.AutoSync {
 					vaultDir := cfg.Obsidian.VaultDir
 					if vaultDir == "" {
-						vaultDir = outDir
+						vaultDir = config.DefaultVaultDir()
 					}
 					if syncErr := export.WriteObsidian(tg, vaultDir); syncErr != nil {
 						globalExtractionState.err = fmt.Errorf("obsidian auto-sync: %w", syncErr)
@@ -759,12 +759,20 @@ func startExtractionWorker(dir string, mode ExtractionMode, src ExtractSource) t
 
 		// ── Path (filesystem) extraction ──────────────────────────────────
 		fileCache, _ := cache.Load(cfg.Extraction.CacheDir)
-		_, _ = detect.EnsureVelignore(dir)
 
-		exts := []string{".go", ".py", ".ts", ".tsx", ".js", ".jsx", ".md", ".txt", ".pdf"}
-		files, collectErr := detect.Collect(dir, exts)
+		detected, collectErr := detect.Files(dir)
 		if collectErr != nil {
 			return extractionCompleteMsg{success: false, dir: dir, err: fmt.Errorf("detecting files: %w", collectErr)}
+		}
+		extSet := map[string]bool{
+			".go": true, ".py": true, ".ts": true, ".tsx": true,
+			".js": true, ".jsx": true, ".md": true, ".txt": true, ".pdf": true,
+		}
+		var files []string
+		for _, e := range detected.Files {
+			if extSet[filepath.Ext(e.AbsPath)] {
+				files = append(files, e.AbsPath)
+			}
 		}
 		if len(files) == 0 {
 			return extractionCompleteMsg{success: false, dir: dir, err: fmt.Errorf("no files found in %s", dir)}
@@ -777,7 +785,7 @@ func startExtractionWorker(dir string, mode ExtractionMode, src ExtractSource) t
 		}
 
 		go func() {
-			const outDir = "vela-out"
+			outDir := config.OutDir(".")
 
 			// Detect project once — all files in this run share the same source.
 			projectSrc := extract.DetectProject(dir)
@@ -786,7 +794,7 @@ func startExtractionWorker(dir string, mode ExtractionMode, src ExtractSource) t
 			var seededEdges []types.Edge
 			if mode == ModeRegenerate {
 				fileCache = nil
-			} else if existing, readErr := loadExistingGraph(outDir + "/graph.json"); readErr == nil {
+			} else if existing, readErr := loadExistingGraph(config.GraphFilePath(outDir)); readErr == nil {
 				seededNodes = existing.Nodes
 				seededEdges = existing.Edges
 			} else if fileCache != nil {
@@ -878,9 +886,9 @@ func tickExtractionProgress() tea.Cmd {
 
 		if globalExtractionState.done {
 			if globalExtractionState.err != nil {
-				return extractionCompleteMsg{success: false, dir: "vela-out", err: globalExtractionState.err}
+				return extractionCompleteMsg{success: false, dir: config.OutDir("."), err: globalExtractionState.err}
 			}
-			return extractionCompleteMsg{success: true, dir: "vela-out", err: nil}
+			return extractionCompleteMsg{success: true, dir: config.OutDir("."), err: nil}
 		}
 
 		return extractionProgressMsg{
@@ -973,24 +981,24 @@ type obsidianExportMsg struct {
 
 func exportToObsidianCmd() tea.Cmd {
 	return func() tea.Msg {
-		const defaultGraphFile = "vela-out/graph.json"
-		const defaultOutDir = "vela-out"
+		outDir := config.OutDir(".")
+		graphFile := config.GraphFilePath(outDir)
 
 		// graph.json uses "from"/"to"/"kind" (export format from WriteJSON),
 		// NOT the types.Graph JSON tags ("source"/"target"/"relation"/"type").
 		// Unmarshal via the same raw struct used by loadExistingGraph.
-		g, err := loadExistingGraph(defaultGraphFile)
+		g, err := loadExistingGraph(graphFile)
 		if err != nil {
 			return obsidianExportMsg{success: false, err: fmt.Errorf("reading graph.json: %w", err)}
 		}
 
 		// Export to Obsidian
-		if err := export.WriteObsidian(g, defaultOutDir); err != nil {
+		if err := export.WriteObsidian(g, outDir); err != nil {
 			return obsidianExportMsg{success: false, err: fmt.Errorf("writing obsidian vault: %w", err)}
 		}
 
 		// Get absolute path
-		absPath, _ := filepath.Abs(defaultOutDir + "/obsidian")
+		absPath, _ := filepath.Abs(filepath.Join(outDir, "obsidian"))
 		return obsidianExportMsg{success: true, path: absPath}
 	}
 }

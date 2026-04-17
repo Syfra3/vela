@@ -42,6 +42,7 @@ __pycache__/
 Thumbs.db
 
 # Vela output
+.vela/
 vela-out/
 
 # Logs
