@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/Syfra3/vela/compare/v1.1.4...v1.2.0) (2026-04-17)
+
+
+### Features
+
+* **graph:** persist bench history and enrich ancora metadata ([#13](https://github.com/Syfra3/vela/issues/13)) ([8d952ad](https://github.com/Syfra3/vela/commit/8d952ad1b85d48668c161c0200895192fb9de0ec))
+
 ## [1.1.4](https://github.com/Syfra3/vela/compare/v1.1.3...v1.1.4) (2026-04-16)
 
 
