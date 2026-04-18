@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -70,6 +71,26 @@ func (c *Cache) Mark(path, sha string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.entries[path] = sha
+}
+
+// DeletePrefix removes all cache entries whose path is rooted under prefix.
+// It returns true when at least one entry was removed.
+func (c *Cache) DeletePrefix(prefix string) bool {
+	cleanPrefix := filepath.Clean(prefix)
+	matchPrefix := cleanPrefix + string(os.PathSeparator)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	removed := false
+	for path := range c.entries {
+		cleanPath := filepath.Clean(path)
+		if cleanPath == cleanPrefix || strings.HasPrefix(cleanPath, matchPrefix) {
+			delete(c.entries, path)
+			removed = true
+		}
+	}
+	return removed
 }
 
 // SHA256File computes the SHA256 hex digest of the file at path.

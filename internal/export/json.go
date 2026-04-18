@@ -18,13 +18,16 @@ type graphJSON struct {
 }
 
 type nodeJSON struct {
-	ID         string `json:"id"`
-	Label      string `json:"label"`
-	Kind       string `json:"kind"`
-	File       string `json:"file,omitempty"`
-	Community  int    `json:"community,omitempty"`
-	SourceType string `json:"source_type,omitempty"` // "codebase" | "memory" | "webhook"
-	SourceName string `json:"source_name,omitempty"` // repo/project name
+	ID           string                 `json:"id"`
+	Label        string                 `json:"label"`
+	Kind         string                 `json:"kind"`
+	File         string                 `json:"file,omitempty"`
+	Community    int                    `json:"community,omitempty"`
+	SourceType   string                 `json:"source_type,omitempty"`   // "codebase" | "memory" | "webhook"
+	SourceName   string                 `json:"source_name,omitempty"`   // repo/project name
+	SourcePath   string                 `json:"source_path,omitempty"`   // local codebase path
+	SourceRemote string                 `json:"source_remote,omitempty"` // git remote URL
+	Metadata     map[string]interface{} `json:"metadata,omitempty"`
 }
 
 type edgeJSON struct {
@@ -47,7 +50,55 @@ func WriteJSON(g *types.Graph, outDir string) error {
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		return fmt.Errorf("creating output dir %s: %w", outDir, err)
 	}
+	data, err := marshalGraph(g)
+	if err != nil {
+		return err
+	}
+	outPath := filepath.Join(outDir, "graph.json")
+	if err := os.WriteFile(outPath, data, 0644); err != nil {
+		return fmt.Errorf("writing %s: %w", outPath, err)
+	}
+	return nil
+}
 
+// WriteJSONAtomic serialises g to <outDir>/graph.json atomically using a
+// temp file + rename so a crash mid-write leaves the previous file intact.
+func WriteJSONAtomic(g *types.Graph, outDir string) error {
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		return fmt.Errorf("creating output dir %s: %w", outDir, err)
+	}
+	data, err := marshalGraph(g)
+	if err != nil {
+		return err
+	}
+	outPath := filepath.Join(outDir, "graph.json")
+	tmp := outPath + ".tmp"
+	f, err := os.Create(tmp)
+	if err != nil {
+		return fmt.Errorf("creating temp file: %w", err)
+	}
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("writing temp file: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("syncing temp file: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("closing temp file: %w", err)
+	}
+	if err := os.Rename(tmp, outPath); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("renaming temp file: %w", err)
+	}
+	return nil
+}
+
+func marshalGraph(g *types.Graph) ([]byte, error) {
 	out := graphJSON{
 		Nodes: make([]nodeJSON, len(g.Nodes)),
 		Edges: make([]edgeJSON, len(g.Edges)),
@@ -69,6 +120,11 @@ func WriteJSON(g *types.Graph, outDir string) error {
 		if n.Source != nil {
 			nj.SourceType = string(n.Source.Type)
 			nj.SourceName = n.Source.Name
+			nj.SourcePath = n.Source.Path
+			nj.SourceRemote = n.Source.Remote
+		}
+		if len(n.Metadata) > 0 {
+			nj.Metadata = n.Metadata
 		}
 		out.Nodes[i] = nj
 	}
@@ -86,12 +142,7 @@ func WriteJSON(g *types.Graph, outDir string) error {
 
 	data, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshalling graph: %w", err)
+		return nil, fmt.Errorf("marshalling graph: %w", err)
 	}
-
-	outPath := filepath.Join(outDir, "graph.json")
-	if err := os.WriteFile(outPath, data, 0644); err != nil {
-		return fmt.Errorf("writing %s: %w", outPath, err)
-	}
-	return nil
+	return data, nil
 }

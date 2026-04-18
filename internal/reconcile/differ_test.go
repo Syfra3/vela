@@ -14,11 +14,14 @@ func TestDifferDiffBuildsChangeSet(t *testing.T) {
 
 	now := time.Now().UTC()
 	createdPayload, _ := json.Marshal(listener.ObservationPayload{
-		ID:        1,
-		Type:      "decision",
-		Title:     "Create auth service",
-		Content:   "content",
-		Workspace: "vela",
+		ID:           1,
+		Type:         "decision",
+		Title:        "Create auth service",
+		Content:      "content",
+		Workspace:    "vela",
+		Visibility:   "work",
+		Organization: "glim",
+		TopicKey:     "architecture/auth",
 		References: []listener.Reference{
 			{Type: "file", Target: "internal/auth/service.go"},
 		},
@@ -26,13 +29,14 @@ func TestDifferDiffBuildsChangeSet(t *testing.T) {
 		UpdatedAt: now,
 	})
 	updatedPayload, _ := json.Marshal(listener.ObservationPayload{
-		ID:        2,
-		Type:      "bugfix",
-		Title:     "Fix queue",
-		Content:   "content",
-		Workspace: "vela",
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:         2,
+		Type:       "bugfix",
+		Title:      "Fix queue",
+		Content:    "content",
+		Workspace:  "vela",
+		Visibility: "work",
+		CreatedAt:  now,
+		UpdatedAt:  now,
 	})
 	deletedPayload, _ := json.Marshal(listener.ObservationDeletedPayload{ID: 3})
 	sessionPayload := json.RawMessage(`{"session_id":"abc"}`)
@@ -59,6 +63,15 @@ func TestDifferDiffBuildsChangeSet(t *testing.T) {
 	}
 	if got := cs.Added[0].References; len(got) != 1 || got[0].Target != "internal/auth/service.go" {
 		t.Fatalf("added references = %#v, want file reference", got)
+	}
+	if cs.Added[0].Visibility != "work" {
+		t.Fatalf("added visibility = %q, want work", cs.Added[0].Visibility)
+	}
+	if cs.Added[0].Organization != "glim" {
+		t.Fatalf("added organization = %q, want glim", cs.Added[0].Organization)
+	}
+	if cs.Added[0].TopicKey != "architecture/auth" {
+		t.Fatalf("added topic key = %q, want architecture/auth", cs.Added[0].TopicKey)
 	}
 	if cs.Deleted[0] != 3 {
 		t.Fatalf("deleted ID = %d, want 3", cs.Deleted[0])

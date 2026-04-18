@@ -93,3 +93,28 @@ func TestSHA256File(t *testing.T) {
 		t.Error("expected different SHA for different content")
 	}
 }
+
+func TestCache_DeletePrefix(t *testing.T) {
+	dir := t.TempDir()
+	c, err := Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c.Mark(filepath.Join(dir, "repo", "main.go"), "a")
+	c.Mark(filepath.Join(dir, "repo", "pkg", "util.go"), "b")
+	c.Mark(filepath.Join(dir, "other", "main.go"), "c")
+
+	if !c.DeletePrefix(filepath.Join(dir, "repo")) {
+		t.Fatal("expected DeletePrefix to report removals")
+	}
+	if c.IsCached(filepath.Join(dir, "repo", "main.go"), "a") {
+		t.Fatal("expected repo cache entry removed")
+	}
+	if c.IsCached(filepath.Join(dir, "repo", "pkg", "util.go"), "b") {
+		t.Fatal("expected nested repo cache entry removed")
+	}
+	if !c.IsCached(filepath.Join(dir, "other", "main.go"), "c") {
+		t.Fatal("expected unrelated cache entry preserved")
+	}
+}
