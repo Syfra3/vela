@@ -19,12 +19,16 @@ func TestPatcherApplyObservationLifecycle(t *testing.T) {
 	now := time.Now().UTC()
 
 	obs := types.ObservationNode{
-		ID:       "ancora:obs:7",
-		NodeType: types.NodeTypeObservation,
-		AncoraID: 7,
-		Title:    "Initial title",
-		Content:  "Initial content",
-		ObsType:  "decision",
+		ID:           "ancora:obs:7",
+		NodeType:     types.NodeTypeObservation,
+		AncoraID:     7,
+		Title:        "Initial title",
+		Content:      "Initial content",
+		ObsType:      "decision",
+		Workspace:    "vela",
+		Visibility:   "work",
+		Organization: "glim",
+		TopicKey:     "architecture/auth",
 		References: []types.ObsReference{
 			{Type: "file", Target: "internal/auth/service.go"},
 			{Type: "concept", Target: "Auth Architecture"},
@@ -36,11 +40,16 @@ func TestPatcherApplyObservationLifecycle(t *testing.T) {
 	if err := p.Apply(ChangeSet{Added: []types.ObservationNode{obs}}); err != nil {
 		t.Fatalf("Apply(add) error = %v", err)
 	}
-	if g.NodeCount() != 1 {
-		t.Fatalf("NodeCount() after add = %d, want 1", g.NodeCount())
+	if g.NodeCount() != 5 {
+		t.Fatalf("NodeCount() after add = %d, want 5", g.NodeCount())
 	}
 	if len(g.ResolvedEdges) != 2 {
 		t.Fatalf("ResolvedEdges after add = %d, want 2", len(g.ResolvedEdges))
+	}
+	for _, nodeID := range []string{"memory:ancora", "ancora:workspace:vela", "ancora:visibility:work", "ancora:organization:glim", obs.ID} {
+		if _, ok := g.NodeIndex[nodeID]; !ok {
+			t.Fatalf("expected node %q in graph", nodeID)
+		}
 	}
 	if queued := <-p.LLMQueue(); queued.AncoraID != 7 {
 		t.Fatalf("LLM queue node ID = %d, want 7", queued.AncoraID)
@@ -70,12 +79,21 @@ func TestPatcherApplyObservationLifecycle(t *testing.T) {
 	if updatedNode.Metadata["content"] != "Updated content" {
 		t.Fatalf("updated node content = %v, want Updated content", updatedNode.Metadata["content"])
 	}
+	if updatedNode.Metadata["visibility"] != "work" {
+		t.Fatalf("updated node visibility = %v, want work", updatedNode.Metadata["visibility"])
+	}
+	if updatedNode.Metadata["organization"] != "glim" {
+		t.Fatalf("updated node organization = %v, want glim", updatedNode.Metadata["organization"])
+	}
+	if updatedNode.Metadata["topic_key"] != "architecture/auth" {
+		t.Fatalf("updated node topic_key = %v, want architecture/auth", updatedNode.Metadata["topic_key"])
+	}
 
 	if err := p.Apply(ChangeSet{Deleted: []int64{7}}); err != nil {
 		t.Fatalf("Apply(delete) error = %v", err)
 	}
-	if g.NodeCount() != 0 {
-		t.Fatalf("NodeCount() after delete = %d, want 0", g.NodeCount())
+	if g.NodeCount() != 4 {
+		t.Fatalf("NodeCount() after delete = %d, want 4", g.NodeCount())
 	}
 	if len(g.ResolvedEdges) != 0 {
 		t.Fatalf("ResolvedEdges after delete = %d, want 0", len(g.ResolvedEdges))

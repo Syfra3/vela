@@ -80,17 +80,17 @@ const (
 	EdgeTypeImplements EdgeType = "implements"
 
 	// Knowledge edge types (Ancora integration)
-	EdgeTypeReferences EdgeType = "references"  // obs -> file/function (generic fallback)
-	EdgeTypeRelatedTo  EdgeType = "related_to"  // obs -> obs
-	EdgeTypeDefines    EdgeType = "defines"     // obs -> concept
-	EdgeTypeBelongsTo  EdgeType = "belongs_to"  // obs -> workspace/visibility
+	EdgeTypeReferences EdgeType = "references" // obs -> file/function (generic fallback)
+	EdgeTypeRelatedTo  EdgeType = "related_to" // obs -> obs
+	EdgeTypeDefines    EdgeType = "defines"    // obs -> concept
+	EdgeTypeBelongsTo  EdgeType = "belongs_to" // obs -> workspace/visibility
 
 	// Typed cross-source relations (derived from observation ObsType)
-	EdgeTypeDocuments  EdgeType = "documents"   // architecture/discovery obs -> code
-	EdgeTypeDecidesOn  EdgeType = "decides_on"  // decision obs -> code
-	EdgeTypeConstrains EdgeType = "constrains"  // bugfix obs -> code
+	EdgeTypeDocuments   EdgeType = "documents"   // architecture/discovery obs -> code
+	EdgeTypeDecidesOn   EdgeType = "decides_on"  // decision obs -> code
+	EdgeTypeConstrains  EdgeType = "constrains"  // bugfix obs -> code
 	EdgeTypeExemplifies EdgeType = "exemplifies" // pattern obs -> code
-	EdgeTypeDeprecates EdgeType = "deprecates"  // deprecation obs -> code
+	EdgeTypeDeprecates  EdgeType = "deprecates"  // deprecation obs -> code
 )
 
 // ---------------------------------------------------------------------------
@@ -148,28 +148,45 @@ type ObservationNode struct {
 	Title    string
 	Content  string
 	// ObsType is the Ancora observation category: "decision", "bugfix", etc.
-	ObsType    string
-	Workspace  string
-	References []ObsReference
-	CreatedAt  time.Time
-	UpdatedAt  time.Time
+	ObsType      string
+	Workspace    string
+	Visibility   string
+	Organization string
+	TopicKey     string
+	References   []ObsReference
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
 	// Source identifies this node as memory-derived (set by the patcher/extractor).
 	Source *Source
 }
 
 // ToNode converts an ObservationNode to a generic types.Node for graph storage.
 func (o *ObservationNode) ToNode() Node {
+	metadata := map[string]interface{}{
+		"ancora_id":  o.AncoraID,
+		"obs_type":   o.ObsType,
+		"workspace":  o.Workspace,
+		"visibility": o.Visibility,
+		"content":    o.Content,
+	}
+	if o.Organization != "" {
+		metadata["organization"] = o.Organization
+	}
+	if o.TopicKey != "" {
+		metadata["topic_key"] = o.TopicKey
+	}
+	if !o.CreatedAt.IsZero() {
+		metadata["created_at"] = o.CreatedAt.Format("2006-01-02")
+	}
+
 	return Node{
-		ID:       o.ID,
-		Label:    o.Title,
-		NodeType: string(o.NodeType),
-		Source:   o.Source,
-		Metadata: map[string]interface{}{
-			"ancora_id": o.AncoraID,
-			"obs_type":  o.ObsType,
-			"workspace": o.Workspace,
-			"content":   o.Content,
-		},
+		ID:          o.ID,
+		Label:       o.Title,
+		NodeType:    string(o.NodeType),
+		SourceFile:  o.ID,
+		Description: o.Content,
+		Source:      o.Source,
+		Metadata:    metadata,
 	}
 }
 
@@ -224,9 +241,10 @@ type DaemonSourceStatus struct {
 // DaemonStatus is written by the daemon to StatusFile so the CLI can read
 // source connectivity without cross-process registry access.
 type DaemonStatus struct {
-	PID       int                           `json:"pid"`
-	Sources   map[string]DaemonSourceStatus `json:"sources"` // name -> status
-	UpdatedAt string                        `json:"updated_at"`
+	PID            int                           `json:"pid"`
+	Sources        map[string]DaemonSourceStatus `json:"sources"` // name -> status
+	UpdatedAt      string                        `json:"updated_at"`
+	LastGraphFlush string                        `json:"last_graph_flush,omitempty"` // RFC3339 timestamp of last graph.json write
 }
 
 // LLMProvider defines the interface for pluggable LLM backends
@@ -269,11 +287,21 @@ type UIConfig struct {
 
 // ObsidianConfig controls automatic Obsidian vault sync.
 // When AutoSync is true the daemon writes the vault after every successful
-// reconcile. VaultDir is the OUTPUT directory — Vela writes into
+// reconcile. VaultDir is the vault root and Vela writes into
 // <VaultDir>/obsidian/ mirroring the manual `vela extract` layout.
 type ObsidianConfig struct {
 	AutoSync bool   `yaml:"auto_sync"`
-	VaultDir string `yaml:"vault_dir"` // e.g. "vela-out"
+	VaultDir string `yaml:"vault_dir"` // e.g. "~/Documents/vela"
+}
+
+// GraphConfig controls how the daemon persists graph.json to disk.
+// When AutoPersist is true the daemon flushes its in-memory graph back to
+// graph.json after every reconcile cycle (debounced by FlushInterval).
+// This keeps graph.json — the canonical source of truth — up-to-date with
+// memory events received via the Ancora socket.
+type GraphConfig struct {
+	AutoPersist   bool          `yaml:"auto_persist"`
+	FlushInterval time.Duration `yaml:"flush_interval"`
 }
 
 // Config is the global configuration for Vela
@@ -284,6 +312,7 @@ type Config struct {
 	Watch      WatchConfig      `yaml:"watch"`
 	Daemon     DaemonConfig     `yaml:"daemon"`
 	Obsidian   ObsidianConfig   `yaml:"obsidian"`
+	Graph      GraphConfig      `yaml:"graph"`
 }
 
 // ExtractionProgress tracks the progress of document extraction

@@ -38,7 +38,9 @@ const (
 	screenDoctor
 	screenObsidian
 	screenGraphStatus
+	screenProjects
 	screenWatch
+	screenUninstall
 )
 
 type menuItem struct {
@@ -70,7 +72,9 @@ type MenuModel struct {
 	obsidianResult   string
 	obsidianErr      error
 	graphStatusModel GraphStatusModel
+	projectsModel    ProjectsModel
 	watchModel       WatchModel
+	uninstallModel   UninstallModel
 }
 
 // NewMenuModel creates the main menu TUI.
@@ -126,6 +130,11 @@ func (m *MenuModel) rebuildMenu() {
 			key:         "query",
 		},
 		{
+			label:       "Projects",
+			description: "Inspect, refresh, or delete tracked codebases",
+			key:         "projects",
+		},
+		{
 			label:       "Watch",
 			description: "Manage real-time Ancora integration daemon",
 			key:         "watch",
@@ -139,6 +148,11 @@ func (m *MenuModel) rebuildMenu() {
 			label:       "Config",
 			description: "Manage configuration (~/.vela/config.yaml)",
 			key:         "config",
+		},
+		{
+			label:       "Uninstall",
+			description: "Remove Vela integrations and delete ~/.vela data",
+			key:         "uninstall",
 		},
 		{
 			label:       "Quit",
@@ -202,8 +216,12 @@ func (m MenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateObsidian(msg)
 	case screenGraphStatus:
 		return m.updateGraphStatus(msg)
+	case screenProjects:
+		return m.updateProjects(msg)
 	case screenWatch:
 		return m.updateWatch(msg)
+	case screenUninstall:
+		return m.updateUninstall(msg)
 	}
 	return m, nil
 }
@@ -226,8 +244,12 @@ func (m MenuModel) View() string {
 		return m.viewObsidian()
 	case screenGraphStatus:
 		return m.viewGraphStatus()
+	case screenProjects:
+		return m.viewProjects()
 	case screenWatch:
 		return m.viewWatch()
+	case screenUninstall:
+		return m.viewUninstall()
 	}
 	return ""
 }
@@ -274,6 +296,10 @@ func (m MenuModel) handleMenuSelect() (tea.Model, tea.Cmd) {
 		m.screen = screenWatch
 		m.watchModel = NewWatchModel()
 		return m, m.watchModel.Init()
+	case "projects":
+		m.screen = screenProjects
+		m.projectsModel = NewProjectsModel()
+		return m, m.projectsModel.Init()
 	case "install":
 		m.screen = screenInstall
 		m.installWizard = setup.NewWizard()
@@ -293,6 +319,11 @@ func (m MenuModel) handleMenuSelect() (tea.Model, tea.Cmd) {
 	case "doctor":
 		m.screen = screenDoctor
 		m.doctorModel = NewDoctorModel()
+		return m, m.doctorModel.Init()
+	case "uninstall":
+		m.screen = screenUninstall
+		m.uninstallModel = NewUninstallModel()
+		return m, m.uninstallModel.Init()
 	case "quit":
 		return m, tea.Quit
 	}
@@ -548,6 +579,18 @@ func (m MenuModel) updateGraphStatus(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m MenuModel) updateProjects(msg tea.Msg) (tea.Model, tea.Cmd) {
+	updated, cmd := m.projectsModel.Update(msg)
+	m.projectsModel = updated.(ProjectsModel)
+
+	if m.projectsModel.Quitting() {
+		m.screen = screenMain
+		return m, nil
+	}
+
+	return m, cmd
+}
+
 func (m MenuModel) updateWatch(msg tea.Msg) (tea.Model, tea.Cmd) {
 	updated, cmd := m.watchModel.Update(msg)
 	m.watchModel = updated.(WatchModel)
@@ -558,6 +601,20 @@ func (m MenuModel) updateWatch(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	if m.watchModel.Quitting() {
 		m.screen = screenMain
+		return m, nil
+	}
+
+	return m, cmd
+}
+
+func (m MenuModel) updateUninstall(msg tea.Msg) (tea.Model, tea.Cmd) {
+	updated, cmd := m.uninstallModel.Update(msg)
+	m.uninstallModel = updated.(UninstallModel)
+
+	if m.uninstallModel.Quitting() {
+		m.screen = screenMain
+		m.installed = setup.CheckMCPInstalled()
+		m.rebuildMenu()
 		return m, nil
 	}
 
@@ -581,6 +638,22 @@ func (m MenuModel) viewWatch() string {
 	b.WriteString(m.renderHeader("Watch — Real-Time Daemon"))
 	b.WriteString(m.watchModel.ViewContent())
 	b.WriteString(m.renderFooter(m.watchModel.FooterHelp()))
+	return appStyle.Render(b.String())
+}
+
+func (m MenuModel) viewProjects() string {
+	var b strings.Builder
+	b.WriteString(m.renderHeader("Projects — Tracked Codebases"))
+	b.WriteString(m.projectsModel.ViewContent())
+	b.WriteString(m.renderFooter(m.projectsModel.FooterHelp()))
+	return appStyle.Render(b.String())
+}
+
+func (m MenuModel) viewUninstall() string {
+	var b strings.Builder
+	b.WriteString(m.renderHeader("Uninstall — Remove Vela"))
+	b.WriteString(m.uninstallModel.ViewContent())
+	b.WriteString(m.renderFooter(m.uninstallModel.FooterHelp()))
 	return appStyle.Render(b.String())
 }
 
@@ -742,10 +815,7 @@ func startExtractionWorker(dir string, mode ExtractionMode, src ExtractSource) t
 
 				// Auto-sync Obsidian if enabled in config.
 				if cfg.Obsidian.AutoSync {
-					vaultDir := cfg.Obsidian.VaultDir
-					if vaultDir == "" {
-						vaultDir = config.DefaultVaultDir()
-					}
+					vaultDir := config.ResolveVaultDir(cfg.Obsidian.VaultDir)
 					if syncErr := export.WriteObsidian(tg, vaultDir); syncErr != nil {
 						globalExtractionState.err = fmt.Errorf("obsidian auto-sync: %w", syncErr)
 					}
@@ -859,10 +929,7 @@ func startExtractionWorker(dir string, mode ExtractionMode, src ExtractSource) t
 					globalExtractionState.err = fmt.Errorf("writing graph.json: %w", writeErr)
 				} else if cfg.Obsidian.AutoSync {
 					// Auto-sync Obsidian if enabled in config.
-					vaultDir := cfg.Obsidian.VaultDir
-					if vaultDir == "" {
-						vaultDir = config.DefaultVaultDir()
-					}
+					vaultDir := config.ResolveVaultDir(cfg.Obsidian.VaultDir)
 					if syncErr := export.WriteObsidian(tg, vaultDir); syncErr != nil {
 						globalExtractionState.err = fmt.Errorf("obsidian auto-sync: %w", syncErr)
 					}
@@ -917,10 +984,15 @@ func loadExistingGraph(path string) (*types.Graph, error) {
 
 	var raw struct {
 		Nodes []struct {
-			ID    string `json:"id"`
-			Label string `json:"label"`
-			Kind  string `json:"kind"`
-			File  string `json:"file"`
+			ID           string                 `json:"id"`
+			Label        string                 `json:"label"`
+			Kind         string                 `json:"kind"`
+			File         string                 `json:"file"`
+			SourceType   string                 `json:"source_type"`
+			SourceName   string                 `json:"source_name"`
+			SourcePath   string                 `json:"source_path"`
+			SourceRemote string                 `json:"source_remote"`
+			Metadata     map[string]interface{} `json:"metadata"`
 		} `json:"nodes"`
 		Edges []struct {
 			From string `json:"from"`
@@ -938,7 +1010,23 @@ func loadExistingGraph(path string) (*types.Graph, error) {
 		Edges: make([]types.Edge, len(raw.Edges)),
 	}
 	for i, n := range raw.Nodes {
-		g.Nodes[i] = types.Node{ID: n.ID, Label: n.Label, NodeType: n.Kind, SourceFile: n.File}
+		var source *types.Source
+		if n.SourceType != "" || n.SourceName != "" || n.SourcePath != "" || n.SourceRemote != "" {
+			source = &types.Source{
+				Type:   types.SourceType(n.SourceType),
+				Name:   n.SourceName,
+				Path:   n.SourcePath,
+				Remote: n.SourceRemote,
+			}
+		}
+		g.Nodes[i] = types.Node{
+			ID:         n.ID,
+			Label:      n.Label,
+			NodeType:   n.Kind,
+			SourceFile: n.File,
+			Metadata:   n.Metadata,
+			Source:     source,
+		}
 	}
 	for i, e := range raw.Edges {
 		g.Edges[i] = types.Edge{Source: e.From, Target: e.To, Relation: e.Kind, SourceFile: e.File}
@@ -974,9 +1062,10 @@ func filterEdgesByFile(edges []types.Edge, reextracted map[string]bool) []types.
 // ---------------------------------------------------------------------------
 
 type obsidianExportMsg struct {
-	success bool
-	path    string
-	err     error
+	success   bool
+	path      string
+	err       error
+	graphHint bool
 }
 
 func exportToObsidianCmd() tea.Cmd {
@@ -989,14 +1078,11 @@ func exportToObsidianCmd() tea.Cmd {
 		// Unmarshal via the same raw struct used by loadExistingGraph.
 		g, err := loadExistingGraph(graphFile)
 		if err != nil {
-			return obsidianExportMsg{success: false, err: fmt.Errorf("reading graph.json: %w", err)}
+			return obsidianExportMsg{success: false, err: fmt.Errorf("reading graph.json: %w", err), graphHint: true}
 		}
 
 		cfg, _ := config.Load()
-		vaultDir := cfg.Obsidian.VaultDir
-		if vaultDir == "" {
-			vaultDir = config.DefaultVaultDir()
-		}
+		vaultDir := config.ResolveVaultDir(cfg.Obsidian.VaultDir)
 
 		// Export to Obsidian
 		if err := export.WriteObsidian(g, vaultDir); err != nil {
@@ -1020,9 +1106,15 @@ func (m MenuModel) updateObsidian(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.success {
 			m.obsidianResult = fmt.Sprintf("✓ Exported to %s", msg.path)
 			m.obsidianErr = nil
+			m.message = ""
 		} else {
 			m.obsidianResult = ""
 			m.obsidianErr = msg.err
+			if msg.graphHint {
+				m.message = "Ensure you have run 'vela extract' first to generate graph.json"
+			} else {
+				m.message = ""
+			}
 		}
 	}
 	return m, nil
@@ -1038,9 +1130,11 @@ func (m MenuModel) viewObsidian() string {
 
 	if m.obsidianErr != nil {
 		b.WriteString(errorStyle.Render(fmt.Sprintf("Error: %v", m.obsidianErr)))
-		b.WriteString("\n\n")
-		b.WriteString(textStyle.Render("Ensure you have run 'vela extract' first to generate graph.json"))
-		b.WriteString("\n")
+		if m.message != "" {
+			b.WriteString("\n\n")
+			b.WriteString(textStyle.Render(m.message))
+			b.WriteString("\n")
+		}
 	} else if m.obsidianResult != "" {
 		b.WriteString(successStyle.Render(m.obsidianResult))
 		b.WriteString("\n\n")

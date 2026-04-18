@@ -7,10 +7,35 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 )
+
+var isZombieProcess = func(pid int) (bool, error) {
+	if runtime.GOOS != "linux" {
+		return false, nil
+	}
+
+	data, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "status"))
+	if err != nil {
+		return false, err
+	}
+
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "State:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return false, nil
+		}
+		return fields[1] == "Z", nil
+	}
+
+	return false, nil
+}
 
 // ErrNotRunning is returned when a stop/status operation finds no running daemon.
 var ErrNotRunning = errors.New("daemon is not running")
@@ -86,6 +111,10 @@ func (p *PIDFile) IsAlive() (bool, int, error) {
 	// Signal 0 checks if the process exists without sending an actual signal.
 	if err := proc.Signal(syscall.Signal(0)); err != nil {
 		// Process no longer exists — remove stale PID file.
+		_ = p.Remove()
+		return false, 0, nil
+	}
+	if zombie, err := isZombieProcess(pid); err == nil && zombie {
 		_ = p.Remove()
 		return false, 0, nil
 	}

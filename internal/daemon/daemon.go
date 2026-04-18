@@ -7,10 +7,13 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/Syfra3/vela/internal/config"
 	"github.com/Syfra3/vela/internal/export"
 	"github.com/Syfra3/vela/internal/extract"
 	igraph "github.com/Syfra3/vela/internal/graph"
@@ -32,6 +35,13 @@ type Daemon struct {
 	patcher  *reconcile.Patcher
 	graph    *igraph.Graph
 	logFile  *os.File
+
+	// graph persistence
+	dirty         atomic.Bool
+	graphPath     string
+	graphLock     *igraph.GraphLock
+	lastFlush     time.Time
+	lastFlushMu   sync.RWMutex
 
 	stopCh    chan struct{}
 	stoppedCh chan struct{}
@@ -89,6 +99,16 @@ func (d *Daemon) Start(ctx context.Context) error {
 		}
 	}
 
+	// Acquire graph lock so vela extract cannot write graph.json concurrently.
+	if d.graphPath != "" {
+		lockPath := filepath.Join(filepath.Dir(d.graphPath), "graph.lock")
+		lock, err := igraph.AcquireGraphLock(lockPath)
+		if err != nil {
+			return fmt.Errorf("acquiring graph lock: %w", err)
+		}
+		d.graphLock = lock
+	}
+
 	// Connect all configured sources.
 	for _, srcCfg := range d.cfg.Watch.Sources {
 		src := d.buildSource(srcCfg)
@@ -103,6 +123,11 @@ func (d *Daemon) Start(ctx context.Context) error {
 
 	// Reconcile loop: drain the queue and apply changesets to the graph.
 	go d.reconcileLoop(ctx)
+
+	// Persist loop: debounced flush of in-memory graph to graph.json.
+	if d.cfg.Graph.AutoPersist && d.graphPath != "" {
+		go d.persistLoop(ctx)
+	}
 
 	// LLM extractor loop (if enabled).
 	if d.cfg.Watch.Extractor.Enabled {
@@ -147,6 +172,7 @@ func (d *Daemon) Stop() error {
 		<-d.stoppedCh
 		d.registry.Close()
 		_ = d.pidFile.Remove()
+		d.graphLock.Release()
 		if d.logFile != nil {
 			_ = d.logFile.Close()
 		}
@@ -257,6 +283,7 @@ func (d *Daemon) reconcileLoop(ctx context.Context) {
 			} else {
 				log.Printf("INFO: reconcile: +%d ~%d -%d",
 					len(cs.Added), len(cs.Updated), len(cs.Deleted))
+				d.dirty.Store(true)
 				d.obsidianSync()
 			}
 		case <-d.stopCh:
@@ -316,6 +343,11 @@ func (d *Daemon) writeStatus() {
 		Sources:   sources,
 		UpdatedAt: time.Now().Format(time.RFC3339),
 	}
+	d.lastFlushMu.RLock()
+	if !d.lastFlush.IsZero() {
+		ds.LastGraphFlush = d.lastFlush.Format(time.RFC3339)
+	}
+	d.lastFlushMu.RUnlock()
 	data, err := json.Marshal(ds)
 	if err != nil {
 		return
@@ -351,6 +383,57 @@ func (d *Daemon) obsidianSync() {
 		return
 	}
 	log.Printf("INFO: obsidian synced → %s/obsidian/", obs.VaultDir)
+}
+
+// ---------------------------------------------------------------------------
+// Graph persistence
+// ---------------------------------------------------------------------------
+
+// persistLoop flushes the in-memory graph to graph.json whenever the dirty
+// flag is set, debounced by cfg.Graph.FlushInterval (default 5s). It also
+// performs a final flush when the daemon stops so no reconciled state is lost.
+func (d *Daemon) persistLoop(ctx context.Context) {
+	d.cfgMu.RLock()
+	interval := d.cfg.Graph.FlushInterval
+	d.cfgMu.RUnlock()
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if d.dirty.CompareAndSwap(true, false) {
+				d.flushGraph()
+			}
+		case <-d.stopCh:
+			if d.dirty.Load() {
+				d.flushGraph()
+			}
+			return
+		case <-ctx.Done():
+			if d.dirty.Load() {
+				d.flushGraph()
+			}
+			return
+		}
+	}
+}
+
+func (d *Daemon) flushGraph() {
+	outDir := filepath.Dir(d.graphPath)
+	tg := d.graph.ToTypes()
+	if err := export.WriteJSONAtomic(tg, outDir); err != nil {
+		log.Printf("WARN: graph persist: %v", err)
+		d.dirty.Store(true) // retry on next tick
+		return
+	}
+	d.lastFlushMu.Lock()
+	d.lastFlush = time.Now()
+	d.lastFlushMu.Unlock()
+	log.Printf("INFO: graph persisted → %s", d.graphPath)
 }
 
 // ---------------------------------------------------------------------------
@@ -397,7 +480,13 @@ func (d *Daemon) reloadConfig() {
 	d.cfg = newCfg
 	d.cfgMu.Unlock()
 	log.Printf("INFO: config reloaded (obsidian.auto_sync=%v vault_dir=%s)",
-		newCfg.Obsidian.AutoSync, newCfg.Obsidian.VaultDir)
+		newCfg.Obsidian.AutoSync, config.ResolveVaultDir(newCfg.Obsidian.VaultDir))
+}
+
+// SetGraphPath sets the path where the daemon will persist graph.json.
+// Call this before daemon.Start(). When empty, graph persistence is skipped.
+func (d *Daemon) SetGraphPath(path string) {
+	d.graphPath = path
 }
 
 // configLoader is set by the caller (main.go) to avoid circular imports.

@@ -2,6 +2,7 @@ package setup
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -15,6 +16,62 @@ func CheckMCPInstalled() bool {
 	}
 	// Fallback to Claude Desktop
 	return checkClaudeDesktop()
+}
+
+// UninstallMCP removes Vela's MCP registration from supported client configs.
+func UninstallMCP() error {
+	for _, path := range []string{getOpenCodeConfigPath(), getClaudeDesktopConfigPath()} {
+		if path == "" {
+			continue
+		}
+		if err := removeServerEntry(path, "vela"); err != nil {
+			return err
+		}
+	}
+
+	claudeCodePath := getClaudeCodeConfigPath()
+	if claudeCodePath != "" {
+		if err := os.Remove(claudeCodePath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("removing Claude Code MCP config: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func removeServerEntry(configPath, serverName string) error {
+	data, err := os.ReadFile(configPath)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("reading MCP config %s: %w", configPath, err)
+	}
+
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return fmt.Errorf("parsing MCP config %s: %w", configPath, err)
+	}
+
+	mcpServers, ok := cfg["mcpServers"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	if _, exists := mcpServers[serverName]; !exists {
+		return nil
+	}
+
+	delete(mcpServers, serverName)
+
+	updated, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encoding MCP config %s: %w", configPath, err)
+	}
+	if err := os.WriteFile(configPath, updated, 0644); err != nil {
+		return fmt.Errorf("writing MCP config %s: %w", configPath, err)
+	}
+
+	return nil
 }
 
 func checkOpenCode() bool {

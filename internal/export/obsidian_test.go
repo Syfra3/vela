@@ -264,3 +264,48 @@ func TestWriteObsidian_FallbackPath(t *testing.T) {
 		t.Errorf("fallback path not created: %v", err)
 	}
 }
+
+func TestWriteObsidian_TruncatesLongObservationNames(t *testing.T) {
+	longLabel := strings.Repeat("Cross-platform Code Sharing Strategy ", 12)
+	g := &types.Graph{
+		Nodes: []types.Node{
+			{
+				ID:       "ancora:obs:long",
+				Label:    longLabel,
+				NodeType: string(types.NodeTypeObservation),
+				Source:   memorySource,
+				Metadata: map[string]interface{}{
+					"workspace":  "stock-chef",
+					"visibility": "work",
+				},
+			},
+		},
+		Edges:       []types.Edge{},
+		Communities: map[int][]string{},
+		ExtractedAt: time.Now(),
+	}
+
+	outDir := t.TempDir()
+	if err := WriteObsidian(g, outDir); err != nil {
+		t.Fatalf("WriteObsidian error: %v", err)
+	}
+
+	noteName := safePathComponent(longLabel) + ".md"
+	if len(safePathComponent(longLabel)) > maxObsidianPathComponent {
+		t.Fatalf("safePathComponent did not bound the filename")
+	}
+
+	notePath := filepath.Join(outDir, "obsidian", "Memories", "stock-chef", "work", noteName)
+	if _, err := os.Stat(notePath); err != nil {
+		t.Fatalf("truncated observation note not created: %v", err)
+	}
+	if strings.Contains(noteName, longLabel) {
+		t.Fatalf("expected long label to be truncated, got %q", noteName)
+	}
+	if !strings.Contains(noteName, "-") {
+		t.Fatalf("expected hashed suffix in %q", noteName)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "obsidian", ".obsidian", "graph.json")); err != nil {
+		t.Fatalf("graph.json not written after long-name export: %v", err)
+	}
+}

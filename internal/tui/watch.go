@@ -32,6 +32,7 @@ type watchMenuItem int
 const (
 	watchItemToggle   watchMenuItem = iota // Start / Stop daemon
 	watchItemObsidian                      // Toggle Obsidian auto-sync
+	watchItemRecover                       // Recover daemon runtime
 	watchItemAdd                           // Add source
 	watchItemService                       // Install/remove service
 	watchItemLogs                          // View logs hint
@@ -42,6 +43,7 @@ const (
 var watchMenuLabels = [watchItemCount]string{
 	watchItemToggle:   "Start/Stop daemon",
 	watchItemObsidian: "Obsidian auto-sync",
+	watchItemRecover:  "Recover runtime",
 	watchItemAdd:      "Add source",
 	watchItemService:  "Install as service",
 	watchItemLogs:     "View logs",
@@ -51,6 +53,7 @@ var watchMenuLabels = [watchItemCount]string{
 var watchMenuKeys = [watchItemCount]string{
 	watchItemToggle:   "s",
 	watchItemObsidian: "o",
+	watchItemRecover:  "r",
 	watchItemAdd:      "a",
 	watchItemService:  "i",
 	watchItemLogs:     "l",
@@ -59,20 +62,29 @@ var watchMenuKeys = [watchItemCount]string{
 
 // watchStatusMsg carries a periodic status refresh from the daemon.
 type watchStatusMsg struct {
-	status      string
-	sources     map[string]listener.SourceStatus
-	daemonOK    bool
-	ancoraOK    bool // ancora mcp socket is live
-	pid         int
-	obsidianOn  bool   // obsidian.auto_sync from config
-	obsidianDir string // obsidian.vault_dir from config
-	serviceOn   bool
+	status         string
+	sources        map[string]listener.SourceStatus
+	daemonOK       bool
+	ancoraOK       bool // ancora mcp socket is live
+	pid            int
+	obsidianOn     bool   // obsidian.auto_sync from config
+	obsidianDir    string // obsidian.vault_dir from config
+	serviceOn      bool
+	lastGraphFlush string // human-readable time since last graph.json flush
 }
 
 // watchActionMsg is returned after performing a daemon action (start/stop).
 type watchActionMsg struct {
-	err error
+	err     error
+	message string
 }
+
+var (
+	watchSocketProbe        = ancoraSocketAlive
+	watchStartDaemon        = startDetachedDaemon
+	watchStopDaemon         = stopRunningDaemon
+	watchWaitForDaemonState = waitForDaemonState
+)
 
 // WatchModel is the TUI model for the Watch screen.
 type WatchModel struct {
@@ -82,14 +94,15 @@ type WatchModel struct {
 	msgIsErr bool
 
 	// daemon + integration state (refreshed every 3s)
-	daemonOK    bool
-	ancoraOK    bool // ancora mcp socket alive
-	pid         int
-	status      string
-	sources     map[string]listener.SourceStatus
-	obsidianOn  bool   // current obsidian.auto_sync value
-	obsidianDir string // current obsidian.vault_dir value
-	serviceOn   bool
+	daemonOK       bool
+	ancoraOK       bool // ancora mcp socket alive
+	pid            int
+	status         string
+	sources        map[string]listener.SourceStatus
+	obsidianOn     bool   // current obsidian.auto_sync value
+	obsidianDir    string // current obsidian.vault_dir value
+	serviceOn      bool
+	lastGraphFlush string // human-readable time since last graph.json flush
 
 	d *daemon.Daemon // may be nil if daemon fails to init
 }
@@ -127,12 +140,16 @@ func (m WatchModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.obsidianOn = msg.obsidianOn
 		m.obsidianDir = msg.obsidianDir
 		m.serviceOn = msg.serviceOn
+		m.lastGraphFlush = msg.lastGraphFlush
 		return m, tickWatchStatus()
 
 	case watchActionMsg:
 		if msg.err != nil {
 			m.message = msg.err.Error()
 			m.msgIsErr = true
+		} else if msg.message != "" {
+			m.message = msg.message
+			m.msgIsErr = false
 		} else {
 			m.message = "Done."
 			m.msgIsErr = false
@@ -168,6 +185,9 @@ func (m WatchModel) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "o":
 		m.cursor = int(watchItemObsidian)
 		return m.handleSelect()
+	case "r":
+		m.cursor = int(watchItemRecover)
+		return m.handleSelect()
 	case "a":
 		m.cursor = int(watchItemAdd)
 		return m.handleSelect()
@@ -188,6 +208,9 @@ func (m WatchModel) handleSelect() (tea.Model, tea.Cmd) {
 
 	case watchItemObsidian:
 		return m, toggleObsidianCmd(!m.obsidianOn)
+
+	case watchItemRecover:
+		return m, recoverRuntimeCmd()
 
 	case watchItemService:
 		if m.serviceOn {
@@ -307,6 +330,21 @@ func (m WatchModel) ViewContent() string {
 		lipgloss.NewStyle().Foreground(colorSubtext).Render(vaultDisplay),
 	))
 
+	// Last graph.json flush — shows daemon is keeping graph.json up-to-date.
+	flushDisplay := "never"
+	if m.lastGraphFlush != "" {
+		flushDisplay = m.lastGraphFlush
+	}
+	flushStyle := lipgloss.NewStyle().Foreground(colorSubtext)
+	if m.lastGraphFlush != "" {
+		flushStyle = lipgloss.NewStyle().Foreground(colorText)
+	}
+	b.WriteString(fmt.Sprintf("  %s  %s %s\n",
+		lipgloss.NewStyle().Foreground(colorSubtext).Render(" "),
+		label.Render("Last graph flush"),
+		flushStyle.Render(flushDisplay),
+	))
+
 	b.WriteString("\n")
 
 	// ── Action items ─────────────────────────────────────────────────────
@@ -363,7 +401,7 @@ func (m WatchModel) ViewContent() string {
 }
 
 func (m WatchModel) FooterHelp() string {
-	return "↑↓ navigate • Enter select • s start/stop • i install/remove service • b back"
+	return "↑↓ navigate • Enter select • s start/stop • r recover • i install/remove service • b back"
 }
 
 // ---------------------------------------------------------------------------
@@ -392,50 +430,47 @@ func (m WatchModel) refreshStatus() tea.Cmd {
 		}
 		alive, pid, _ := pf.IsAlive()
 
-		// Read source statuses from the status file written by the daemon's
-		// statusLoop — the only cross-process-safe way to get registry state.
-		srcs := readStatusFile(cfg.Daemon.StatusFile)
+		// Read source statuses and graph flush time from the status file.
+		srcs, lastFlush := readDaemonStatus(cfg.Daemon.StatusFile)
 
-		vaultDir := cfg.Obsidian.VaultDir
-		if vaultDir == "" {
-			vaultDir = config.DefaultVaultDir()
-		}
+		vaultDir := config.ResolveVaultDir(cfg.Obsidian.VaultDir)
 
 		return watchStatusMsg{
-			daemonOK:    alive,
-			ancoraOK:    ancoraSocketAlive(),
-			pid:         pid,
-			status:      fmt.Sprintf("running (pid %d)", pid),
-			sources:     srcs,
-			obsidianOn:  cfg.Obsidian.AutoSync,
-			obsidianDir: vaultDir,
-			serviceOn:   daemon.ServiceInstalled(),
+			daemonOK:       alive,
+			ancoraOK:       ancoraSocketAlive(),
+			pid:            pid,
+			status:         fmt.Sprintf("running (pid %d)", pid),
+			sources:        srcs,
+			obsidianOn:     cfg.Obsidian.AutoSync,
+			obsidianDir:    vaultDir,
+			serviceOn:      daemon.ServiceInstalled(),
+			lastGraphFlush: lastFlush,
 		}
 	}
 }
 
-// readStatusFile reads ~/.vela/watch-status.json and converts it to a
-// map[string]SourceStatus for the Watch TUI. Returns empty map on any error.
-func readStatusFile(path string) map[string]listener.SourceStatus {
-	out := make(map[string]listener.SourceStatus)
+// readDaemonStatus reads ~/.vela/watch-status.json and returns source statuses
+// and a human-readable string for the last graph.json flush time.
+func readDaemonStatus(path string) (map[string]listener.SourceStatus, string) {
+	srcs := make(map[string]listener.SourceStatus)
 	if path == "" {
-		return out
+		return srcs, ""
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return out
+		return srcs, ""
 	}
 
-	// Try new format first: sources as map[string]DaemonSourceStatus.
 	var ds types.DaemonStatus
-	if err := json.Unmarshal(data, &ds); err == nil && len(ds.Sources) > 0 {
+	if err := json.Unmarshal(data, &ds); err == nil {
 		for name, s := range ds.Sources {
-			out[name] = listener.SourceStatus{
+			srcs[name] = listener.SourceStatus{
 				Connected:  s.Connected,
 				EventCount: s.EventCount,
 			}
 		}
-		return out
+		lastFlush := formatLastFlush(ds.LastGraphFlush)
+		return srcs, lastFlush
 	}
 
 	// Fall back to legacy format: sources as map[string]bool.
@@ -444,10 +479,33 @@ func readStatusFile(path string) map[string]listener.SourceStatus {
 	}
 	if err := json.Unmarshal(data, &legacy); err == nil {
 		for name, connected := range legacy.Sources {
-			out[name] = listener.SourceStatus{Connected: connected}
+			srcs[name] = listener.SourceStatus{Connected: connected}
 		}
 	}
-	return out
+	return srcs, ""
+}
+
+// formatLastFlush converts an RFC3339 timestamp string to a human-readable
+// relative time string (e.g. "5s ago", "2m ago"). Returns "" if empty.
+func formatLastFlush(ts string) string {
+	if ts == "" {
+		return ""
+	}
+	t, err := time.Parse(time.RFC3339, ts)
+	if err != nil {
+		return ""
+	}
+	elapsed := time.Since(t)
+	switch {
+	case elapsed < 2*time.Second:
+		return "just now"
+	case elapsed < time.Minute:
+		return fmt.Sprintf("%ds ago", int(elapsed.Seconds()))
+	case elapsed < time.Hour:
+		return fmt.Sprintf("%dm ago", int(elapsed.Minutes()))
+	default:
+		return fmt.Sprintf("%dh ago", int(elapsed.Hours()))
+	}
 }
 
 // ancoraSocketAlive returns true if the ancora IPC socket exists and accepts
@@ -468,35 +526,108 @@ func ancoraSocketAlive() bool {
 
 func startDaemonCmd() tea.Cmd {
 	return func() tea.Msg {
-		// Re-exec self with `watch start --foreground` as a detached child.
-		// Same pattern as the CLI `watch start` command — avoids inline goroutine
-		// that dies when this TUI process exits.
-		self, err := os.Executable()
-		if err != nil {
-			return watchActionMsg{err: fmt.Errorf("resolving executable: %w", err)}
-		}
-		child := exec.Command(self, "watch", "start", "--foreground")
-		child.Stdout = nil
-		child.Stderr = nil
-		child.Stdin = nil
-		if err := child.Start(); err != nil {
-			return watchActionMsg{err: fmt.Errorf("starting daemon: %w", err)}
-		}
-		_ = child.Process.Release()
-		// Brief pause for child to write PID file.
-		time.Sleep(300 * time.Millisecond)
-		return watchActionMsg{err: nil}
+		return watchActionMsg{err: startDetachedDaemon()}
 	}
 }
 
 func stopDaemonCmd() tea.Cmd {
 	return func() tea.Msg {
-		d, err := buildDaemon()
-		if err != nil {
-			return watchActionMsg{err: err}
-		}
-		return watchActionMsg{err: d.Stop()}
+		return watchActionMsg{err: stopRunningDaemon()}
 	}
+}
+
+func recoverRuntimeCmd() tea.Cmd {
+	return func() tea.Msg {
+		message, err := recoverRuntime()
+		return watchActionMsg{err: err, message: message}
+	}
+}
+
+func recoverRuntime() (string, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return "", err
+	}
+
+	pf, err := daemon.NewPIDFile(cfg.Daemon.PIDFile)
+	if err != nil {
+		return "", err
+	}
+
+	alive, _, err := pf.IsAlive()
+	if err != nil {
+		return "", fmt.Errorf("checking daemon pid: %w", err)
+	}
+
+	if alive {
+		if err := watchStopDaemon(); err != nil {
+			return "", fmt.Errorf("stopping daemon: %w", err)
+		}
+		if err := watchWaitForDaemonState(cfg.Daemon.PIDFile, false, 2*time.Second); err != nil {
+			return "", err
+		}
+	}
+
+	if err := watchStartDaemon(); err != nil {
+		return "", err
+	}
+	if err := watchWaitForDaemonState(cfg.Daemon.PIDFile, true, 2*time.Second); err != nil {
+		return "", err
+	}
+
+	if !watchSocketProbe() {
+		return "Vela daemon restarted, but Ancora is still offline (start: ancora mcp).", nil
+	}
+
+	return "Runtime recovered: Vela daemon restarted and Ancora socket is reachable.", nil
+}
+
+func startDetachedDaemon() error {
+	// Re-exec self with `watch start --foreground` as a detached child.
+	// Same pattern as the CLI `watch start` command — avoids inline goroutine
+	// that dies when this TUI process exits.
+	self, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolving executable: %w", err)
+	}
+	child := exec.Command(self, "watch", "start", "--foreground")
+	child.Stdout = nil
+	child.Stderr = nil
+	child.Stdin = nil
+	if err := child.Start(); err != nil {
+		return fmt.Errorf("starting daemon: %w", err)
+	}
+	_ = child.Process.Release()
+	return nil
+}
+
+func stopRunningDaemon() error {
+	d, err := buildDaemon()
+	if err != nil {
+		return err
+	}
+	return d.Stop()
+}
+
+func waitForDaemonState(pidFilePath string, wantAlive bool, timeout time.Duration) error {
+	pf, err := daemon.NewPIDFile(pidFilePath)
+	if err != nil {
+		return err
+	}
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		alive, _, err := pf.IsAlive()
+		if err == nil && alive == wantAlive {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if wantAlive {
+		return fmt.Errorf("daemon did not start before timeout")
+	}
+	return fmt.Errorf("daemon did not stop before timeout")
 }
 
 func installServiceCmd() tea.Cmd {

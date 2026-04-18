@@ -30,18 +30,19 @@ type Reference struct {
 
 // ObservationPayload is the full event payload for created/updated observations.
 type ObservationPayload struct {
-	ID         int64       `json:"id"`
-	SyncID     string      `json:"sync_id"`
-	SessionID  string      `json:"session_id"`
-	Type       string      `json:"type"`
-	Title      string      `json:"title"`
-	Content    string      `json:"content"`
-	Workspace  string      `json:"workspace,omitempty"`
-	Visibility string      `json:"visibility"`
-	TopicKey   string      `json:"topic_key,omitempty"`
-	References []Reference `json:"references,omitempty"`
-	CreatedAt  time.Time   `json:"created_at"`
-	UpdatedAt  time.Time   `json:"updated_at"`
+	ID           int64       `json:"id"`
+	SyncID       string      `json:"sync_id"`
+	SessionID    string      `json:"session_id"`
+	Type         string      `json:"type"`
+	Title        string      `json:"title"`
+	Content      string      `json:"content"`
+	Workspace    string      `json:"workspace,omitempty"`
+	Visibility   string      `json:"visibility"`
+	Organization string      `json:"organization,omitempty"`
+	TopicKey     string      `json:"topic_key,omitempty"`
+	References   []Reference `json:"references,omitempty"`
+	CreatedAt    time.Time   `json:"created_at"`
+	UpdatedAt    time.Time   `json:"updated_at"`
 }
 
 // ObservationDeletedPayload is the slim payload for deleted observations.

@@ -82,16 +82,19 @@ func parseObservationNode(ev listener.Event) (types.ObservationNode, error) {
 	}
 
 	return types.ObservationNode{
-		ID:         fmt.Sprintf("ancora:obs:%d", payload.ID),
-		NodeType:   types.NodeTypeObservation,
-		AncoraID:   payload.ID,
-		Title:      payload.Title,
-		Content:    payload.Content,
-		ObsType:    payload.Type,
-		Workspace:  payload.Workspace,
-		References: refs,
-		CreatedAt:  payload.CreatedAt,
-		UpdatedAt:  payload.UpdatedAt,
+		ID:           fmt.Sprintf("ancora:obs:%d", payload.ID),
+		NodeType:     types.NodeTypeObservation,
+		AncoraID:     payload.ID,
+		Title:        payload.Title,
+		Content:      payload.Content,
+		ObsType:      payload.Type,
+		Workspace:    payload.Workspace,
+		Visibility:   payload.Visibility,
+		Organization: payload.Organization,
+		TopicKey:     payload.TopicKey,
+		References:   refs,
+		CreatedAt:    payload.CreatedAt,
+		UpdatedAt:    payload.UpdatedAt,
 	}, nil
 }
 

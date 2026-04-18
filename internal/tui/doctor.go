@@ -10,6 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/Syfra3/vela/internal/config"
+	vdoctor "github.com/Syfra3/vela/internal/doctor"
 	"github.com/Syfra3/vela/internal/llm"
 	"github.com/Syfra3/vela/pkg/types"
 )
@@ -20,18 +21,24 @@ type healthCheckMsg struct {
 	err      error
 }
 
+type doctorReportMsg struct {
+	llmResults        []healthCheckMsg
+	integrationChecks []vdoctor.Step
+}
+
 // DoctorModel is the TUI model for health check.
 type DoctorModel struct {
-	checking bool
-	results  []healthCheckMsg
-	quitting bool
-	cfg      *types.Config
+	checking    bool
+	results     []healthCheckMsg
+	integration []vdoctor.Step
+	quitting    bool
+	cfg         *types.Config
 }
 
 func NewDoctorModel() DoctorModel {
 	cfg, _ := config.Load()
 	return DoctorModel{
-		checking: false,
+		checking: true,
 		cfg:      cfg,
 	}
 }
@@ -59,11 +66,10 @@ func (m DoctorModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.runHealthCheck()
 		}
 
-	case healthCheckMsg:
-		m.results = append(m.results, msg)
-		if len(m.results) >= 3 { // local, anthropic, openai
-			m.checking = false
-		}
+	case doctorReportMsg:
+		m.results = msg.llmResults
+		m.integration = msg.integrationChecks
+		m.checking = false
 		return m, nil
 	}
 	return m, nil
@@ -108,6 +114,30 @@ func (m DoctorModel) ViewContent() string {
 			textStyle.Render(msg)))
 	}
 
+	if len(m.integration) > 0 {
+		if len(m.results) > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(textStyle.Bold(true).Render("Integration Path"))
+		b.WriteString("\n")
+		for _, step := range m.integration {
+			status := "✓"
+			statusStyle := successStyle
+			if step.Status == vdoctor.StepWarn {
+				status = "!"
+				statusStyle = textStyle
+			}
+			if step.Status == vdoctor.StepFail {
+				status = "✗"
+				statusStyle = errorStyle
+			}
+			b.WriteString(fmt.Sprintf("%s %s: %s\n",
+				statusStyle.Render(status),
+				textStyle.Bold(true).Render(step.Name),
+				textStyle.Render(step.Detail)))
+		}
+	}
+
 	return b.String()
 }
 
@@ -148,12 +178,17 @@ func (m DoctorModel) runHealthCheck() tea.Cmd {
 			}(p)
 		}
 
-		// Return first result (will be called multiple times via Batch)
-		select {
-		case result := <-results:
-			return result
-		case <-ctx.Done():
-			return healthCheckMsg{provider: "unknown", ok: false, err: ctx.Err()}
+		collected := make([]healthCheckMsg, 0, len(providers))
+		for range providers {
+			select {
+			case result := <-results:
+				collected = append(collected, result)
+			case <-ctx.Done():
+				collected = append(collected, healthCheckMsg{provider: "unknown", ok: false, err: ctx.Err()})
+				return doctorReportMsg{llmResults: collected, integrationChecks: vdoctor.IntegrationChecks(m.cfg, "")}
+			}
 		}
+
+		return doctorReportMsg{llmResults: collected, integrationChecks: vdoctor.IntegrationChecks(m.cfg, "")}
 	}
 }

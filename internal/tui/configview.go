@@ -115,10 +115,7 @@ func (m ConfigViewModel) ViewContent() string {
 		b.WriteString(labelStyle.Render("Obsidian:"))
 		b.WriteString("\n")
 		b.WriteString(fmt.Sprintf("  Auto-sync: %s\n", valueStyle.Render(fmt.Sprintf("%t", m.cfg.Obsidian.AutoSync))))
-		vaultDir := m.cfg.Obsidian.VaultDir
-		if vaultDir == "" {
-			vaultDir = config.DefaultVaultDir()
-		}
+		vaultDir := config.ResolveVaultDir(m.cfg.Obsidian.VaultDir)
 		b.WriteString(fmt.Sprintf("  Vault dir: %s\n", valueStyle.Render(filepath.Join(vaultDir, "obsidian"))))
 		b.WriteString("\n")
 	}

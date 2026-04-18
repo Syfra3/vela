@@ -17,6 +17,14 @@ var memorySrc = &types.Source{
 	Name: "ancora",
 }
 
+const memoryRootNodeID = "memory:ancora"
+
+func workspaceNodeID(ws string) string   { return fmt.Sprintf("ancora:workspace:%s", ws) }
+func visibilityNodeID(vis string) string { return fmt.Sprintf("ancora:visibility:%s", vis) }
+func organizationNodeID(org string) string {
+	return fmt.Sprintf("ancora:organization:%s", org)
+}
+
 // Patcher applies a ChangeSet to the in-memory graph using minimal mutations.
 // It maintains indexes so it can quickly locate existing nodes and edges
 // without scanning the full graph on every event.
@@ -77,6 +85,8 @@ func (p *Patcher) LLMQueue() <-chan types.ObservationNode {
 
 // addNode inserts a new ObservationNode into the graph.
 func (p *Patcher) addNode(obs *types.ObservationNode) error {
+	p.ensureMemoryHierarchy(obs)
+
 	obs.Source = memorySrc
 	node := obs.ToNode()
 
@@ -103,6 +113,55 @@ func (p *Patcher) addNode(obs *types.ObservationNode) error {
 	}
 
 	return nil
+}
+
+func (p *Patcher) ensureMemoryHierarchy(obs *types.ObservationNode) {
+	p.ensureNode(types.Node{
+		ID:          memoryRootNodeID,
+		Label:       "Ancora Memory",
+		NodeType:    string(types.NodeTypeMemorySource),
+		Description: "Persistent memory: decisions, bugs, architecture observations",
+		Source:      memorySrc,
+	})
+
+	if obs.Workspace != "" {
+		p.ensureNode(types.Node{
+			ID:       workspaceNodeID(obs.Workspace),
+			Label:    obs.Workspace,
+			NodeType: string(types.NodeTypeWorkspace),
+			Source:   memorySrc,
+		})
+	}
+
+	if obs.Visibility != "" {
+		p.ensureNode(types.Node{
+			ID:       visibilityNodeID(obs.Visibility),
+			Label:    obs.Visibility,
+			NodeType: string(types.NodeTypeVisibility),
+			Source:   memorySrc,
+		})
+	}
+
+	if obs.Organization != "" {
+		p.ensureNode(types.Node{
+			ID:       organizationNodeID(obs.Organization),
+			Label:    obs.Organization,
+			NodeType: string(types.NodeTypeOrganization),
+			Source:   memorySrc,
+		})
+	}
+}
+
+func (p *Patcher) ensureNode(node types.Node) {
+	if _, exists := p.graph.NodeIndex[node.ID]; exists {
+		return
+	}
+
+	newID := int64(len(p.graph.NodeByID) + 1)
+	p.graph.Directed.AddNode(simple.Node(newID))
+	p.graph.NodeIndex[node.ID] = newID
+	p.graph.NodeByID[newID] = node
+	p.graph.Nodes = append(p.graph.Nodes, node)
 }
 
 // updateNode applies a delta update to an existing node.

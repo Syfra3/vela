@@ -67,6 +67,10 @@ func defaults() *types.Config {
 			AutoSync: false,
 			VaultDir: DefaultVaultDir(),
 		},
+		Graph: types.GraphConfig{
+			AutoPersist:   true,
+			FlushInterval: 5 * time.Second,
+		},
 	}
 }
 
@@ -100,6 +104,7 @@ func Load() (*types.Config, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parsing config %s: %w", path, err)
 	}
+	cfg.Obsidian.VaultDir = ResolveVaultDir(cfg.Obsidian.VaultDir)
 	return cfg, nil
 }
 

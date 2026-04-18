@@ -1,13 +1,19 @@
 package daemon
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
+	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	igraph "github.com/Syfra3/vela/internal/graph"
+	"github.com/Syfra3/vela/internal/listener"
 	"github.com/Syfra3/vela/pkg/types"
 )
 
@@ -61,6 +67,194 @@ func TestDaemonStopWhenNotRunning(t *testing.T) {
 	if !errors.Is(err, ErrNotRunning) {
 		t.Fatalf("Stop() error = %v, want ErrNotRunning", err)
 	}
+}
+
+func TestDaemonAncoraSocketReconcileSyncsObsidian(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	socketPath := filepath.Join(tmp, "ancora.sock")
+
+	ready := make(chan struct{})
+	serverErr := make(chan error, 1)
+	go serveAncoraEvent(t, socketPath, ready, serverErr, listener.ObservationPayload{
+		ID:           42,
+		SyncID:       "sync-42",
+		SessionID:    "sess-42",
+		Type:         "decision",
+		Title:        "Realtime memory",
+		Content:      "Observation content from socket",
+		Workspace:    "vela",
+		Visibility:   "work",
+		Organization: "glim",
+		TopicKey:     "architecture/e2e",
+		References:   []listener.Reference{{Type: "file", Target: "internal/store/store.go"}},
+		CreatedAt:    time.Now().UTC(),
+		UpdatedAt:    time.Now().UTC(),
+	})
+	<-ready
+
+	g, err := igraph.Build(nil, nil)
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	cfg := &types.Config{
+		LLM: types.LLMConfig{},
+		Watch: types.WatchConfig{
+			Enabled: true,
+			Sources: []types.WatchSourceConfig{{
+				Name:   "ancora",
+				Type:   "syfra",
+				Socket: socketPath,
+			}},
+			Reconciler: types.ReconcilerConfig{DebounceMs: 0, MaxBatchSize: 10},
+			Extractor:  types.ExtractorConfig{Enabled: false},
+		},
+		Daemon: types.DaemonConfig{
+			PIDFile:    filepath.Join(tmp, "watch.pid"),
+			LogFile:    "",
+			StatusFile: filepath.Join(tmp, "watch-status.json"),
+		},
+		Obsidian: types.ObsidianConfig{AutoSync: true, VaultDir: tmp},
+	}
+
+	d, err := New(cfg, g)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := d.Start(ctx); err != nil {
+		t.Fatalf("Start() error = %v", err)
+	}
+	defer func() { _ = d.Stop() }()
+
+	obsNote := filepath.Join(tmp, "obsidian", "Memories", "vela", "work", "Realtime memory.md")
+	workspaceIndex := filepath.Join(tmp, "obsidian", "Memories", "_index", "workspace-vela.md")
+	visibilityIndex := filepath.Join(tmp, "obsidian", "Memories", "_index", "visibility-work.md")
+	organizationIndex := filepath.Join(tmp, "obsidian", "Memories", "_index", "organization-glim.md")
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if _, err := os.Stat(obsNote); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for obsidian note at %s", obsNote)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	if err := <-serverErr; err != nil {
+		t.Fatalf("socket server error = %v", err)
+	}
+
+	data, err := os.ReadFile(obsNote)
+	if err != nil {
+		t.Fatalf("read obsidian note: %v", err)
+	}
+	content := string(data)
+	for _, want := range []string{
+		`obs_type: "decision"`,
+		`workspace: "vela"`,
+		`visibility: "work"`,
+		`organization: "glim"`,
+		`topic_key: "architecture/e2e"`,
+		"Observation content from socket",
+		"[[workspace-vela]]",
+		"[[visibility-work]]",
+		"[[organization-glim]]",
+	} {
+		if !strings.Contains(content, want) {
+			t.Fatalf("obsidian note missing %q:\n%s", want, content)
+		}
+	}
+
+	for _, path := range []string{workspaceIndex, visibilityIndex, organizationIndex} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected hierarchy note %s: %v", path, err)
+		}
+	}
+
+	if _, ok := d.graph.NodeIndex["ancora:obs:42"]; !ok {
+		t.Fatal("expected observation node in in-memory graph")
+	}
+	if _, ok := d.graph.NodeIndex["ancora:workspace:vela"]; !ok {
+		t.Fatal("expected workspace node in in-memory graph")
+	}
+	if _, ok := d.graph.NodeIndex["ancora:visibility:work"]; !ok {
+		t.Fatal("expected visibility node in in-memory graph")
+	}
+	if _, ok := d.graph.NodeIndex["ancora:organization:glim"]; !ok {
+		t.Fatal("expected organization node in in-memory graph")
+	}
+}
+
+func serveAncoraEvent(t *testing.T, socketPath string, ready chan<- struct{}, errs chan<- error, payload listener.ObservationPayload) {
+	t.Helper()
+
+	ln, err := net.Listen("unix", socketPath)
+	if err != nil {
+		errs <- err
+		close(ready)
+		return
+	}
+	defer func() {
+		_ = ln.Close()
+		_ = os.Remove(socketPath)
+	}()
+	close(ready)
+
+	conn, err := ln.Accept()
+	if err != nil {
+		errs <- err
+		return
+	}
+	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+	_ = conn.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
+	if line, err := reader.ReadString('\n'); err == nil && strings.HasPrefix(line, "AUTH ") {
+		if _, err := conn.Write([]byte("OK\n")); err != nil {
+			errs <- err
+			return
+		}
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+
+	framePayload, err := json.Marshal(payload)
+	if err != nil {
+		errs <- err
+		return
+	}
+	frame, err := json.Marshal(struct {
+		Type      listener.EventType `json:"type"`
+		Timestamp time.Time          `json:"timestamp"`
+		Payload   json.RawMessage    `json:"payload"`
+	}{
+		Type:      listener.EventObservationCreated,
+		Timestamp: time.Now().UTC(),
+		Payload:   framePayload,
+	})
+	if err != nil {
+		errs <- err
+		return
+	}
+
+	writer := bufio.NewWriter(conn)
+	if _, err := writer.Write(append(frame, '\n')); err != nil {
+		errs <- err
+		return
+	}
+	if err := writer.Flush(); err != nil {
+		errs <- err
+		return
+	}
+
+	errs <- nil
 }
 
 func newTestDaemon(t *testing.T) *Daemon {

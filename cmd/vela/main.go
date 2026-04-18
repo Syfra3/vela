@@ -18,6 +18,7 @@ import (
 	"github.com/Syfra3/vela/internal/config"
 	"github.com/Syfra3/vela/internal/daemon"
 	"github.com/Syfra3/vela/internal/detect"
+	vdoctor "github.com/Syfra3/vela/internal/doctor"
 	"github.com/Syfra3/vela/internal/export"
 	"github.com/Syfra3/vela/internal/extract"
 	igraph "github.com/Syfra3/vela/internal/graph"
@@ -343,9 +344,17 @@ func extractCmd() *cobra.Command {
 				fmt.Fprintf(os.Stderr, "  note: clustering unavailable (%v)\n", lErr)
 			}
 
-			// Export JSON
+			// Acquire graph lock — prevents concurrent daemon writes.
+			lockPath := filepath.Join(outDir, "graph.lock")
+			gLock, lockErr := igraph.AcquireGraphLock(lockPath)
+			if lockErr != nil {
+				return fmt.Errorf("cannot write graph.json: %w", lockErr)
+			}
+			defer gLock.Release()
+
+			// Export JSON atomically.
 			tg := g.ToTypes()
-			if err := export.WriteJSON(tg, outDir); err != nil {
+			if err := export.WriteJSONAtomic(tg, outDir); err != nil {
 				return fmt.Errorf("writing graph.json: %w", err)
 			}
 
@@ -365,10 +374,7 @@ func extractCmd() *cobra.Command {
 					fmt.Fprintf(os.Stderr, "  warning: HTML export failed: %v\n", hErr)
 				}
 				// Obsidian vault
-				obsVaultDir := cfg.Obsidian.VaultDir
-				if obsVaultDir == "" {
-					obsVaultDir = config.DefaultVaultDir()
-				}
+				obsVaultDir := config.ResolveVaultDir(cfg.Obsidian.VaultDir)
 				if oErr := export.WriteObsidian(tg, obsVaultDir); oErr != nil {
 					fmt.Fprintf(os.Stderr, "  warning: Obsidian export failed: %v\n", oErr)
 				}
@@ -447,7 +453,7 @@ func extractCmd() *cobra.Command {
 		},
 	}
 
-	cmd.Flags().StringVar(&outDir, "out", "", "Output directory (default: <root>/.vela)")
+	cmd.Flags().StringVar(&outDir, "out", "", "Output directory (default: ~/.vela)")
 	cmd.Flags().BoolVar(&noTUI, "no-tui", false, "Disable TUI, use plain log output")
 	cmd.Flags().BoolVar(&noViz, "no-viz", false, "Skip HTML and Obsidian exports")
 	cmd.Flags().BoolVar(&watchMode, "watch", false, "Watch for file changes and re-extract automatically")
@@ -516,6 +522,16 @@ func doctorCmd() *cobra.Command {
 			}
 
 			fmt.Printf("  [OK] %s\n", client.Provider())
+			for _, step := range vdoctor.IntegrationChecks(cfg, "") {
+				label := "OK"
+				if step.Status == vdoctor.StepWarn {
+					label = "WARN"
+				}
+				if step.Status == vdoctor.StepFail {
+					label = "FAIL"
+				}
+				fmt.Printf("  [%s] %s: %s\n", label, step.Name, step.Detail)
+			}
 			return nil
 		},
 	}
@@ -551,7 +567,7 @@ func pathCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: vela-out/graph.json)")
+	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: ~/.vela/graph.json)")
 	return cmd
 }
 
@@ -570,7 +586,7 @@ func explainCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: vela-out/graph.json)")
+	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: ~/.vela/graph.json)")
 	return cmd
 }
 
@@ -589,7 +605,7 @@ func queryCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: vela-out/graph.json)")
+	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: ~/.vela/graph.json)")
 	return cmd
 }
 
@@ -626,7 +642,7 @@ func serveCmd() *cobra.Command {
 			return srv.Start(ctx)
 		},
 	}
-	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: vela-out/graph.json)")
+	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: ~/.vela/graph.json)")
 	cmd.Flags().IntVar(&port, "port", 7700, "Port to listen on")
 	return cmd
 }
@@ -713,7 +729,13 @@ func loadDaemon(graphFile string) (*daemon.Daemon, error) {
 		return nil, fmt.Errorf("loading config: %w", err)
 	}
 	if graphFile == "" {
-		graphFile, _ = config.FindGraphFile(".")
+		var findErr error
+		graphFile, findErr = config.FindGraphFile(".")
+		if findErr != nil {
+			// No existing graph.json — resolve canonical path so persist loop can write there.
+			home, _ := os.UserHomeDir()
+			graphFile = filepath.Join(home, ".vela", "graph.json")
+		}
 	}
 	// Load the existing graph so the daemon can patch it in-place.
 	nodes, edges, err := loadExistingGraphData(graphFile)
@@ -726,9 +748,15 @@ func loadDaemon(graphFile string) (*daemon.Daemon, error) {
 	if err != nil {
 		return nil, fmt.Errorf("building graph: %w", err)
 	}
+	d, err := daemon.New(cfg, g)
+	if err != nil {
+		return nil, fmt.Errorf("building daemon: %w", err)
+	}
 	// Register the config loader so the daemon can hot-reload on SIGHUP.
 	daemon.SetConfigLoader(config.Load)
-	return daemon.New(cfg, g)
+	// Tell the daemon where to persist graph.json.
+	d.SetGraphPath(graphFile)
+	return d, nil
 }
 
 func watchStartCmd() *cobra.Command {
@@ -795,7 +823,7 @@ func watchStartCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: vela-out/graph.json)")
+	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: ~/.vela/graph.json)")
 	cmd.Flags().BoolVar(&foreground, "foreground", false, "Run in foreground (for service managers)")
 	return cmd
 }

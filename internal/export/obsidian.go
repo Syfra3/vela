@@ -1,6 +1,8 @@
 package export
 
 import (
+	"crypto/sha1"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +10,8 @@ import (
 
 	"github.com/Syfra3/vela/pkg/types"
 )
+
+const maxObsidianPathComponent = 120
 
 // WriteObsidian creates an Obsidian vault at outDir/obsidian/.
 //
@@ -154,7 +158,7 @@ func memIndexNotePath(vaultDir, kind, label string) (string, error) {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, sanitize(kind+"-"+label)+".md"), nil
+	return filepath.Join(dir, safePathComponent(kind+"-"+label)+".md"), nil
 }
 
 func obsNotePath(vaultDir string, n types.Node) (string, error) {
@@ -166,15 +170,15 @@ func obsNotePath(vaultDir string, n types.Node) (string, error) {
 	if vis == "" {
 		vis = "_unsorted"
 	}
-	dir := filepath.Join(vaultDir, "Memories", sanitize(ws), sanitize(vis))
+	dir := filepath.Join(vaultDir, "Memories", safePathComponent(ws), safePathComponent(vis))
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, sanitize(n.Label)+".md"), nil
+	return filepath.Join(dir, safePathComponent(n.Label)+".md"), nil
 }
 
 func projectRootNotePath(vaultDir, projectName string) (string, error) {
-	dir := filepath.Join(vaultDir, "Projects", sanitize(projectName))
+	dir := filepath.Join(vaultDir, "Projects", safePathComponent(projectName))
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
 	}
@@ -183,14 +187,14 @@ func projectRootNotePath(vaultDir, projectName string) (string, error) {
 
 func projectFileNotePath(vaultDir string, n types.Node) (string, error) {
 	project := projectName(n)
-	dir := filepath.Join(vaultDir, "Projects", sanitize(project))
+	dir := filepath.Join(vaultDir, "Projects", safePathComponent(project))
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
 	}
 	// Flatten the file path into the filename: internal/auth/middleware.go → internal_auth_middleware.go.md
-	flat := strings.ReplaceAll(sanitize(n.SourceFile), "/", "_")
+	flat := strings.ReplaceAll(safePathComponent(n.SourceFile), "/", "_")
 	if flat == "" {
-		flat = sanitize(n.Label)
+		flat = safePathComponent(n.Label)
 	}
 	return filepath.Join(dir, flat+".md"), nil
 }
@@ -198,17 +202,17 @@ func projectFileNotePath(vaultDir string, n types.Node) (string, error) {
 func codeSymbolNotePath(vaultDir string, n types.Node) (string, error) {
 	project := projectName(n)
 	// Group symbols under a subdirectory matching the source file (flattened).
-	flat := strings.ReplaceAll(sanitize(n.SourceFile), "/", "_")
+	flat := strings.ReplaceAll(safePathComponent(n.SourceFile), "/", "_")
 	var dir string
 	if flat != "" {
-		dir = filepath.Join(vaultDir, "Projects", sanitize(project), flat)
+		dir = filepath.Join(vaultDir, "Projects", safePathComponent(project), flat)
 	} else {
-		dir = filepath.Join(vaultDir, "Projects", sanitize(project), "_symbols")
+		dir = filepath.Join(vaultDir, "Projects", safePathComponent(project), "_symbols")
 	}
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return "", err
 	}
-	return filepath.Join(dir, sanitize(n.Label)+".md"), nil
+	return filepath.Join(dir, safePathComponent(n.Label)+".md"), nil
 }
 
 // ── Note writers ──────────────────────────────────────────────────────────────
@@ -394,6 +398,26 @@ func sanitize(s string) string {
 		"?", "_", "\"", "_", "<", "_", ">", "_", "|", "_",
 	)
 	return r.Replace(s)
+}
+
+func safePathComponent(s string) string {
+	clean := strings.TrimSpace(sanitize(s))
+	clean = strings.Trim(clean, ". ")
+	if clean == "" {
+		clean = "_unnamed"
+	}
+	if len(clean) <= maxObsidianPathComponent {
+		return clean
+	}
+
+	sum := sha1.Sum([]byte(clean))
+	hash := hex.EncodeToString(sum[:])[:10]
+	trimmed := clean[:maxObsidianPathComponent-len(hash)-1]
+	trimmed = strings.TrimRight(trimmed, " ._-")
+	if trimmed == "" {
+		trimmed = clean[:maxObsidianPathComponent-len(hash)-1]
+	}
+	return trimmed + "-" + hash
 }
 
 // metaStr extracts a string value from node Metadata by key.
