@@ -125,8 +125,8 @@ func (m *MenuModel) rebuildMenu() {
 			key:         "obsidian",
 		},
 		{
-			label:       "Query",
-			description: "Query existing graph (path, explain, nodes)",
+			label:       "Search",
+			description: "Search Ancora memory and the current graph",
 			key:         "query",
 		},
 		{
@@ -313,6 +313,7 @@ func (m MenuModel) handleMenuSelect() (tea.Model, tea.Cmd) {
 	case "query":
 		m.screen = screenQuery
 		m.queryModel = NewQueryModel()
+		return m, m.queryModel.Init()
 	case "config":
 		m.screen = screenConfig
 		m.configModel = NewConfigViewModel()
@@ -675,9 +676,9 @@ func (m MenuModel) viewExtract() string {
 
 func (m MenuModel) viewQuery() string {
 	var b strings.Builder
-	b.WriteString(m.renderHeader(fmt.Sprintf("Query — %s", m.queryModel.ModeName())))
+	b.WriteString(m.renderHeader(m.queryModel.ModeName()))
 	b.WriteString(m.queryModel.ViewContent())
-	b.WriteString(m.renderFooter("Tab change mode • Enter execute • esc back to menu"))
+	b.WriteString(m.renderFooter("Type to edit • Enter search • r reload • esc back to menu"))
 	return appStyle.Render(b.String())
 }
 

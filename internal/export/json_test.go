@@ -14,11 +14,12 @@ func TestWriteJSON(t *testing.T) {
 	g := &types.Graph{
 		Nodes: []types.Node{
 			{
-				ID:         "a",
-				Label:      "A",
-				NodeType:   "function",
-				SourceFile: "main.go",
-				Metadata:   map[string]interface{}{"path": "/tmp/project", "remote": "https://github.com/Syfra3/vela.git"},
+				ID:          "a",
+				Label:       "A",
+				NodeType:    "function",
+				SourceFile:  "main.go",
+				Description: "primary entrypoint",
+				Metadata:    map[string]interface{}{"path": "/tmp/project", "remote": "https://github.com/Syfra3/vela.git"},
 				Source: &types.Source{
 					Type:   types.SourceTypeCodebase,
 					Name:   "vela",
@@ -65,6 +66,9 @@ func TestWriteJSON(t *testing.T) {
 	}
 	if parsed.Nodes[0].SourceRemote != "https://github.com/Syfra3/vela.git" {
 		t.Fatalf("node source_remote = %q", parsed.Nodes[0].SourceRemote)
+	}
+	if parsed.Nodes[0].Description != "primary entrypoint" {
+		t.Fatalf("node description = %q", parsed.Nodes[0].Description)
 	}
 	if got, _ := parsed.Nodes[0].Metadata["path"].(string); got != "/tmp/project" {
 		t.Fatalf("node metadata path = %q, want %q", got, "/tmp/project")

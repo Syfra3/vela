@@ -14,6 +14,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 
+	ancoradb "github.com/Syfra3/vela/internal/ancora"
 	"github.com/Syfra3/vela/internal/cache"
 	"github.com/Syfra3/vela/internal/config"
 	"github.com/Syfra3/vela/internal/daemon"
@@ -74,6 +75,7 @@ codebases and technical documentation.`,
 	root.AddCommand(doctorCmd())
 	root.AddCommand(pathCmd())
 	root.AddCommand(explainCmd())
+	root.AddCommand(searchCmd())
 	root.AddCommand(queryCmd())
 	root.AddCommand(serveCmd())
 	root.AddCommand(hookCmd())
@@ -590,6 +592,71 @@ func explainCmd() *cobra.Command {
 	return cmd
 }
 
+func searchCmd() *cobra.Command {
+	var graphFile string
+	var ancoraDB string
+	var limit int
+	var jsonOut bool
+	var showMetrics bool
+	var recordMetrics bool
+
+	cmd := &cobra.Command{
+		Use:   "search <query>",
+		Short: "Run federated retrieval and compare it with Ancora-only search",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			eng, err := loadEngine(graphFile)
+			if err != nil {
+				return err
+			}
+			if ancoraDB == "" {
+				ancoraDB, err = ancoradb.DefaultDBPath()
+				if err != nil {
+					return err
+				}
+			}
+			searcher := query.NewSearcher(eng, ancoraDB)
+			resp, err := searcher.Search(strings.Join(args, " "), limit)
+			if err != nil {
+				return err
+			}
+
+			var metricsPath string
+			if recordMetrics {
+				metricsPath, err = query.WriteMetricsSnapshot(resp.Metrics)
+				if err != nil {
+					return err
+				}
+			}
+
+			if jsonOut {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				if err := enc.Encode(resp); err != nil {
+					return err
+				}
+				if metricsPath != "" {
+					fmt.Fprintf(os.Stderr, "metrics snapshot: %s\n", metricsPath)
+				}
+				return nil
+			}
+
+			printSearchResponse(resp, showMetrics)
+			if metricsPath != "" {
+				fmt.Printf("\nmetrics snapshot: %s\n", metricsPath)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: ~/.vela/graph.json)")
+	cmd.Flags().StringVar(&ancoraDB, "ancora-db", "", "Path to ancora.db (default: ~/.ancora/ancora.db)")
+	cmd.Flags().IntVar(&limit, "limit", 5, "Maximum results to return")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output the federated response as JSON")
+	cmd.Flags().BoolVar(&showMetrics, "metrics", false, "Print comparison metrics after results")
+	cmd.Flags().BoolVar(&recordMetrics, "record-metrics", false, "Persist comparison metrics under ~/.vela/retrieval-history")
+	return cmd
+}
+
 func queryCmd() *cobra.Command {
 	var graphFile string
 	cmd := &cobra.Command{
@@ -607,6 +674,39 @@ func queryCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: ~/.vela/graph.json)")
 	return cmd
+}
+
+func printSearchResponse(resp query.SearchResponse, showMetrics bool) {
+	if len(resp.Hits) == 0 {
+		fmt.Println("no results")
+	} else {
+		for i, hit := range resp.Hits {
+			fmt.Printf("%d. [%s] %s", i+1, hit.PrimarySource, hit.Label)
+			if hit.Kind != "" {
+				fmt.Printf(" (%s)", hit.Kind)
+			}
+			fmt.Printf(" score=%.2f\n", hit.Score)
+			if hit.Path != "" {
+				fmt.Printf("   path: %s\n", hit.Path)
+			}
+			if hit.Snippet != "" {
+				fmt.Printf("   %s\n", hit.Snippet)
+			}
+		}
+	}
+
+	if !showMetrics {
+		return
+	}
+
+	m := resp.Metrics
+	fmt.Println()
+	fmt.Println("Metrics")
+	fmt.Printf("  Ancora-only: latency=%dms returned=%d distinct_kinds=%d\n", m.AncoraOnly.LatencyMs, m.AncoraOnly.Returned, m.AncoraOnly.DistinctKinds)
+	fmt.Printf("  Federated:   latency=%dms returned=%d distinct_kinds=%d hybrid=%d\n", m.Federated.LatencyMs, m.Federated.Returned, m.Federated.DistinctKinds, m.Federated.HybridResults)
+	fmt.Printf("  Overlap@%d:  %d (%.2f)\n", m.Limit, m.Comparison.OverlapAtK, m.Comparison.OverlapRatio)
+	fmt.Printf("  Added:       %d %v\n", m.Comparison.AddedByFederated, m.Comparison.AddedBySource)
+	fmt.Printf("  Graph cost:  %dms\n", m.Comparison.GraphLatencyMs)
 }
 
 // ---------------------------------------------------------------------------

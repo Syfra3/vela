@@ -22,6 +22,7 @@ type nodeJSON struct {
 	Label        string                 `json:"label"`
 	Kind         string                 `json:"kind"`
 	File         string                 `json:"file,omitempty"`
+	Description  string                 `json:"description,omitempty"`
 	Community    int                    `json:"community,omitempty"`
 	SourceType   string                 `json:"source_type,omitempty"`   // "codebase" | "memory" | "webhook"
 	SourceName   string                 `json:"source_name,omitempty"`   // repo/project name
@@ -111,11 +112,12 @@ func marshalGraph(g *types.Graph) ([]byte, error) {
 
 	for i, n := range g.Nodes {
 		nj := nodeJSON{
-			ID:        n.ID,
-			Label:     n.Label,
-			Kind:      n.NodeType,
-			File:      n.SourceFile,
-			Community: n.Community,
+			ID:          n.ID,
+			Label:       n.Label,
+			Kind:        n.NodeType,
+			File:        n.SourceFile,
+			Description: n.Description,
+			Community:   n.Community,
 		}
 		if n.Source != nil {
 			nj.SourceType = string(n.Source.Type)
