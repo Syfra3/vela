@@ -27,6 +27,22 @@ type Engine struct {
 	intToID       map[int64]string
 }
 
+// Neighbor describes a directly connected node and the edge relating it.
+type Neighbor struct {
+	Node      types.Node
+	Edge      types.Edge
+	Direction string
+}
+
+// GraphStats summarizes the graph contents for diagnostics and MCP output.
+type GraphStats struct {
+	NodeCount       int
+	EdgeCount       int
+	CommunityCount  int
+	NodeTypes       map[string]int
+	ConfidenceTypes map[string]int
+}
+
 // LoadFromFile reads graph.json and constructs a query Engine.
 func LoadFromFile(graphPath string) (*Engine, error) {
 	data, err := os.ReadFile(graphPath)
@@ -517,6 +533,144 @@ func (e *Engine) Query(input string) string {
 	}
 }
 
+// FindNode resolves a node by ID, exact label, or fuzzy label match.
+func (e *Engine) FindNode(term string) (types.Node, bool) {
+	if term == "" {
+		return types.Node{}, false
+	}
+	if n, ok := e.nodeByID[term]; ok {
+		return n, true
+	}
+	if nodes, ok := e.nodeByLabel[term]; ok && len(nodes) > 0 {
+		return nodes[0], true
+	}
+	if nodes, ok := e.nodeByLabel[strings.ToLower(term)]; ok && len(nodes) > 0 {
+		return nodes[0], true
+	}
+	results := e.Search(term, 1)
+	if len(results) == 0 {
+		return types.Node{}, false
+	}
+	return results[0], true
+}
+
+// Search performs a small lexical ranking over node fields.
+func (e *Engine) Search(term string, limit int) []types.Node {
+	term = strings.TrimSpace(strings.ToLower(term))
+	if term == "" {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 5
+	}
+
+	type scoredNode struct {
+		node  types.Node
+		score int
+	}
+
+	var scored []scoredNode
+	for _, node := range e.graph.Nodes {
+		score := scoreNode(node, term)
+		if score == 0 {
+			continue
+		}
+		scored = append(scored, scoredNode{node: node, score: score})
+	}
+
+	sort.Slice(scored, func(i, j int) bool {
+		if scored[i].score == scored[j].score {
+			return scored[i].node.Label < scored[j].node.Label
+		}
+		return scored[i].score > scored[j].score
+	})
+
+	if len(scored) > limit {
+		scored = scored[:limit]
+	}
+
+	results := make([]types.Node, len(scored))
+	for i, item := range scored {
+		results[i] = item.node
+	}
+	return results
+}
+
+// Neighbors returns all incoming and outgoing edges for the given node.
+func (e *Engine) Neighbors(label string) ([]Neighbor, error) {
+	node, ok := e.FindNode(label)
+	if !ok {
+		return nil, fmt.Errorf("node %q not found", label)
+	}
+
+	neighbors := make([]Neighbor, 0)
+	for _, edge := range e.graph.Edges {
+		switch {
+		case edge.Source == node.ID:
+			target, ok := e.nodeByID[edge.Target]
+			if !ok {
+				continue
+			}
+			neighbors = append(neighbors, Neighbor{Node: target, Edge: edge, Direction: "outgoing"})
+		case edge.Target == node.ID:
+			source, ok := e.nodeByID[edge.Source]
+			if !ok {
+				continue
+			}
+			neighbors = append(neighbors, Neighbor{Node: source, Edge: edge, Direction: "incoming"})
+		}
+	}
+
+	sort.Slice(neighbors, func(i, j int) bool {
+		if neighbors[i].Direction == neighbors[j].Direction {
+			return neighbors[i].Node.Label < neighbors[j].Node.Label
+		}
+		return neighbors[i].Direction < neighbors[j].Direction
+	})
+
+	return neighbors, nil
+}
+
+// Stats returns a structured graph summary.
+func (e *Engine) Stats() GraphStats {
+	stats := GraphStats{
+		NodeCount:       len(e.graph.Nodes),
+		EdgeCount:       len(e.graph.Edges),
+		NodeTypes:       make(map[string]int),
+		ConfidenceTypes: make(map[string]int),
+	}
+
+	communities := make(map[int]struct{})
+	if len(e.graph.Communities) > 0 {
+		stats.CommunityCount = len(e.graph.Communities)
+	} else {
+		for _, node := range e.graph.Nodes {
+			if node.Community != 0 {
+				communities[node.Community] = struct{}{}
+			}
+		}
+		stats.CommunityCount = len(communities)
+	}
+
+	for _, node := range e.graph.Nodes {
+		kind := node.NodeType
+		if kind == "" {
+			kind = "unknown"
+		}
+		stats.NodeTypes[kind]++
+	}
+
+	for _, edge := range e.graph.Edges {
+		confidence := edge.Confidence
+		if confidence == "" {
+			confidence = "unknown"
+		}
+		stats.ConfidenceTypes[confidence]++
+	}
+
+	return stats
+}
+
 // Graph returns the underlying types.Graph (read-only reference).
 func (e *Engine) Graph() *types.Graph {
 	return e.graph
@@ -526,4 +680,28 @@ func (e *Engine) Graph() *types.Graph {
 func (e *Engine) NodeByID(id string) (types.Node, bool) {
 	n, ok := e.nodeByID[id]
 	return n, ok
+}
+
+func scoreNode(node types.Node, term string) int {
+	label := strings.ToLower(node.Label)
+	id := strings.ToLower(node.ID)
+	sourceFile := strings.ToLower(node.SourceFile)
+	description := strings.ToLower(node.Description)
+
+	score := 0
+	switch {
+	case label == term || id == term:
+		score += 10
+	case strings.Contains(label, term):
+		score += 6
+	case strings.Contains(id, term):
+		score += 5
+	}
+	if strings.Contains(sourceFile, term) {
+		score += 3
+	}
+	if strings.Contains(description, term) {
+		score += 2
+	}
+	return score
 }

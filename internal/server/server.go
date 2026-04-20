@@ -14,7 +14,7 @@ import (
 	"github.com/Syfra3/vela/internal/retrieval"
 )
 
-// Server exposes the knowledge graph via MCP-compatible HTTP endpoints.
+// Server exposes the knowledge graph via legacy HTTP endpoints.
 type Server struct {
 	engine   *query.Engine
 	searcher *query.Searcher
