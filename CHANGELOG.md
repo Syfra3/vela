@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.0](https://github.com/Syfra3/vela/compare/v1.6.0...v1.7.0) (2026-04-20)
+
+
+### Features
+
+* **setup:** add explicit ancora and vela modes ([#26](https://github.com/Syfra3/vela/issues/26)) ([17074fd](https://github.com/Syfra3/vela/commit/17074fd59be717901b9019042205d1482caba7d4))
+
 ## [1.5.0](https://github.com/Syfra3/vela/compare/v1.4.1...v1.5.0) (2026-04-20)
 
 
