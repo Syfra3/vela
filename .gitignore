@@ -2,7 +2,7 @@
 bin/
 dist/
 /vela
-vela-*
+/vela-*
 
 # Build artifacts
 *.o

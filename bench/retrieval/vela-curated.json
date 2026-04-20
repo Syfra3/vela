@@ -1,0 +1,56 @@
+{
+  "name": "vela-curated",
+  "limit": 5,
+  "cases": [
+    {
+      "name": "federated retriever architecture",
+      "query": "federated retriever",
+      "relevant_labels": ["FederatedRetriever", "Federated retriever architecture"],
+      "relevance": {
+        "FederatedRetriever": 2,
+        "Federated retriever architecture": 1
+      }
+    },
+    {
+      "name": "structural ranking support",
+      "query": "result ranker",
+      "relevant_labels": ["ResultRanker"],
+      "relevance": {
+        "ResultRanker": 2
+      }
+    },
+    {
+      "name": "sqlite retrieval substrate",
+      "query": "sqlite retrieval substrate",
+      "relevant_labels": ["SQLite substrate"],
+      "relevance": {
+        "SQLite substrate": 2
+      }
+    },
+    {
+      "name": "support graph payload",
+      "query": "support graph",
+      "relevant_labels": ["FederatedRetriever", "ResultRanker"],
+      "relevance": {
+        "FederatedRetriever": 1,
+        "ResultRanker": 2
+      }
+    },
+    {
+      "name": "vector retrieval",
+      "query": "ranking",
+      "relevant_labels": ["ResultRanker"],
+      "relevance": {
+        "ResultRanker": 2
+      }
+    },
+    {
+      "name": "benchmark harness",
+      "query": "retrieval benchmark",
+      "relevant_labels": ["SearchPrinter"],
+      "relevance": {
+        "SearchPrinter": 1
+      }
+    }
+  ]
+}
