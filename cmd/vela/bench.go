@@ -82,6 +82,7 @@ Use --baseline to compare against a previous bench run (JSON output).`,
 	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output metrics as JSON (useful for baseline comparison)")
 	cmd.Flags().StringVar(&baseline, "baseline", "", "Path to a previous bench JSON to diff against")
 	cmd.Flags().IntVar(&topN, "top", 10, "Number of top nodes to list")
+	cmd.AddCommand(retrievalBenchCmd())
 	return cmd
 }
 

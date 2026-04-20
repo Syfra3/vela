@@ -1,16 +1,32 @@
 package export
 
 import (
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/Syfra3/vela/internal/retrieval"
 	"github.com/Syfra3/vela/pkg/types"
+	_ "modernc.org/sqlite"
 )
 
+func withStubEmbeddings(t *testing.T) {
+	t.Helper()
+	restore := retrieval.SetEmbedTextsForTesting(func(texts []string) ([][]float32, error) {
+		out := make([][]float32, 0, len(texts))
+		for range texts {
+			out = append(out, []float32{1, 0})
+		}
+		return out, nil
+	})
+	t.Cleanup(restore)
+}
+
 func TestWriteJSON(t *testing.T) {
+	withStubEmbeddings(t)
 	g := &types.Graph{
 		Nodes: []types.Node{
 			{
@@ -30,7 +46,7 @@ func TestWriteJSON(t *testing.T) {
 			{ID: "b", Label: "B", NodeType: "struct", SourceFile: "main.go"},
 		},
 		Edges: []types.Edge{
-			{Source: "a", Target: "b", Relation: "calls", Confidence: "EXTRACTED"},
+			{Source: "a", Target: "b", Relation: "calls", Confidence: "EXTRACTED", Metadata: map[string]interface{}{"layer": "repo", "evidence_type": "ast"}},
 		},
 		Communities: map[int][]string{},
 		ExtractedAt: time.Now(),
@@ -76,9 +92,27 @@ func TestWriteJSON(t *testing.T) {
 	if len(parsed.Edges) != 1 {
 		t.Errorf("expected 1 edge, got %d", len(parsed.Edges))
 	}
+	if got, _ := parsed.Edges[0].Metadata["evidence_type"].(string); got != "ast" {
+		t.Fatalf("edge metadata evidence_type = %q, want %q", got, "ast")
+	}
+
+	db, err := sql.Open("sqlite", filepath.Join(outDir, "retrieval.db"))
+	if err != nil {
+		t.Fatalf("open retrieval db: %v", err)
+	}
+	defer db.Close()
+
+	var nodeCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM nodes`).Scan(&nodeCount); err != nil {
+		t.Fatalf("count nodes: %v", err)
+	}
+	if nodeCount != 2 {
+		t.Fatalf("retrieval node count = %d, want 2", nodeCount)
+	}
 }
 
 func TestWriteJSON_CreatesOutDir(t *testing.T) {
+	withStubEmbeddings(t)
 	base := t.TempDir()
 	outDir := filepath.Join(base, "nested", "output")
 
@@ -95,5 +129,103 @@ func TestWriteJSON_CreatesOutDir(t *testing.T) {
 
 	if _, err := os.Stat(filepath.Join(outDir, "graph.json")); err != nil {
 		t.Errorf("graph.json not created in nested dir: %v", err)
+	}
+}
+
+func TestLoadJSON_RoundTripsExportFormat(t *testing.T) {
+	withStubEmbeddings(t)
+	outDir := t.TempDir()
+	original := &types.Graph{
+		Nodes: []types.Node{
+			{
+				ID:          "project:vela",
+				Label:       "vela",
+				NodeType:    string(types.NodeTypeProject),
+				Description: "tracked repo",
+				Community:   7,
+				Metadata:    map[string]interface{}{"role": "root"},
+				Source: &types.Source{
+					Type:   types.SourceTypeCodebase,
+					Name:   "vela",
+					Path:   "/work/vela",
+					Remote: "https://github.com/Syfra3/vela.git",
+				},
+			},
+			{
+				ID:          "memory:observation:1",
+				Label:       "Fix persistence",
+				NodeType:    string(types.NodeTypeObservation),
+				Description: "daemon persistence note",
+				Metadata:    map[string]interface{}{"type": "bugfix"},
+				Source: &types.Source{
+					Type: types.SourceTypeMemory,
+					Name: "ancora",
+				},
+			},
+		},
+		Edges: []types.Edge{
+			{
+				Source:     "memory:observation:1",
+				Target:     "project:vela",
+				Relation:   "mentions",
+				Confidence: "INFERRED",
+				Score:      0.8,
+				Metadata:   map[string]interface{}{"cross_layer": true},
+			},
+		},
+	}
+
+	if err := WriteJSON(original, outDir); err != nil {
+		t.Fatalf("WriteJSON() error = %v", err)
+	}
+
+	loaded, err := LoadJSON(filepath.Join(outDir, "graph.json"))
+	if err != nil {
+		t.Fatalf("LoadJSON() error = %v", err)
+	}
+
+	if len(loaded.Nodes) != 2 {
+		t.Fatalf("loaded node count = %d, want 2", len(loaded.Nodes))
+	}
+	if loaded.Nodes[0].Description != "tracked repo" {
+		t.Fatalf("loaded description = %q", loaded.Nodes[0].Description)
+	}
+	if loaded.Nodes[0].Community != 7 {
+		t.Fatalf("loaded community = %d, want 7", loaded.Nodes[0].Community)
+	}
+	if loaded.Nodes[0].Source == nil || loaded.Nodes[0].Source.Path != "/work/vela" {
+		t.Fatalf("loaded source path = %#v", loaded.Nodes[0].Source)
+	}
+	if len(loaded.Edges) != 1 {
+		t.Fatalf("loaded edge count = %d, want 1", len(loaded.Edges))
+	}
+	if loaded.Edges[0].Confidence != "INFERRED" {
+		t.Fatalf("loaded edge confidence = %q", loaded.Edges[0].Confidence)
+	}
+	if loaded.Edges[0].Score != 0.8 {
+		t.Fatalf("loaded edge score = %v, want 0.8", loaded.Edges[0].Score)
+	}
+}
+
+func TestWriteJSON_DeduplicatesNodesBeforeRetrievalSync(t *testing.T) {
+	withStubEmbeddings(t)
+	outDir := t.TempDir()
+	g := &types.Graph{
+		Nodes: []types.Node{
+			{ID: "vela:vela", Label: "vela", NodeType: string(types.NodeTypeConcept)},
+			{ID: "vela:vela", Label: "vela duplicate", NodeType: string(types.NodeTypeConcept)},
+		},
+	}
+
+	if err := WriteJSON(g, outDir); err != nil {
+		t.Fatalf("WriteJSON() error = %v", err)
+	}
+
+	loaded, err := LoadJSON(filepath.Join(outDir, "graph.json"))
+	if err != nil {
+		t.Fatalf("LoadJSON() error = %v", err)
+	}
+	if len(loaded.Nodes) != 1 {
+		t.Fatalf("loaded nodes = %d, want 1", len(loaded.Nodes))
 	}
 }

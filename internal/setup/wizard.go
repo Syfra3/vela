@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -12,7 +13,28 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"gopkg.in/yaml.v3"
+
+	"github.com/Syfra3/vela/internal/config"
+	"github.com/Syfra3/vela/internal/daemon"
+	"github.com/Syfra3/vela/internal/llm"
+	"github.com/Syfra3/vela/pkg/types"
 )
+
+var wizardCheckLLMHealth = func(ctx context.Context, cfg *types.LLMConfig) error {
+	client, err := llm.NewClient(cfg)
+	if err != nil {
+		return err
+	}
+	return client.Health(ctx)
+}
+
+var wizardCheckMCPInstalled = CheckMCPInstalled
+var wizardCheckOllama = CheckOllama
+var wizardGetOllamaModels = GetOllamaModels
+var wizardLookPath = exec.LookPath
+var wizardEnableObsidianAutoSync = enableObsidianAutoSync
+var wizardEnsureDaemonRunning = ensureDaemonRunning
 
 // Step-by-step linear wizard flow:
 // 1. Check system requirements
@@ -146,9 +168,15 @@ type mcpInstallMsg struct {
 }
 
 type validationMsg struct {
-	llmOK bool
-	mcpOK bool
-	err   error
+	llmOK    bool
+	mcpOK    bool
+	messages []string
+	err      error
+}
+
+type setupFinalizeMsg struct {
+	messages []string
+	err      error
 }
 
 func (m WizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -219,7 +247,11 @@ func (m WizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.working = false
 		if msg.success {
 			m.modelPulled = true
-			m.addMessage(fmt.Sprintf("✓ Model %s ready", m.selectedModel))
+			if m.selectedModel == LocalSearchEmbeddingModel {
+				m.addMessage(fmt.Sprintf("✓ Model %s ready", m.selectedModel))
+			} else {
+				m.addMessage(fmt.Sprintf("✓ Models %s and %s ready", m.selectedModel, LocalSearchEmbeddingModel))
+			}
 			m.step = StepMCPConfig
 		} else {
 			m.step = StepError
@@ -242,12 +274,35 @@ func (m WizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.working = false
 		m.llmHealthy = msg.llmOK
 		m.mcpHealthy = msg.mcpOK
+		for _, detail := range msg.messages {
+			m.addMessage(detail)
+		}
+
+		if msg.err != nil {
+			m.step = StepError
+			m.err = msg.err
+			return m, nil
+		}
 
 		if msg.llmOK {
 			m.addMessage("✓ LLM provider healthy")
 		}
 		if msg.mcpOK {
 			m.addMessage("✓ MCP server ready")
+		}
+
+		m.working = true
+		return m, m.finalizeSetup()
+
+	case setupFinalizeMsg:
+		m.working = false
+		for _, detail := range msg.messages {
+			m.addMessage(detail)
+		}
+		if msg.err != nil {
+			m.step = StepError
+			m.err = msg.err
+			return m, nil
 		}
 
 		m.step = StepComplete
@@ -579,8 +634,8 @@ func (m WizardModel) viewLocalSetup() string {
 			status: m.getStepStatus(m.ollamaRunning, m.working && m.ollamaInstalled && !m.ollamaRunning),
 		},
 		{
-			name:   fmt.Sprintf("Pull %s Model", m.selectedModel),
-			desc:   "Download LLM model (~4GB)",
+			name:   fmt.Sprintf("Pull %s + %s", m.selectedModel, LocalSearchEmbeddingModel),
+			desc:   "Download extraction and search models",
 			status: m.getStepStatus(m.modelPulled, m.working && m.ollamaRunning && !m.modelPulled),
 		},
 	}
@@ -940,10 +995,23 @@ func (m WizardModel) startOllama() tea.Cmd {
 
 func (m WizardModel) pullModel() tea.Cmd {
 	return func() tea.Msg {
-		err := PullModelSilent(m.selectedModel)
+		if err := PullModelSilent(m.selectedModel); err != nil {
+			return modelPullMsg{
+				success: false,
+				err:     err,
+			}
+		}
+		if m.selectedModel != LocalSearchEmbeddingModel {
+			if err := PullModelSilent(LocalSearchEmbeddingModel); err != nil {
+				return modelPullMsg{
+					success: false,
+					err:     err,
+				}
+			}
+		}
 		return modelPullMsg{
-			success: err == nil,
-			err:     err,
+			success: true,
+			err:     nil,
 		}
 	}
 }
@@ -1006,14 +1074,193 @@ func (m WizardModel) installMCP() tea.Cmd {
 
 func (m WizardModel) validate() tea.Cmd {
 	return func() tea.Msg {
-		// TODO: Actually validate LLM connectivity
-		llmOK := m.ollamaRunning || m.apiKey != ""
-		mcpOK := m.mcpConfigured || m.mcpTarget == 2
+		messages := make([]string, 0, 4)
+		if _, err := wizardLookPath("vela"); err != nil {
+			return validationMsg{
+				llmOK:    false,
+				mcpOK:    false,
+				messages: messages,
+				err:      fmt.Errorf("vela binary is not on PATH; MCP clients will not be able to launch 'vela serve'"),
+			}
+		}
+		messages = append(messages, "✓ Vela binary is available on PATH")
+
+		llmCfg := &types.LLMConfig{Timeout: 10 * time.Second}
+		if m.providerChoice == 0 {
+			llmCfg.Provider = "local"
+			llmCfg.Model = m.selectedModel
+			llmCfg.Endpoint = "http://localhost:11434"
+
+			installed, running, _, err := wizardCheckOllama()
+			if err != nil {
+				return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("checking Ollama: %w", err)}
+			}
+			if !installed {
+				return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("Ollama is not installed")}
+			}
+			if !running {
+				return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("Ollama is not running")}
+			}
+
+			models, err := wizardGetOllamaModels()
+			if err != nil {
+				return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("listing Ollama models: %w", err)}
+			}
+			if !wizardHasModel(models, m.selectedModel) {
+				return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("Ollama model %q is not available", m.selectedModel)}
+			}
+			if !wizardHasModel(models, LocalSearchEmbeddingModel) {
+				return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("Ollama embedding model %q is not available", LocalSearchEmbeddingModel)}
+			}
+			messages = append(messages, fmt.Sprintf("✓ Ollama is running with model %s", m.selectedModel))
+			messages = append(messages, fmt.Sprintf("✓ Retrieval embedding model %s is available", LocalSearchEmbeddingModel))
+		} else {
+			llmCfg.Provider = "anthropic"
+			if m.remoteProvider == 1 {
+				llmCfg.Provider = "openai"
+			}
+			llmCfg.APIKey = m.apiKey
+			if strings.TrimSpace(m.apiKey) == "" {
+				return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("API key is required for remote provider setup")}
+			}
+			messages = append(messages, fmt.Sprintf("✓ %s API key configured", llmCfg.Provider))
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := wizardCheckLLMHealth(ctx, llmCfg); err != nil {
+			return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("LLM health check failed: %w", err)}
+		}
+
+		mcpOK := m.mcpTarget == 2
+		if m.mcpTarget < 2 {
+			if !wizardCheckMCPInstalled() {
+				return validationMsg{llmOK: true, mcpOK: false, messages: messages, err: fmt.Errorf("MCP registration not found after setup")}
+			}
+			mcpOK = true
+			messages = append(messages, "✓ MCP client registration verified")
+		} else {
+			messages = append(messages, "✓ MCP setup skipped by choice")
+		}
 
 		return validationMsg{
-			llmOK: llmOK,
-			mcpOK: mcpOK,
-			err:   nil,
+			llmOK:    true,
+			mcpOK:    mcpOK,
+			messages: messages,
+			err:      nil,
 		}
 	}
+}
+
+func (m WizardModel) finalizeSetup() tea.Cmd {
+	return func() tea.Msg {
+		messages := make([]string, 0, 2)
+
+		if err := wizardEnableObsidianAutoSync(true); err != nil {
+			return setupFinalizeMsg{messages: messages, err: fmt.Errorf("enabling Obsidian auto-sync: %w", err)}
+		}
+		messages = append(messages, "✓ Obsidian auto-sync enabled by default")
+
+		started, err := wizardEnsureDaemonRunning()
+		if err != nil {
+			return setupFinalizeMsg{messages: messages, err: fmt.Errorf("starting watch daemon: %w", err)}
+		}
+		if started {
+			messages = append(messages, "✓ Watch daemon started")
+		} else {
+			messages = append(messages, "✓ Watch daemon already running")
+		}
+
+		return setupFinalizeMsg{messages: messages}
+	}
+}
+
+func enableObsidianAutoSync(enable bool) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return err
+	}
+	cfgPath := filepath.Join(home, ".vela", "config.yaml")
+
+	data, err := os.ReadFile(cfgPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("reading config: %w", err)
+	}
+
+	var raw map[string]interface{}
+	if len(data) > 0 {
+		if err := yaml.Unmarshal(data, &raw); err != nil {
+			return fmt.Errorf("parsing config: %w", err)
+		}
+	}
+	if raw == nil {
+		raw = make(map[string]interface{})
+	}
+
+	obs, _ := raw["obsidian"].(map[string]interface{})
+	if obs == nil {
+		obs = map[string]interface{}{}
+	}
+	obs["auto_sync"] = enable
+	if _, hasDir := obs["vault_dir"]; !hasDir {
+		obs["vault_dir"] = config.DefaultVaultDir()
+	}
+	raw["obsidian"] = obs
+
+	out, err := yaml.Marshal(raw)
+	if err != nil {
+		return fmt.Errorf("marshalling config: %w", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(cfgPath, out, 0644)
+}
+
+func ensureDaemonRunning() (bool, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return false, err
+	}
+
+	pf, err := daemon.NewPIDFile(cfg.Daemon.PIDFile)
+	if err != nil {
+		return false, err
+	}
+
+	alive, _, err := pf.IsAlive()
+	if err != nil {
+		return false, fmt.Errorf("checking daemon pid: %w", err)
+	}
+	if alive {
+		return false, nil
+	}
+
+	self, err := os.Executable()
+	if err != nil {
+		return false, fmt.Errorf("resolving executable: %w", err)
+	}
+
+	child := exec.Command(self, "watch", "start", "--foreground")
+	child.Stdout = nil
+	child.Stderr = nil
+	child.Stdin = nil
+	if err := child.Start(); err != nil {
+		return false, fmt.Errorf("starting daemon: %w", err)
+	}
+
+	if err := child.Process.Release(); err != nil {
+		return false, fmt.Errorf("detaching daemon: %w", err)
+	}
+	return true, nil
+}
+
+func wizardHasModel(models []string, target string) bool {
+	for _, model := range models {
+		if model == target || strings.HasPrefix(model, target+":") {
+			return true
+		}
+	}
+	return false
 }

@@ -2,6 +2,10 @@ package setup
 
 import "fmt"
 
+// LocalSearchEmbeddingModel is the local embedding model Vela expects when it
+// needs to materialize the retrieval substrate for search.
+const LocalSearchEmbeddingModel = "nomic-embed-text"
+
 // RecommendedModel represents a tested Ollama model with compatibility metadata
 type RecommendedModel struct {
 	Name              string
@@ -140,26 +144,12 @@ func GetRecommendedModels() []RecommendedModel {
 	}
 }
 
-// GetEmbeddingCompatibleModels returns models that work with Ancora's embedding system
-// NOTE: Currently Ancora uses nomic-embed-text (768-dim) via llama.cpp, NOT Ollama models
-// Vela extraction and Ancora embeddings are separate concerns
+// GetEmbeddingCompatibleModels returns the embedding model Vela expects for
+// local retrieval/search setup.
 func GetEmbeddingCompatibleModels() []RecommendedModel {
-	// Ancora uses nomic-embed-text-v1.5 (768-dim GGUF) via llama-embedding CLI
-	// This is NOT an Ollama model - it's a separate llama.cpp embedding model
-	//
-	// For Vela → Ancora integration:
-	// 1. Vela uses Ollama models for EXTRACTION (graph building)
-	// 2. Ancora uses nomic-embed-text for SEMANTIC SEARCH (embeddings)
-	// 3. These are separate pipelines - compatibility is at the DATA level (graph structure)
-	//
-	// The "compatibility" that matters:
-	// - Vela outputs graph JSON
-	// - Ancora can index any graph JSON
-	// - Embedding model is Ancora's concern, not Vela's
-
 	return []RecommendedModel{
 		{
-			Name:              "nomic-embed-text",
+			Name:              LocalSearchEmbeddingModel,
 			DisplayName:       "Nomic Embed Text (for Ancora)",
 			Description:       "768-dim embeddings for semantic search (Ancora integration)",
 			Size:              "270MB",

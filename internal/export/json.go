@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Syfra3/vela/internal/graph"
+	"github.com/Syfra3/vela/internal/retrieval"
 	"github.com/Syfra3/vela/pkg/types"
 )
 
@@ -32,12 +34,13 @@ type nodeJSON struct {
 }
 
 type edgeJSON struct {
-	From       string  `json:"from"`
-	To         string  `json:"to"`
-	Kind       string  `json:"kind"`
-	File       string  `json:"file,omitempty"`
-	Confidence string  `json:"confidence,omitempty"`
-	Score      float64 `json:"score,omitempty"`
+	From       string                 `json:"from"`
+	To         string                 `json:"to"`
+	Kind       string                 `json:"kind"`
+	File       string                 `json:"file,omitempty"`
+	Confidence string                 `json:"confidence,omitempty"`
+	Score      float64                `json:"score,omitempty"`
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`
 }
 
 type metaJSON struct {
@@ -48,6 +51,7 @@ type metaJSON struct {
 
 // WriteJSON serialises g to <outDir>/graph.json, creating outDir if necessary.
 func WriteJSON(g *types.Graph, outDir string) error {
+	g = canonicalGraph(g)
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		return fmt.Errorf("creating output dir %s: %w", outDir, err)
 	}
@@ -59,12 +63,16 @@ func WriteJSON(g *types.Graph, outDir string) error {
 	if err := os.WriteFile(outPath, data, 0644); err != nil {
 		return fmt.Errorf("writing %s: %w", outPath, err)
 	}
+	if err := retrieval.SyncGraph(g, retrieval.DBPath(outDir)); err != nil {
+		return fmt.Errorf("writing retrieval.db: %w", err)
+	}
 	return nil
 }
 
 // WriteJSONAtomic serialises g to <outDir>/graph.json atomically using a
 // temp file + rename so a crash mid-write leaves the previous file intact.
 func WriteJSONAtomic(g *types.Graph, outDir string) error {
+	g = canonicalGraph(g)
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		return fmt.Errorf("creating output dir %s: %w", outDir, err)
 	}
@@ -95,6 +103,9 @@ func WriteJSONAtomic(g *types.Graph, outDir string) error {
 	if err := os.Rename(tmp, outPath); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("renaming temp file: %w", err)
+	}
+	if err := retrieval.SyncGraph(g, retrieval.DBPath(outDir)); err != nil {
+		return fmt.Errorf("writing retrieval.db: %w", err)
 	}
 	return nil
 }
@@ -132,7 +143,7 @@ func marshalGraph(g *types.Graph) ([]byte, error) {
 	}
 
 	for i, e := range g.Edges {
-		out.Edges[i] = edgeJSON{
+		ej := edgeJSON{
 			From:       e.Source,
 			To:         e.Target,
 			Kind:       e.Relation,
@@ -140,6 +151,10 @@ func marshalGraph(g *types.Graph) ([]byte, error) {
 			Confidence: e.Confidence,
 			Score:      e.Score,
 		}
+		if len(e.Metadata) > 0 {
+			ej.Metadata = e.Metadata
+		}
+		out.Edges[i] = ej
 	}
 
 	data, err := json.MarshalIndent(out, "", "  ")
@@ -147,4 +162,71 @@ func marshalGraph(g *types.Graph) ([]byte, error) {
 		return nil, fmt.Errorf("marshalling graph: %w", err)
 	}
 	return data, nil
+}
+
+func canonicalGraph(g *types.Graph) *types.Graph {
+	if g == nil {
+		return nil
+	}
+	nodes, edges := graph.Canonicalize(g.Nodes, g.Edges)
+	return &types.Graph{
+		Nodes:       nodes,
+		Edges:       edges,
+		Communities: g.Communities,
+		Metadata:    g.Metadata,
+		ExtractedAt: g.ExtractedAt,
+	}
+}
+
+// LoadJSON reads a graph.json file written by WriteJSON/WriteJSONAtomic.
+func LoadJSON(path string) (*types.Graph, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var raw graphJSON
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("unmarshalling graph: %w", err)
+	}
+
+	g := &types.Graph{
+		Nodes: make([]types.Node, len(raw.Nodes)),
+		Edges: make([]types.Edge, len(raw.Edges)),
+	}
+	for i, n := range raw.Nodes {
+		var source *types.Source
+		if n.SourceType != "" || n.SourceName != "" || n.SourcePath != "" || n.SourceRemote != "" {
+			source = &types.Source{
+				Type:   types.SourceType(n.SourceType),
+				Name:   n.SourceName,
+				Path:   n.SourcePath,
+				Remote: n.SourceRemote,
+			}
+		}
+		g.Nodes[i] = types.Node{
+			ID:          n.ID,
+			Label:       n.Label,
+			NodeType:    n.Kind,
+			SourceFile:  n.File,
+			Description: n.Description,
+			Community:   n.Community,
+			Metadata:    n.Metadata,
+			Source:      source,
+		}
+	}
+	for i, e := range raw.Edges {
+		g.Edges[i] = types.Edge{
+			Source:     e.From,
+			Target:     e.To,
+			Relation:   e.Kind,
+			SourceFile: e.File,
+			Confidence: e.Confidence,
+			Score:      e.Score,
+			Metadata:   e.Metadata,
+		}
+	}
+	g.Nodes, g.Edges = graph.Canonicalize(g.Nodes, g.Edges)
+
+	return g, nil
 }

@@ -119,3 +119,45 @@ func TestBuild_LabelResolution(t *testing.T) {
 		t.Errorf("expected resolved target 'Bar', got %q", g.ResolvedEdges[0].Target)
 	}
 }
+
+func TestBuild_DeduplicatesNodeIDsAndDropsOrphanEdges(t *testing.T) {
+	nodes := []types.Node{
+		{ID: "project:vela", Label: "vela", NodeType: string(types.NodeTypeProject)},
+		{ID: "project:vela", Label: "vela duplicate", NodeType: string(types.NodeTypeProject)},
+		{ID: "memory:observation:1", Label: "obs", NodeType: string(types.NodeTypeObservation)},
+	}
+	edges := []types.Edge{
+		{Source: "memory:observation:1", Target: "project:vela", Relation: "mentions", Confidence: "INFERRED"},
+		{Source: "memory:observation:1", Target: "project:vela", Relation: "mentions", Confidence: "INFERRED"},
+		{Source: "missing", Target: "project:vela", Relation: "mentions", Confidence: "INFERRED"},
+	}
+
+	g, err := Build(nodes, edges)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if g.NodeCount() != 2 {
+		t.Fatalf("expected 2 canonical nodes, got %d", g.NodeCount())
+	}
+	if len(g.Nodes) != 2 {
+		t.Fatalf("exported node count = %d, want 2", len(g.Nodes))
+	}
+	if g.Nodes[0].Label != "vela" {
+		t.Fatalf("first node label = %q, want original node preserved", g.Nodes[0].Label)
+	}
+	if g.EdgeCount() != 1 {
+		t.Fatalf("expected 1 canonical edge, got %d", g.EdgeCount())
+	}
+	if g.ResolvedEdges[0].Source != "memory:observation:1" || g.ResolvedEdges[0].Target != "vela" {
+		t.Fatalf("resolved edge = %+v", g.ResolvedEdges[0])
+	}
+
+	tg := g.ToTypes()
+	if len(tg.Nodes) != 2 {
+		t.Fatalf("types.Graph nodes = %d, want 2", len(tg.Nodes))
+	}
+	if len(tg.Edges) != 1 {
+		t.Fatalf("types.Graph edges = %d, want 1", len(tg.Edges))
+	}
+}

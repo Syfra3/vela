@@ -16,7 +16,7 @@ func TestNewQueryModelStartsLoading(t *testing.T) {
 	if !m.loading {
 		t.Fatal("expected search model to start loading")
 	}
-	if !strings.Contains(m.ViewContent(), "Loading search index...") {
+	if !strings.Contains(m.ViewContent(), "Loading SQLite search index...") {
 		t.Fatalf("expected loading state in view, got %q", m.ViewContent())
 	}
 }
@@ -72,19 +72,25 @@ func TestQueryModelExecutesFederatedSearch(t *testing.T) {
 		return vquery.SearchResponse{
 			Query: input,
 			Hits: []vquery.SearchHit{{
-				ID:            "code:retriever",
-				Label:         "FederatedRetriever",
-				Kind:          "struct",
-				Path:          "internal/query/search.go",
-				Snippet:       "Combines graph and memory retrieval into one ranked result set.",
+				ID:      "code:retriever",
+				Label:   "FederatedRetriever",
+				Kind:    "struct",
+				Path:    "internal/query/search.go",
+				Snippet: "Combines graph and memory retrieval into one ranked result set.",
+				Support: []string{"FederatedRetriever -[calls]-> ResultRanker (hop 1)"},
+				SupportGraph: &vquery.SupportGraph{
+					Nodes: []vquery.SupportNode{{ID: "code:retriever", Label: "FederatedRetriever"}, {ID: "code:ranker", Label: "ResultRanker"}},
+					Edges: []vquery.SupportEdge{{FromID: "code:retriever", ToID: "code:ranker", Relation: "calls", Hop: 1}},
+				},
 				Score:         7.5,
 				PrimarySource: "vela_graph",
 				Sources:       []string{"vela_graph", "ancora"},
+				Signals:       map[string]float64{"lexical": 5, "structural": 2.5},
 			}},
 			Metrics: vquery.SearchMetrics{
 				Limit:      5,
 				AncoraOnly: vquery.StrategyMetrics{LatencyMs: 2, Returned: 1},
-				Federated:  vquery.StrategyMetrics{LatencyMs: 4, Returned: 1},
+				Federated:  vquery.StrategyMetrics{LatencyMs: 4, Returned: 1, SignalContribution: map[string]int{"lexical": 1, "structural": 1}},
 				Comparison: vquery.ComparisonMetrics{OverlapAtK: 1, AddedByFederated: 0},
 			},
 		}, nil
@@ -112,19 +118,25 @@ func TestQueryModelExecutesFederatedSearch(t *testing.T) {
 	updated, _ = m.Update(querySearchResultMsg{response: vquery.SearchResponse{
 		Query: "retriever",
 		Hits: []vquery.SearchHit{{
-			ID:            "code:retriever",
-			Label:         "FederatedRetriever",
-			Kind:          "struct",
-			Path:          "internal/query/search.go",
-			Snippet:       "Combines graph and memory retrieval into one ranked result set.",
+			ID:      "code:retriever",
+			Label:   "FederatedRetriever",
+			Kind:    "struct",
+			Path:    "internal/query/search.go",
+			Snippet: "Combines graph and memory retrieval into one ranked result set.",
+			Support: []string{"FederatedRetriever -[calls]-> ResultRanker (hop 1)"},
+			SupportGraph: &vquery.SupportGraph{
+				Nodes: []vquery.SupportNode{{ID: "code:retriever", Label: "FederatedRetriever"}, {ID: "code:ranker", Label: "ResultRanker"}},
+				Edges: []vquery.SupportEdge{{FromID: "code:retriever", ToID: "code:ranker", Relation: "calls", Hop: 1}},
+			},
 			Score:         7.5,
 			PrimarySource: "vela_graph",
 			Sources:       []string{"vela_graph", "ancora"},
+			Signals:       map[string]float64{"lexical": 5, "structural": 2.5},
 		}},
 		Metrics: vquery.SearchMetrics{
 			Limit:      5,
 			AncoraOnly: vquery.StrategyMetrics{LatencyMs: 2, Returned: 1},
-			Federated:  vquery.StrategyMetrics{LatencyMs: 4, Returned: 1},
+			Federated:  vquery.StrategyMetrics{LatencyMs: 4, Returned: 1, SignalContribution: map[string]int{"lexical": 1, "structural": 1}},
 			Comparison: vquery.ComparisonMetrics{OverlapAtK: 1, AddedByFederated: 0},
 		},
 	}})
@@ -142,6 +154,15 @@ func TestQueryModelExecutesFederatedSearch(t *testing.T) {
 	}
 	if !strings.Contains(view, "sources: Graph, Ancora") {
 		t.Fatalf("expected federated source summary in view, got %q", view)
+	}
+	if !strings.Contains(view, "signals: Lexical, Structural") {
+		t.Fatalf("expected signal summary in view, got %q", view)
+	}
+	if !strings.Contains(view, "support 2n/1e") {
+		t.Fatalf("expected structured support summary in view, got %q", view)
+	}
+	if !strings.Contains(view, "context: FederatedRetriever -[calls]-> ResultRanker") {
+		t.Fatalf("expected structural context in view, got %q", view)
 	}
 	if !strings.Contains(view, "Ancora 2ms/1  |  Federated 4ms/1") {
 		t.Fatalf("expected metrics summary in view, got %q", view)

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -44,7 +45,7 @@ type QueryModel struct {
 func NewQueryModel() QueryModel {
 	return QueryModel{
 		loading:     true,
-		loadingText: "Loading search index...",
+		loadingText: "Loading SQLite search index...",
 	}
 }
 
@@ -83,7 +84,7 @@ func (m QueryModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		case "r":
 			m.loading = true
-			m.loadingText = "Loading search index..."
+			m.loadingText = "Loading SQLite search index..."
 			m.err = nil
 			return m, loadQuerySearcherCmd()
 		}
@@ -140,7 +141,7 @@ func (m QueryModel) ViewContent() string {
 		Padding(0, 1)
 	metaStyle := lipgloss.NewStyle().Foreground(colorSubtext)
 
-	b.WriteString(textStyle.Render("Federated search combines Ancora memory with the current Vela graph."))
+	b.WriteString(textStyle.Render("Federated search combines Ancora memory with Vela's SQLite-backed graph index."))
 	b.WriteString("\n\n")
 	b.WriteString(inputStyle.Render("> " + m.input))
 	if !m.loading {
@@ -179,10 +180,19 @@ func (m QueryModel) ViewContent() string {
 				if hit.Path != "" {
 					meta = append(meta, truncate(hit.Path, 72))
 				}
+				if len(hit.Signals) > 1 {
+					meta = append(meta, "signals: "+joinSignalLabels(hit.Signals))
+				}
+				if hit.SupportGraph != nil {
+					meta = append(meta, fmt.Sprintf("support %dn/%de", len(hit.SupportGraph.Nodes), len(hit.SupportGraph.Edges)))
+				}
 				lines = append(lines, metaStyle.Render(strings.Join(meta, "  |  ")))
 
 				if hit.Snippet != "" {
 					lines = append(lines, textStyle.Render(hit.Snippet))
+				}
+				if len(hit.Support) > 0 {
+					lines = append(lines, dimStyle.Render("context: "+hit.Support[0]))
 				}
 
 				b.WriteString(resultStyle.Render(strings.Join(lines, "\n")))
@@ -266,5 +276,14 @@ func joinSourceLabels(sources []string) string {
 	for _, source := range sources {
 		labels = append(labels, sourceLabel(source))
 	}
+	return strings.Join(labels, ", ")
+}
+
+func joinSignalLabels(signals map[string]float64) string {
+	labels := make([]string, 0, len(signals))
+	for signal := range signals {
+		labels = append(labels, strings.Title(signal))
+	}
+	sort.Strings(labels)
 	return strings.Join(labels, ", ")
 }
