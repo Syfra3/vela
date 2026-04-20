@@ -24,6 +24,7 @@ import (
 	igraph "github.com/Syfra3/vela/internal/graph"
 	"github.com/Syfra3/vela/internal/listener"
 	"github.com/Syfra3/vela/internal/llm"
+	vmcp "github.com/Syfra3/vela/internal/mcp"
 	"github.com/Syfra3/vela/internal/query"
 	"github.com/Syfra3/vela/internal/report"
 	"github.com/Syfra3/vela/internal/security"
@@ -31,6 +32,7 @@ import (
 	"github.com/Syfra3/vela/internal/tui"
 	"github.com/Syfra3/vela/internal/watch"
 	"github.com/Syfra3/vela/pkg/types"
+	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
 // version is set via ldflags at build time. Falls back to "dev" for local builds.
@@ -616,10 +618,11 @@ func queryCmd() *cobra.Command {
 func serveCmd() *cobra.Command {
 	var graphFile string
 	var port int
+	var httpMode bool
 
 	cmd := &cobra.Command{
 		Use:   "serve [graph-file]",
-		Short: "Serve the knowledge graph via MCP-compatible HTTP endpoints",
+		Short: "Serve the knowledge graph via MCP stdio tools",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
@@ -636,6 +639,9 @@ func serveCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("loading graph: %w", err)
 			}
+			if !httpMode {
+				return mcpserver.ServeStdio(vmcp.NewServer(eng))
+			}
 			srv := server.New(eng, port)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -643,6 +649,7 @@ func serveCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: ~/.vela/graph.json)")
+	cmd.Flags().BoolVar(&httpMode, "http", false, "Serve legacy HTTP endpoints instead of stdio MCP")
 	cmd.Flags().IntVar(&port, "port", 7700, "Port to listen on")
 	return cmd
 }

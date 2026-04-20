@@ -134,3 +134,48 @@ func TestQuery_Dispatcher(t *testing.T) {
 		}
 	}
 }
+
+func TestFindNode_FuzzyLabel(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestGraph(t, dir)
+	eng, _ := LoadFromFile(path)
+
+	node, ok := eng.FindNode("auth")
+	if !ok {
+		t.Fatal("expected fuzzy node match")
+	}
+	if node.Label != "AuthService" {
+		t.Fatalf("expected AuthService, got %q", node.Label)
+	}
+}
+
+func TestNeighbors(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestGraph(t, dir)
+	eng, _ := LoadFromFile(path)
+
+	neighbors, err := eng.Neighbors("AuthService")
+	if err != nil {
+		t.Fatalf("Neighbors error: %v", err)
+	}
+	if len(neighbors) != 2 {
+		t.Fatalf("expected 2 neighbors, got %d", len(neighbors))
+	}
+}
+
+func TestStats(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestGraph(t, dir)
+	eng, _ := LoadFromFile(path)
+
+	stats := eng.Stats()
+	if stats.NodeCount != 3 {
+		t.Fatalf("expected 3 nodes, got %d", stats.NodeCount)
+	}
+	if stats.EdgeCount != 3 {
+		t.Fatalf("expected 3 edges, got %d", stats.EdgeCount)
+	}
+	if stats.NodeTypes["struct"] != 3 {
+		t.Fatalf("expected 3 struct nodes, got %d", stats.NodeTypes["struct"])
+	}
+}

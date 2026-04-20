@@ -40,6 +40,124 @@ VELA_LLM_MODEL=llama2 ./vela extract ./my-repo
 VELA_LLM_ENDPOINT=http://localhost:11434 ./vela extract ./my-repo
 ```
 
+## Installation
+
+### What Vela is for
+
+Vela is the **graph extraction and retrieval** layer.
+
+Use Vela when you want to:
+- extract a graph from a repo or workspace
+- query graph structure with MCP tools
+- run Vela by itself without Ancora
+
+Do **not** use Vela as your durable memory database. That is Ancora's job.
+
+### Install from source
+
+```bash
+git clone https://github.com/Syfra3/vela.git
+cd vela
+go build -o vela ./cmd/vela
+
+# Optional: move it somewhere in PATH
+sudo mv vela /usr/local/bin/
+
+# Verify
+vela --help
+```
+
+### MCP usage
+
+Vela now exposes a real **stdio MCP server**.
+
+```bash
+# Start Vela as an MCP server over stdio
+vela serve
+```
+
+That command is for MCP clients.
+It does **not** print a normal terminal UI.
+
+If you want the old HTTP server for debugging or legacy use:
+
+```bash
+vela serve --http --port 7700
+```
+
+### Three simple ways to use Vela
+
+#### 1. Vela only
+
+Use this if you only want graph extraction and graph retrieval.
+
+```bash
+# Build graph
+vela extract ./my-repo
+
+# Let an MCP client talk to Vela
+vela serve
+```
+
+#### 2. Ancora + Vela
+
+Use this if you want:
+- Ancora for long-term memory
+- Vela for graph retrieval
+- one primary MCP surface from Ancora
+
+In this setup:
+- Ancora stays the main MCP server
+- Vela runs behind Ancora for `vela_*` graph tools
+- memory writes still belong to Ancora
+
+#### 3. Local CLI only
+
+Use this if you just want to generate and inspect graphs yourself.
+
+```bash
+vela extract ./my-repo
+vela query "nodes"
+vela path AuthService Database
+vela explain AuthService
+```
+
+### Example MCP config
+
+If you want to register Vela directly as its own MCP server:
+
+#### Claude Code
+
+Create `~/.claude/mcp/vela.json`:
+
+```json
+{
+  "command": "vela",
+  "args": ["serve"]
+}
+```
+
+#### OpenCode
+
+Add to `~/.config/opencode/mcp_settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "vela": {
+      "command": "vela",
+      "args": ["serve"]
+    }
+  }
+}
+```
+
+### Which tool should I install?
+
+- Install **Ancora only** if you want memory.
+- Install **Vela only** if you want graph extraction and graph retrieval.
+- Install **both** if you want memory + graph retrieval together.
+
 ## Architecture
 
 ### Hybrid Go + Python Design
