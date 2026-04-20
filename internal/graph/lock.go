@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // GraphLock holds an exclusive advisory flock on ~/.vela/graph.lock so the
@@ -17,7 +18,7 @@ type GraphLock struct {
 var ErrGraphLocked = errors.New("graph is locked by another process (daemon running?); stop the daemon first")
 
 // AcquireGraphLock opens the lock file and acquires a non-blocking exclusive
-// lock. Returns ErrGraphLocked if another process already holds the lock.
+// flock. Returns ErrGraphLocked if another process already holds the lock.
 func AcquireGraphLock(lockPath string) (*GraphLock, error) {
 	if err := os.MkdirAll(filepath.Dir(lockPath), 0755); err != nil {
 		return nil, fmt.Errorf("creating lock dir: %w", err)
@@ -26,9 +27,12 @@ func AcquireGraphLock(lockPath string) (*GraphLock, error) {
 	if err != nil {
 		return nil, fmt.Errorf("opening lock file: %w", err)
 	}
-	if err := lockFile(f); err != nil {
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		_ = f.Close()
-		return nil, err
+		if err == syscall.EWOULDBLOCK {
+			return nil, ErrGraphLocked
+		}
+		return nil, fmt.Errorf("acquiring graph lock: %w", err)
 	}
 	return &GraphLock{f: f}, nil
 }
@@ -38,7 +42,7 @@ func (l *GraphLock) Release() {
 	if l == nil || l.f == nil {
 		return
 	}
-	_ = unlockFile(l.f)
+	_ = syscall.Flock(int(l.f.Fd()), syscall.LOCK_UN)
 	_ = l.f.Close()
 	l.f = nil
 }

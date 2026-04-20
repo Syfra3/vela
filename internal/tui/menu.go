@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -125,8 +124,8 @@ func (m *MenuModel) rebuildMenu() {
 			key:         "obsidian",
 		},
 		{
-			label:       "Query",
-			description: "Query existing graph (path, explain, nodes)",
+			label:       "Search",
+			description: "Search Ancora memory and the current graph",
 			key:         "query",
 		},
 		{
@@ -313,6 +312,7 @@ func (m MenuModel) handleMenuSelect() (tea.Model, tea.Cmd) {
 	case "query":
 		m.screen = screenQuery
 		m.queryModel = NewQueryModel()
+		return m, m.queryModel.Init()
 	case "config":
 		m.screen = screenConfig
 		m.configModel = NewConfigViewModel()
@@ -675,9 +675,9 @@ func (m MenuModel) viewExtract() string {
 
 func (m MenuModel) viewQuery() string {
 	var b strings.Builder
-	b.WriteString(m.renderHeader(fmt.Sprintf("Query — %s", m.queryModel.ModeName())))
+	b.WriteString(m.renderHeader(m.queryModel.ModeName()))
 	b.WriteString(m.queryModel.ViewContent())
-	b.WriteString(m.renderFooter("Tab change mode • Enter execute • esc back to menu"))
+	b.WriteString(m.renderFooter("Type to edit • Enter search • r reload • esc back to menu"))
 	return appStyle.Render(b.String())
 }
 
@@ -784,6 +784,7 @@ func startExtractionWorker(dir string, mode ExtractionMode, src ExtractSource) t
 
 			go func() {
 				outDir := config.OutDir(".")
+				graphPath := config.GraphFilePath(outDir)
 
 				progress := func(done, _ int, title string) {
 					globalExtractionState.processedCount = done
@@ -807,6 +808,15 @@ func startExtractionWorker(dir string, mode ExtractionMode, src ExtractSource) t
 				}
 
 				tg := g.ToTypes()
+				if existing, loadErr := export.LoadJSON(graphPath); loadErr == nil {
+					mergedNodes, mergedEdges := graph.MergeMemory(existing.Nodes, existing.Edges, tg.Nodes, tg.Edges)
+					tg = &types.Graph{Nodes: mergedNodes, Edges: mergedEdges}
+				} else if !os.IsNotExist(loadErr) {
+					globalExtractionState.err = fmt.Errorf("loading existing graph.json: %w", loadErr)
+					globalExtractionState.done = true
+					return
+				}
+
 				if writeErr := export.WriteJSON(tg, outDir); writeErr != nil {
 					globalExtractionState.err = fmt.Errorf("writing graph.json: %w", writeErr)
 					globalExtractionState.done = true
@@ -867,6 +877,12 @@ func startExtractionWorker(dir string, mode ExtractionMode, src ExtractSource) t
 			} else if existing, readErr := loadExistingGraph(config.GraphFilePath(outDir)); readErr == nil {
 				seededNodes = existing.Nodes
 				seededEdges = existing.Edges
+				if fileCache != nil && !graphContainsProject(existing, projectSrc) {
+					// If the current graph snapshot does not already contain this codebase,
+					// honoring cache hits would preserve the old graph (for example an
+					// Ancora-only snapshot) and silently skip the user's first repo import.
+					fileCache = nil
+				}
 			} else if fileCache != nil {
 				fileCache = nil
 			}
@@ -917,6 +933,25 @@ func startExtractionWorker(dir string, mode ExtractionMode, src ExtractSource) t
 			}
 			allNodes := append(seededNodes, freshNodes...)
 			allEdges := append(seededEdges, freshEdges...)
+
+			contractFiles := make([]string, 0, len(detected.Files))
+			for _, entry := range detected.Files {
+				if extract.IsContractFile(entry.AbsPath) {
+					contractFiles = append(contractFiles, entry.AbsPath)
+				}
+			}
+			if len(contractFiles) > 0 {
+				contractNodes, contractEdges, contractErr := extract.ExtractContract(dir, contractFiles, projectSrc)
+				if contractErr != nil {
+					globalExtractionState.err = fmt.Errorf("extracting contract artifacts: %w", contractErr)
+					globalExtractionState.done = true
+					return
+				}
+				allNodes, allEdges = graph.MergeContract(allNodes, allEdges, contractNodes, contractEdges)
+			}
+			workspace := graph.BuildWorkspace(allNodes, allEdges, nil)
+			allNodes = append(allNodes, workspace.Nodes...)
+			allEdges = append(allEdges, workspace.Edges...)
 
 			if fileCache != nil {
 				_ = fileCache.Save()
@@ -977,61 +1012,26 @@ func tickExtractionProgress() tea.Cmd {
 // graph.json uses "file" (not "source_file") for the export format — see
 // internal/export/json.go. We match that schema here explicitly.
 func loadExistingGraph(path string) (*types.Graph, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
+	return export.LoadJSON(path)
+}
 
-	var raw struct {
-		Nodes []struct {
-			ID           string                 `json:"id"`
-			Label        string                 `json:"label"`
-			Kind         string                 `json:"kind"`
-			File         string                 `json:"file"`
-			SourceType   string                 `json:"source_type"`
-			SourceName   string                 `json:"source_name"`
-			SourcePath   string                 `json:"source_path"`
-			SourceRemote string                 `json:"source_remote"`
-			Metadata     map[string]interface{} `json:"metadata"`
-		} `json:"nodes"`
-		Edges []struct {
-			From string `json:"from"`
-			To   string `json:"to"`
-			Kind string `json:"kind"`
-			File string `json:"file"`
-		} `json:"edges"`
+func graphContainsProject(g *types.Graph, src *types.Source) bool {
+	if g == nil || src == nil {
+		return false
 	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, err
-	}
-
-	g := &types.Graph{
-		Nodes: make([]types.Node, len(raw.Nodes)),
-		Edges: make([]types.Edge, len(raw.Edges)),
-	}
-	for i, n := range raw.Nodes {
-		var source *types.Source
-		if n.SourceType != "" || n.SourceName != "" || n.SourcePath != "" || n.SourceRemote != "" {
-			source = &types.Source{
-				Type:   types.SourceType(n.SourceType),
-				Name:   n.SourceName,
-				Path:   n.SourcePath,
-				Remote: n.SourceRemote,
-			}
+	projectID := extract.ProjectNodeID(src.Name)
+	for _, node := range g.Nodes {
+		if node.NodeType != string(types.NodeTypeProject) {
+			continue
 		}
-		g.Nodes[i] = types.Node{
-			ID:         n.ID,
-			Label:      n.Label,
-			NodeType:   n.Kind,
-			SourceFile: n.File,
-			Metadata:   n.Metadata,
-			Source:     source,
+		if node.ID == projectID {
+			return true
+		}
+		if node.Source != nil && node.Source.Path == src.Path {
+			return true
 		}
 	}
-	for i, e := range raw.Edges {
-		g.Edges[i] = types.Edge{Source: e.From, Target: e.To, Relation: e.Kind, SourceFile: e.File}
-	}
-	return g, nil
+	return false
 }
 
 // filterNodesByFile removes nodes whose SourceFile is in reextracted, so that

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/Syfra3/vela/internal/ancora"
+	mgraph "github.com/Syfra3/vela/internal/graph"
 	"github.com/Syfra3/vela/pkg/types"
 )
 
@@ -27,7 +28,10 @@ const memoryRootNodeID = "memory:ancora"
 func obsNodeID(id int64) string        { return fmt.Sprintf("ancora:obs:%d", id) }
 func workspaceNodeID(ws string) string { return fmt.Sprintf("ancora:workspace:%s", ws) }
 func visNodeID(vis string) string      { return fmt.Sprintf("ancora:visibility:%s", vis) }
-func orgNodeID(org string) string      { return fmt.Sprintf("ancora:org:%s", org) }
+func orgNodeID(org string) string      { return fmt.Sprintf("ancora:organization:%s", org) }
+func conceptNodeID(name string) string {
+	return fmt.Sprintf("ancora:concept:%s", strings.ToLower(name))
+}
 
 // ─── Reference wire type (mirrors ancora IPC wire format) ────────────────────
 
@@ -69,160 +73,20 @@ func ExtractAncora(
 	if len(obs) == 0 {
 		return nil, nil, nil
 	}
-
-	// ── Memory root node ─────────────────────────────────────────────────
-	// Single root for all ancora memory — distinct from the ancora codebase
-	// which would be a project:ancora node extracted from the filesystem.
-	memRoot := types.Node{
-		ID:          memoryRootNodeID,
-		Label:       "Ancora Memory",
-		NodeType:    string(types.NodeTypeMemorySource),
-		Description: "Persistent memory: decisions, bugs, architecture observations",
-		Source:      memorySrc,
-	}
-
-	var nodes []types.Node
-	var edges []types.Edge
-
-	nodes = append(nodes, memRoot)
-
-	// ── Hierarchy nodes ───────────────────────────────────────────────────
-	// Track unique values and per-workspace visibility pairs to avoid
-	// the cartesian-product bug (every workspace linked to every visibility).
-	workspaces := make(map[string]bool)
-	visibilities := make(map[string]bool)
-	orgs := make(map[string]bool)
-	// wsVisPairs: set of "workspace\x00visibility" seen together in actual obs.
-	wsVisPairs := make(map[string]bool)
-
-	for _, o := range obs {
-		if o.Workspace != "" {
-			workspaces[o.Workspace] = true
-		}
-		if o.Visibility != "" {
-			visibilities[o.Visibility] = true
-		}
-		if o.Organization != "" {
-			orgs[o.Organization] = true
-		}
-		if o.Workspace != "" && o.Visibility != "" {
-			wsVisPairs[o.Workspace+"\x00"+o.Visibility] = true
-		}
-	}
-
-	for ws := range workspaces {
-		nodes = append(nodes, types.Node{
-			ID:       workspaceNodeID(ws),
-			Label:    ws,
-			NodeType: string(types.NodeTypeWorkspace),
-			Source:   memorySrc,
-		})
-		// memory root → workspace
-		edges = append(edges, types.Edge{
-			Source:   memoryRootNodeID,
-			Target:   workspaceNodeID(ws),
-			Relation: "contains",
-		})
-	}
-	for vis := range visibilities {
-		nodes = append(nodes, types.Node{
-			ID:       visNodeID(vis),
-			Label:    vis,
-			NodeType: string(types.NodeTypeVisibility),
-			Source:   memorySrc,
-		})
-	}
-	for org := range orgs {
-		nodes = append(nodes, types.Node{
-			ID:       orgNodeID(org),
-			Label:    org,
-			NodeType: string(types.NodeTypeOrganization),
-			Source:   memorySrc,
-		})
-	}
-
-	// Hierarchy structural edges: workspace → visibility (only actual pairs).
-	for pair := range wsVisPairs {
-		parts := strings.SplitN(pair, "\x00", 2)
-		edges = append(edges, types.Edge{
-			Source:   workspaceNodeID(parts[0]),
-			Target:   visNodeID(parts[1]),
-			Relation: "contains",
-		})
-	}
-
-	// ── Observation nodes + structural edges ──────────────────────────────
-	for i, o := range obs {
+	knownRepos := collectKnownRepos(obs)
+	prepped := prepareMemoryObservations(obs)
+	for i, o := range prepped {
 		if progress != nil {
-			progress(i, len(obs), o.Title)
+			progress(i, len(prepped), o.Title)
 		}
-
-		label := o.Title
-		if label == "" {
-			label = fmt.Sprintf("obs-%d", o.ID)
-		}
-
-		node := types.Node{
-			ID:          obsNodeID(o.ID),
-			Label:       label,
-			NodeType:    string(types.NodeTypeObservation),
-			SourceFile:  fmt.Sprintf("ancora:obs:%d", o.ID),
-			Description: truncateDescription(o.Content, 300),
-			Source:      memorySrc,
-			Metadata: map[string]interface{}{
-				"ancora_id":    o.ID,
-				"obs_type":     o.Type,
-				"workspace":    o.Workspace,
-				"visibility":   o.Visibility,
-				"organization": o.Organization,
-				"topic_key":    o.TopicKey,
-				"created_at":   o.CreatedAt.Format("2006-01-02"),
-			},
-		}
-		nodes = append(nodes, node)
-
-		// obs → workspace
-		if o.Workspace != "" {
-			edges = append(edges, types.Edge{
-				Source:     obsNodeID(o.ID),
-				Target:     workspaceNodeID(o.Workspace),
-				Relation:   "belongs_to",
-				SourceFile: node.SourceFile,
-			})
-		}
-
-		// obs → visibility
-		if o.Visibility != "" {
-			edges = append(edges, types.Edge{
-				Source:     obsNodeID(o.ID),
-				Target:     visNodeID(o.Visibility),
-				Relation:   "scoped_to",
-				SourceFile: node.SourceFile,
-			})
-		}
-
-		// obs → organization
-		if o.Organization != "" {
-			edges = append(edges, types.Edge{
-				Source:     obsNodeID(o.ID),
-				Target:     orgNodeID(o.Organization),
-				Relation:   "belongs_to",
-				SourceFile: node.SourceFile,
-			})
-		}
-
-		// Explicit references stored in the observation
-		refEdges := parseObsReferences(o.ID, o.Type, o.References)
-		if len(refEdges) == 0 {
-			// Fallback: extract file paths from the **Where**: section of content
-			refEdges = parseWhereReferences(o.ID, o.Type, o.Content)
-		}
-		edges = append(edges, refEdges...)
 	}
+
+	mem := mgraph.BuildMemory(prepped, mgraph.MemoryOptions{KnownRepos: knownRepos})
+	nodes, edges := adaptMemoryGraph(mem)
 
 	// ── LLM-inferred semantic edges ───────────────────────────────────────
 	if provider != nil {
-		llmEdges, err := inferAncoraRelations(obs, provider, maxTokens)
+		llmEdges, err := inferAncoraRelations(prepped, provider, maxTokens)
 		if err == nil {
 			edges = append(edges, llmEdges...)
 		}
@@ -230,6 +94,70 @@ func ExtractAncora(
 	}
 
 	return nodes, edges, nil
+}
+
+func collectKnownRepos(obs []ancora.Observation) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(obs))
+	for _, o := range obs {
+		ws := strings.TrimSpace(o.Workspace)
+		if ws == "" {
+			continue
+		}
+		key := strings.ToLower(ws)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, ws)
+	}
+	return out
+}
+
+func prepareMemoryObservations(obs []ancora.Observation) []ancora.Observation {
+	prepared := make([]ancora.Observation, 0, len(obs))
+	for _, o := range obs {
+		if strings.TrimSpace(o.References) != "" {
+			prepared = append(prepared, o)
+			continue
+		}
+		refs := inferWhereWireRefs(o.Content)
+		if len(refs) == 0 {
+			prepared = append(prepared, o)
+			continue
+		}
+		payload, err := json.Marshal(refs)
+		if err != nil {
+			prepared = append(prepared, o)
+			continue
+		}
+		o.References = string(payload)
+		prepared = append(prepared, o)
+	}
+	return prepared
+}
+
+func adaptMemoryGraph(mem *mgraph.MemoryGraph) ([]types.Node, []types.Edge) {
+	if mem == nil {
+		return nil, nil
+	}
+
+	nodes := make([]types.Node, 0, len(mem.Nodes))
+	for _, n := range mem.Nodes {
+		n.Source = memorySrc
+		if strings.HasPrefix(n.ID, "memory:observation:") {
+			if ancoraID, ok := n.Metadata["ancora_id"].(int64); ok {
+				n.SourceFile = fmt.Sprintf("ancora:obs:%d", ancoraID)
+			}
+		}
+		nodes = append(nodes, n)
+	}
+
+	edges := make([]types.Edge, 0, len(mem.Edges))
+	for _, e := range mem.Edges {
+		edges = append(edges, e)
+	}
+	return nodes, edges
 }
 
 // parseObsReferences decodes the JSON references string stored in an
@@ -291,6 +219,28 @@ var knownCodeExts = map[string]bool{
 // parseWhereReferences extracts file-path references from the **Where**: section
 // of an observation's content. Used as a fallback when explicit references[] is empty.
 func parseWhereReferences(obsID int64, obsType, content string) []types.Edge {
+	refs := inferWhereWireRefs(content)
+	if len(refs) == 0 {
+		return nil
+	}
+
+	relation := obsRefRelation("file", obsType)
+	srcFile := fmt.Sprintf("ancora:obs:%d", obsID)
+
+	var edges []types.Edge
+	for _, ref := range refs {
+		edges = append(edges, types.Edge{
+			Source:     obsNodeID(obsID),
+			Target:     ref.Target,
+			Relation:   relation,
+			Confidence: "INFERRED",
+			SourceFile: srcFile,
+		})
+	}
+	return edges
+}
+
+func inferWhereWireRefs(content string) []ancRef {
 	// Find the **Where**: section.
 	const marker = "**Where**:"
 	idx := strings.Index(content, marker)
@@ -307,10 +257,7 @@ func parseWhereReferences(obsID int64, obsType, content string) []types.Edge {
 		}
 	}
 
-	relation := obsRefRelation("file", obsType)
-	srcFile := fmt.Sprintf("ancora:obs:%d", obsID)
-
-	var edges []types.Edge
+	var refs []ancRef
 	seen := make(map[string]bool)
 	for _, token := range strings.Fields(section) {
 		// Strip trailing punctuation/list markers.
@@ -323,15 +270,9 @@ func parseWhereReferences(obsID int64, obsType, content string) []types.Edge {
 			continue
 		}
 		seen[token] = true
-		edges = append(edges, types.Edge{
-			Source:     obsNodeID(obsID),
-			Target:     token,
-			Relation:   relation,
-			Confidence: "INFERRED",
-			SourceFile: srcFile,
-		})
+		refs = append(refs, ancRef{Type: "file", Target: token})
 	}
-	return edges
+	return refs
 }
 
 // inferAncoraRelations sends batches of observations to the LLM and extracts

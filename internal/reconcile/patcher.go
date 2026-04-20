@@ -32,7 +32,7 @@ type Patcher struct {
 	mu sync.RWMutex
 
 	graph     *igraph.Graph
-	nodeIndex map[int64]string // ancora ID -> node ID string ("ancora:obs:<id>")
+	nodeIndex map[int64]string // ancora ID -> node ID string ("memory:observation:<id>")
 
 	// llmQueue receives ObservationNodes queued for async LLM extraction.
 	// It is buffered so the patcher is never blocked by a slow extractor.
@@ -117,7 +117,7 @@ func (p *Patcher) addNode(obs *types.ObservationNode) error {
 
 func (p *Patcher) ensureMemoryHierarchy(obs *types.ObservationNode) {
 	p.ensureNode(types.Node{
-		ID:          memoryRootNodeID,
+		ID:          igraph.MemoryRootID,
 		Label:       "Ancora Memory",
 		NodeType:    string(types.NodeTypeMemorySource),
 		Description: "Persistent memory: decisions, bugs, architecture observations",
@@ -126,7 +126,7 @@ func (p *Patcher) ensureMemoryHierarchy(obs *types.ObservationNode) {
 
 	if obs.Workspace != "" {
 		p.ensureNode(types.Node{
-			ID:       workspaceNodeID(obs.Workspace),
+			ID:       igraph.MemoryWorkspaceID(obs.Workspace),
 			Label:    obs.Workspace,
 			NodeType: string(types.NodeTypeWorkspace),
 			Source:   memorySrc,
@@ -135,7 +135,7 @@ func (p *Patcher) ensureMemoryHierarchy(obs *types.ObservationNode) {
 
 	if obs.Visibility != "" {
 		p.ensureNode(types.Node{
-			ID:       visibilityNodeID(obs.Visibility),
+			ID:       igraph.MemoryVisibilityID(obs.Visibility),
 			Label:    obs.Visibility,
 			NodeType: string(types.NodeTypeVisibility),
 			Source:   memorySrc,
@@ -144,7 +144,7 @@ func (p *Patcher) ensureMemoryHierarchy(obs *types.ObservationNode) {
 
 	if obs.Organization != "" {
 		p.ensureNode(types.Node{
-			ID:       organizationNodeID(obs.Organization),
+			ID:       igraph.MemoryOrganizationID(obs.Organization),
 			Label:    obs.Organization,
 			NodeType: string(types.NodeTypeOrganization),
 			Source:   memorySrc,
@@ -231,14 +231,16 @@ func (p *Patcher) deleteNode(ancoraID int64) {
 }
 
 // addReferenceEdges creates graph edges for the explicit references in an
-// ObservationNode. Targets that cannot be resolved are silently skipped.
+// ObservationNode. Binder metadata is attached immediately so stale or
+// ambiguous references remain visible instead of silently decaying.
 func (p *Patcher) addReferenceEdges(obs *types.ObservationNode) {
 	for _, ref := range obs.References {
-		edge := types.Edge{
-			Source:   obs.ID,
-			Target:   ref.Target,
-			Relation: referenceRelation(ref.Type, obs.ObsType),
+		resolved, ok := igraph.ResolveMemoryReference(ref.Type, ref.Target, obs.ObsType, igraph.MemoryOptions{})
+		if !ok {
+			continue
 		}
+		edge := igraph.MemoryReferenceEdge(obs.ID, resolved, fmt.Sprintf("ancora:obs:%d", obs.AncoraID))
+		edge = igraph.BindMemoryReferenceEdge(edge, p.graph.Nodes)
 		// Only add to ResolvedEdges — the gonum graph is not updated here
 		// because the target may be a bare label (file path, concept) that
 		// does not correspond to an existing gonum node.
@@ -255,35 +257,4 @@ func (p *Patcher) removeReferenceEdges(nodeID string) {
 		}
 	}
 	p.graph.ResolvedEdges = filtered
-}
-
-// referenceRelation maps a Reference.Type + observation ObsType to an EdgeType.
-// For obs→obs and obs→concept the ref type is authoritative.
-// For obs→code (file/function), the observation type drives the semantic relation.
-func referenceRelation(refType, obsType string) string {
-	switch refType {
-	case "observation":
-		return string(types.EdgeTypeRelatedTo)
-	case "concept":
-		return string(types.EdgeTypeDefines)
-	default:
-		// file, function, or unknown — derive from observation category
-		return obsTypeRelation(obsType)
-	}
-}
-
-// obsTypeRelation returns the cross-source edge type for a given observation ObsType.
-func obsTypeRelation(obsType string) string {
-	switch obsType {
-	case "decision":
-		return string(types.EdgeTypeDecidesOn)
-	case "bugfix":
-		return string(types.EdgeTypeConstrains)
-	case "pattern":
-		return string(types.EdgeTypeExemplifies)
-	case "architecture", "discovery", "learning":
-		return string(types.EdgeTypeDocuments)
-	default:
-		return string(types.EdgeTypeReferences)
-	}
 }

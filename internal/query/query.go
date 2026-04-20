@@ -4,8 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sort"
 	"strings"
 
+	igraph "github.com/Syfra3/vela/internal/graph"
 	"gonum.org/v1/gonum/graph/path"
 	"gonum.org/v1/gonum/graph/simple"
 
@@ -14,12 +16,15 @@ import (
 
 // Engine wraps a loaded graph and answers queries against it.
 type Engine struct {
-	graph       *types.Graph
-	nodeByID    map[string]types.Node   // node ID → node
-	nodeByLabel map[string][]types.Node // label → nodes (may be multiple)
-	directed    *simple.DirectedGraph
-	idToInt     map[string]int64
-	intToID     map[int64]string
+	graphPath     string
+	graph         *types.Graph
+	nodeByID      map[string]types.Node   // node ID → node
+	nodeByLabel   map[string][]types.Node // label → nodes (may be multiple)
+	canonicalToID map[string]string
+	edgeByTriple  map[string]types.Edge
+	directed      *simple.DirectedGraph
+	idToInt       map[string]int64
+	intToID       map[int64]string
 }
 
 // LoadFromFile reads graph.json and constructs a query Engine.
@@ -32,16 +37,25 @@ func LoadFromFile(graphPath string) (*Engine, error) {
 	// graph.json uses the export format from internal/export/json.go
 	var raw struct {
 		Nodes []struct {
-			ID    string `json:"id"`
-			Label string `json:"label"`
-			Kind  string `json:"kind"`
-			File  string `json:"file"`
+			ID           string                 `json:"id"`
+			Label        string                 `json:"label"`
+			Kind         string                 `json:"kind"`
+			File         string                 `json:"file"`
+			Description  string                 `json:"description"`
+			SourceType   string                 `json:"source_type"`
+			SourceName   string                 `json:"source_name"`
+			SourcePath   string                 `json:"source_path"`
+			SourceRemote string                 `json:"source_remote"`
+			Metadata     map[string]interface{} `json:"metadata"`
 		} `json:"nodes"`
 		Edges []struct {
-			From string `json:"from"`
-			To   string `json:"to"`
-			Kind string `json:"kind"`
-			File string `json:"file"`
+			From       string                 `json:"from"`
+			To         string                 `json:"to"`
+			Kind       string                 `json:"kind"`
+			File       string                 `json:"file"`
+			Confidence string                 `json:"confidence"`
+			Score      float64                `json:"score"`
+			Metadata   map[string]interface{} `json:"metadata"`
 		} `json:"edges"`
 	}
 	if err := json.Unmarshal(data, &raw); err != nil {
@@ -54,30 +68,53 @@ func LoadFromFile(graphPath string) (*Engine, error) {
 		Edges: make([]types.Edge, len(raw.Edges)),
 	}
 	for i, n := range raw.Nodes {
-		g.Nodes[i] = types.Node{ID: n.ID, Label: n.Label, NodeType: n.Kind, SourceFile: n.File}
+		g.Nodes[i] = types.Node{
+			ID:          n.ID,
+			Label:       n.Label,
+			NodeType:    n.Kind,
+			SourceFile:  n.File,
+			Description: n.Description,
+			Metadata:    n.Metadata,
+		}
+		if n.SourceType != "" || n.SourceName != "" || n.SourcePath != "" || n.SourceRemote != "" {
+			g.Nodes[i].Source = &types.Source{
+				Type:   types.SourceType(n.SourceType),
+				Name:   n.SourceName,
+				Path:   n.SourcePath,
+				Remote: n.SourceRemote,
+			}
+		}
 	}
 	for i, e := range raw.Edges {
-		g.Edges[i] = types.Edge{Source: e.From, Target: e.To, Relation: e.Kind, SourceFile: e.File}
+		g.Edges[i] = types.Edge{Source: e.From, Target: e.To, Relation: e.Kind, SourceFile: e.File, Confidence: e.Confidence, Score: e.Score, Metadata: e.Metadata}
 	}
+	g.Nodes, g.Edges = igraph.Canonicalize(g.Nodes, g.Edges)
 
-	return newEngine(g), nil
+	eng := newEngine(g)
+	eng.graphPath = graphPath
+	return eng, nil
 }
 
 // newEngine builds indexes from a types.Graph.
 func newEngine(g *types.Graph) *Engine {
 	e := &Engine{
-		graph:       g,
-		nodeByID:    make(map[string]types.Node, len(g.Nodes)),
-		nodeByLabel: make(map[string][]types.Node),
-		directed:    simple.NewDirectedGraph(),
-		idToInt:     make(map[string]int64, len(g.Nodes)),
-		intToID:     make(map[int64]string, len(g.Nodes)),
+		graph:         g,
+		nodeByID:      make(map[string]types.Node, len(g.Nodes)),
+		nodeByLabel:   make(map[string][]types.Node),
+		canonicalToID: make(map[string]string, len(g.Nodes)),
+		edgeByTriple:  make(map[string]types.Edge, len(g.Edges)),
+		directed:      simple.NewDirectedGraph(),
+		idToInt:       make(map[string]int64, len(g.Nodes)),
+		intToID:       make(map[int64]string, len(g.Nodes)),
 	}
 
 	for i, n := range g.Nodes {
 		e.nodeByID[n.ID] = n
 		e.nodeByLabel[n.Label] = append(e.nodeByLabel[n.Label], n)
 		e.nodeByLabel[strings.ToLower(n.Label)] = append(e.nodeByLabel[strings.ToLower(n.Label)], n)
+		if canonical := types.CanonicalKeyForNode(n); !canonical.IsZero() {
+			e.canonicalToID[canonical.String()] = n.ID
+		}
 
 		id := int64(i + 1)
 		e.idToInt[n.ID] = id
@@ -85,24 +122,51 @@ func newEngine(g *types.Graph) *Engine {
 		e.directed.AddNode(simple.Node(id))
 	}
 
+	normalizedEdges := make([]types.Edge, 0, len(g.Edges))
 	for _, edge := range g.Edges {
-		fromInt, fromOK := e.idToInt[edge.Source]
-		// Target may be a label — resolve
-		toInt, toOK := e.resolveToInt(edge.Target)
+		normalized := edge
+		normalized.Source = e.resolveEdgeNodeRef(edge.Source, edge)
+		normalized.Target = e.resolveEdgeNodeRef(edge.Target, edge)
+		triple := edgeTriple(normalized.Source, normalized.Target, normalized.Relation)
+		if current, ok := e.edgeByTriple[triple]; !ok || types.PreferEdgeEvidence(normalized, current) {
+			e.edgeByTriple[triple] = normalized
+		}
+		fromInt, fromOK := e.idToInt[normalized.Source]
+		toInt, toOK := e.resolveToInt(normalized.Target)
 		if fromOK && toOK && fromInt != toInt {
 			if !e.directed.HasEdgeFromTo(fromInt, toInt) {
 				e.directed.SetEdge(simple.Edge{F: simple.Node(fromInt), T: simple.Node(toInt)})
 			}
 		}
+		normalizedEdges = append(normalizedEdges, normalized)
+	}
+
+	e.graph = &types.Graph{
+		Nodes:       g.Nodes,
+		Edges:       normalizedEdges,
+		Communities: g.Communities,
+		Metadata:    g.Metadata,
+		ExtractedAt: g.ExtractedAt,
 	}
 
 	return e
+}
+
+func edgeTriple(source, target, relation string) string {
+	return source + "|" + relation + "|" + target
 }
 
 // resolveToInt resolves a target (ID or label) to a gonum int64 node ID.
 func (e *Engine) resolveToInt(target string) (int64, bool) {
 	if id, ok := e.idToInt[target]; ok {
 		return id, true
+	}
+	if canonical := types.CanonicalKeyForID(target, "", nil); !canonical.IsZero() {
+		if id, ok := e.canonicalToID[canonical.String()]; ok {
+			if intID, ok := e.idToInt[id]; ok {
+				return intID, true
+			}
+		}
 	}
 	// Try label match
 	if nodes, ok := e.nodeByLabel[target]; ok && len(nodes) > 0 {
@@ -116,6 +180,84 @@ func (e *Engine) resolveToInt(target string) (int64, bool) {
 		}
 	}
 	return 0, false
+}
+
+func (e *Engine) resolveEdgeNodeRef(ref string, edge types.Edge) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ref
+	}
+	if _, ok := e.nodeByID[ref]; ok {
+		return ref
+	}
+	if id := e.resolveNodeID(ref, preferredLayer(edge)); id != "" {
+		return id
+	}
+	return ref
+}
+
+func (e *Engine) resolveNodeID(ref string, preferred types.Layer) string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	if _, ok := e.nodeByID[ref]; ok {
+		return ref
+	}
+	if canonical := types.CanonicalJoinKey(ref, "", nil); canonical != "" {
+		if id, ok := e.canonicalToID[canonical]; ok {
+			return id
+		}
+	}
+	candidates := e.nodeCandidates(ref)
+	if len(candidates) == 0 {
+		return ""
+	}
+	if preferred != "" {
+		preferredMatches := make([]types.Node, 0, len(candidates))
+		for _, candidate := range candidates {
+			if nodeLayer(candidate) == preferred {
+				preferredMatches = append(preferredMatches, candidate)
+			}
+		}
+		if len(preferredMatches) == 1 {
+			return preferredMatches[0].ID
+		}
+		if len(preferredMatches) > 1 {
+			candidates = preferredMatches
+		}
+	}
+	return candidates[0].ID
+}
+
+func (e *Engine) nodeCandidates(ref string) []types.Node {
+	if nodes, ok := e.nodeByLabel[ref]; ok && len(nodes) > 0 {
+		return uniqueNodes(nodes)
+	}
+	if nodes, ok := e.nodeByLabel[strings.ToLower(ref)]; ok && len(nodes) > 0 {
+		return uniqueNodes(nodes)
+	}
+	return nil
+}
+
+func uniqueNodes(nodes []types.Node) []types.Node {
+	out := make([]types.Node, 0, len(nodes))
+	seen := map[string]struct{}{}
+	for _, node := range nodes {
+		if _, ok := seen[node.ID]; ok {
+			continue
+		}
+		seen[node.ID] = struct{}{}
+		out = append(out, node)
+	}
+	return out
+}
+
+func preferredLayer(edge types.Edge) types.Layer {
+	if ev := types.EdgeEvidence(edge); ev.Layer != "" {
+		return ev.Layer
+	}
+	return ""
 }
 
 // Path finds the shortest directed path from nodeA to nodeB.
@@ -142,7 +284,7 @@ func (e *Engine) Path(fromLabel, toLabel string) string {
 	for i, n := range nodes {
 		if nodeID, ok := e.intToID[n.ID()]; ok {
 			if node, ok2 := e.nodeByID[nodeID]; ok2 {
-				labels[i] = node.Label
+				labels[i] = describeNode(node)
 			} else {
 				labels[i] = nodeID
 			}
@@ -153,25 +295,20 @@ func (e *Engine) Path(fromLabel, toLabel string) string {
 
 // Explain returns all edges where the given node is source or target.
 func (e *Engine) Explain(label string) string {
-	nodes, ok := e.nodeByLabel[label]
-	if !ok {
-		nodes, ok = e.nodeByLabel[strings.ToLower(label)]
-	}
-	if !ok || len(nodes) == 0 {
+	nodeIDs := e.resolveNodeIDs(label)
+	if len(nodeIDs) == 0 {
 		return fmt.Sprintf("node %q not found", label)
 	}
 
-	nodeIDs := make(map[string]bool)
-	for _, n := range nodes {
-		nodeIDs[n.ID] = true
+	nodeSet := make(map[string]bool, len(nodeIDs))
+	for _, id := range nodeIDs {
+		nodeSet[id] = true
 	}
 
 	var lines []string
 	for _, edge := range e.graph.Edges {
-		if nodeIDs[edge.Source] {
-			lines = append(lines, fmt.Sprintf("  %s --[%s]--> %s", edge.Source, edge.Relation, edge.Target))
-		} else if nodeIDs[edge.Target] {
-			lines = append(lines, fmt.Sprintf("  %s --[%s]--> %s", edge.Source, edge.Relation, edge.Target))
+		if nodeSet[edge.Source] || nodeSet[edge.Target] {
+			lines = append(lines, "  "+e.formatExplainEdge(edge))
 		}
 	}
 
@@ -190,6 +327,153 @@ func (e *Engine) Explain(label string) string {
 	}
 
 	return fmt.Sprintf("Edges for %q:\n%s", label, strings.Join(deduped, "\n"))
+}
+
+func (e *Engine) resolveNodeIDs(ref string) []string {
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return nil
+	}
+	if _, ok := e.nodeByID[ref]; ok {
+		return []string{ref}
+	}
+	if id, ok := e.canonicalToID[types.CanonicalJoinKey(ref, "", nil)]; ok {
+		return []string{id}
+	}
+	if nodes, ok := e.nodeByLabel[ref]; ok && len(nodes) > 0 {
+		return nodeIDs(nodes)
+	}
+	if nodes, ok := e.nodeByLabel[strings.ToLower(ref)]; ok && len(nodes) > 0 {
+		return nodeIDs(nodes)
+	}
+	return nil
+}
+
+func nodeIDs(nodes []types.Node) []string {
+	out := make([]string, 0, len(nodes))
+	seen := map[string]struct{}{}
+	for _, n := range nodes {
+		if _, ok := seen[n.ID]; ok {
+			continue
+		}
+		seen[n.ID] = struct{}{}
+		out = append(out, n.ID)
+	}
+	return out
+}
+
+func (e *Engine) formatExplainEdge(edge types.Edge) string {
+	line := fmt.Sprintf("%s --[%s]--> %s", e.describeRef(edge.Source), edge.Relation, e.describeRef(edge.Target))
+	ev := types.EdgeEvidence(edge)
+	parts := make([]string, 0, 5)
+	if ev.Layer != "" {
+		parts = append(parts, "layer="+string(ev.Layer))
+	}
+	if ev.Type != "" {
+		parts = append(parts, "type="+ev.Type)
+	}
+	if ev.SourceArtifact != "" {
+		parts = append(parts, "artifact="+ev.SourceArtifact)
+	}
+	if ev.Confidence != "" {
+		parts = append(parts, "confidence="+string(ev.Confidence))
+	}
+	if ev.Verification != "" {
+		parts = append(parts, "verification="+string(ev.Verification))
+	}
+	if reference, _ := edge.Metadata["reference_target"].(string); reference != "" {
+		parts = append(parts, "reference="+reference)
+	}
+	if bound, _ := edge.Metadata["bound_target"].(string); bound != "" {
+		parts = append(parts, "bound="+bound)
+	}
+	if binding, _ := edge.Metadata["binding_evidence"].(string); binding != "" {
+		parts = append(parts, "binding="+binding)
+	}
+	if suggestions := metadataStringSlice(edge.Metadata["binding_suggestions"]); len(suggestions) > 0 {
+		parts = append(parts, "suggestions="+strings.Join(suggestions, ","))
+	}
+	if len(parts) == 0 {
+		return line
+	}
+	return line + " {" + strings.Join(parts, ", ") + "}"
+}
+
+func (e *Engine) describeRef(ref string) string {
+	if node, ok := e.nodeByID[ref]; ok {
+		return describeNode(node)
+	}
+	return ref
+}
+
+func describeNode(node types.Node) string {
+	label := strings.TrimSpace(node.Label)
+	if label == "" {
+		label = node.ID
+	}
+	parts := make([]string, 0, 2)
+	if layer := nodeLayer(node); layer != "" {
+		parts = append(parts, string(layer))
+	}
+	if kind := strings.TrimSpace(node.NodeType); kind != "" {
+		parts = append(parts, kind)
+	}
+	if len(parts) == 0 {
+		return label
+	}
+	return fmt.Sprintf("%s [%s]", label, strings.Join(parts, "/"))
+}
+
+func sortedKeys[V any](values map[string]V) []string {
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func (e *Engine) edgeEvidence(source, target, relation string) types.Evidence {
+	if e == nil {
+		return types.Evidence{}
+	}
+	if edge, ok := e.edgeByTriple[edgeTriple(source, target, relation)]; ok {
+		return types.EdgeEvidence(edge)
+	}
+	return types.Evidence{}
+}
+
+// Route reports workspace-layer repo routing for a query.
+func (e *Engine) Route(input string) string {
+	if e == nil || e.graph == nil {
+		return "no graph loaded"
+	}
+	routes := igraph.LoadWorkspace(e.graph.Nodes, e.graph.Edges).SelectRepos(routeTokens(input), 5)
+	if len(routes) == 0 {
+		return fmt.Sprintf("no workspace routes found for %q", input)
+	}
+	lines := []string{fmt.Sprintf("Workspace routes for %q:", input)}
+	for _, route := range routes {
+		line := fmt.Sprintf("  %s score=%.2f", route.Repo, route.Score)
+		if len(route.Reasons) > 0 {
+			line += " reasons=" + strings.Join(route.Reasons, ",")
+		}
+		lines = append(lines, line)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func routeTokens(input string) []string {
+	return strings.FieldsFunc(strings.ToLower(input), func(r rune) bool {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return false
+		case r >= '0' && r <= '9':
+			return false
+		default:
+			return true
+		}
+	})
 }
 
 // Query is a freeform dispatcher: parses "path A B", "explain X", etc.
@@ -212,12 +496,22 @@ func (e *Engine) Query(input string) string {
 			return "usage: explain <node>"
 		}
 		return e.Explain(strings.Join(parts[1:], " "))
+	case "bindings":
+		if len(parts) < 2 {
+			return "usage: bindings <node>"
+		}
+		return e.Bindings(strings.Join(parts[1:], " "))
+	case "route":
+		if len(parts) < 2 {
+			return "usage: route <query>"
+		}
+		return e.Route(strings.Join(parts[1:], " "))
 	case "nodes":
 		return fmt.Sprintf("Total nodes: %d", len(e.graph.Nodes))
 	case "edges":
 		return fmt.Sprintf("Total edges: %d", len(e.graph.Edges))
 	case "help":
-		return "Commands:\n  path <from> <to>  — shortest dependency path\n  explain <node>    — all edges involving a node\n  nodes / edges     — graph stats\n  quit              — exit"
+		return "Commands:\n  path <from> <to>  — shortest dependency path\n  explain <node>    — all edges involving a node\n  bindings <node>   — memory reference binder state\n  route <query>     — workspace repo routing decision\n  nodes / edges     — graph stats\n  quit              — exit"
 	default:
 		return fmt.Sprintf("unknown command %q — type 'help' for available commands", cmd)
 	}

@@ -103,11 +103,12 @@ func TestExtractAncora_HierarchyNodes(t *testing.T) {
 
 	// Expect hierarchy nodes.
 	for _, id := range []string{
-		"ancora:workspace:vela",
-		"ancora:workspace:ancora",
-		"ancora:visibility:work",
-		"ancora:visibility:personal",
-		"ancora:org:glim",
+		"memory:root:ancora",
+		"memory:workspace:vela",
+		"memory:workspace:ancora",
+		"memory:visibility:work",
+		"memory:visibility:personal",
+		"memory:organization:glim",
 	} {
 		if !nodeByID[id] {
 			t.Errorf("missing hierarchy node %q", id)
@@ -161,15 +162,62 @@ func TestExtractAncora_ExplicitReferences(t *testing.T) {
 	relationsByTarget := make(map[string]string)
 	for _, e := range edges {
 		switch e.Target {
-		case "internal/store/store.go", "ancora:obs:5":
+		case "repo:file:internal/store/store.go", "memory:observation:5":
 			relationsByTarget[e.Target] = e.Relation
 		}
 	}
-	if got := relationsByTarget["internal/store/store.go"]; got != "constrains" {
+	if got := relationsByTarget["repo:file:internal/store/store.go"]; got != "constrains" {
 		t.Errorf("file reference relation = %q, want %q", got, "constrains")
 	}
-	if got := relationsByTarget["ancora:obs:5"]; got != "related_to" {
+	if got := relationsByTarget["memory:observation:5"]; got != "related_to" {
 		t.Errorf("observation reference relation = %q, want %q", got, "related_to")
+	}
+}
+
+func TestExtractAncora_ConceptWorkspaceAndOrganizationReferences(t *testing.T) {
+	t.Parallel()
+	dbPath := seedAncoraDB(t, []map[string]any{
+		{
+			"title": "Memory topology", "content": "documents graph shape",
+			"type": "architecture", "workspace": "vela", "visibility": "work",
+			"organization": "glim", "topic_key": nil,
+			"references": `[{"type":"concept","target":"memory graph"},` +
+				`{"type":"workspace","target":"vela"},` +
+				`{"type":"organization","target":"glim"}]`,
+			"deleted_at": nil,
+		},
+	})
+
+	nodes, edges, err := extract.ExtractAncora(dbPath, nil, 8000, nil)
+	if err != nil {
+		t.Fatalf("ExtractAncora: %v", err)
+	}
+
+	nodeByID := make(map[string]bool)
+	for _, n := range nodes {
+		nodeByID[n.ID] = true
+	}
+	for _, id := range []string{"memory:concept:memory graph", "memory:workspace:vela", "memory:organization:glim"} {
+		if !nodeByID[id] {
+			t.Fatalf("missing derived node %q", id)
+		}
+	}
+
+	rels := map[string]string{}
+	for _, e := range edges {
+		if e.Source != "memory:observation:1" {
+			continue
+		}
+		rels[e.Target] = e.Relation
+	}
+	if got := rels["memory:concept:memory graph"]; got != "defines" {
+		t.Fatalf("concept relation = %q, want defines", got)
+	}
+	if got := rels["workspace:repo:vela"]; got != "mentions" {
+		t.Fatalf("workspace repo relation = %q, want mentions", got)
+	}
+	if got := rels["memory:organization:glim"]; got != "belongs_to" {
+		t.Fatalf("organization relation = %q, want belongs_to", got)
 	}
 }
 

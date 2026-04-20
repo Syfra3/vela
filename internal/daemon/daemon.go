@@ -37,11 +37,11 @@ type Daemon struct {
 	logFile  *os.File
 
 	// graph persistence
-	dirty         atomic.Bool
-	graphPath     string
-	graphLock     *igraph.GraphLock
-	lastFlush     time.Time
-	lastFlushMu   sync.RWMutex
+	dirty       atomic.Bool
+	graphPath   string
+	graphLock   *igraph.GraphLock
+	lastFlush   time.Time
+	lastFlushMu sync.RWMutex
 
 	stopCh    chan struct{}
 	stoppedCh chan struct{}
@@ -425,6 +425,12 @@ func (d *Daemon) persistLoop(ctx context.Context) {
 func (d *Daemon) flushGraph() {
 	outDir := filepath.Dir(d.graphPath)
 	tg := d.graph.ToTypes()
+	if existing, err := export.LoadJSON(d.graphPath); err == nil {
+		mergedNodes, mergedEdges := igraph.MergeMemory(existing.Nodes, existing.Edges, tg.Nodes, tg.Edges)
+		tg = &types.Graph{Nodes: mergedNodes, Edges: mergedEdges}
+	} else if !os.IsNotExist(err) {
+		log.Printf("WARN: graph persist load existing graph: %v", err)
+	}
 	if err := export.WriteJSONAtomic(tg, outDir); err != nil {
 		log.Printf("WARN: graph persist: %v", err)
 		d.dirty.Store(true) // retry on next tick

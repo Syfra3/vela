@@ -58,8 +58,8 @@ func TestDifferDiffBuildsChangeSet(t *testing.T) {
 	if cs.Added[0].NodeType != types.NodeTypeObservation {
 		t.Fatalf("added node type = %q, want %q", cs.Added[0].NodeType, types.NodeTypeObservation)
 	}
-	if cs.Added[0].ID != "ancora:obs:1" {
-		t.Fatalf("added node ID = %q, want ancora:obs:1", cs.Added[0].ID)
+	if cs.Added[0].ID != "memory:observation:1" {
+		t.Fatalf("added node ID = %q, want memory:observation:1", cs.Added[0].ID)
 	}
 	if got := cs.Added[0].References; len(got) != 1 || got[0].Target != "internal/auth/service.go" {
 		t.Fatalf("added references = %#v, want file reference", got)
