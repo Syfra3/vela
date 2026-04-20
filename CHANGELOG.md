@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.3.1](https://github.com/Syfra3/vela/compare/v1.3.0...v1.3.1) (2026-04-18)
+
+
+### Bug Fixes
+
+* **graph:** support windows build by abstracting file locking ([0062c59](https://github.com/Syfra3/vela/commit/0062c590a29f79d99adc3b848ef8beac1a1e1b97))
+
+## [1.3.0](https://github.com/Syfra3/vela/compare/v1.2.0...v1.3.0) (2026-04-18)
+
+
+### Features
+
+* **tui:** add projects and uninstall screens, doctor integration checks, graph lock ([#15](https://github.com/Syfra3/vela/issues/15)) ([4467cd3](https://github.com/Syfra3/vela/commit/4467cd3fb5f62d961ef1ea9efa579d52a9294dcc))
+
 ## [1.2.0](https://github.com/Syfra3/vela/compare/v1.1.4...v1.2.0) (2026-04-17)
 
 

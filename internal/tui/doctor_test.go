@@ -3,7 +3,6 @@ package tui
 import (
 	"strings"
 	"testing"
-
 	vdoctor "github.com/Syfra3/vela/internal/doctor"
 )
 

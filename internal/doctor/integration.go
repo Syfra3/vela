@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
 	"github.com/Syfra3/vela/internal/config"
 	"github.com/Syfra3/vela/internal/llm"
 	"github.com/Syfra3/vela/internal/setup"

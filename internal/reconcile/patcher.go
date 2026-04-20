@@ -17,6 +17,14 @@ var memorySrc = &types.Source{
 	Name: "ancora",
 }
 
+const memoryRootNodeID = "memory:ancora"
+
+func workspaceNodeID(ws string) string   { return fmt.Sprintf("ancora:workspace:%s", ws) }
+func visibilityNodeID(vis string) string { return fmt.Sprintf("ancora:visibility:%s", vis) }
+func organizationNodeID(org string) string {
+	return fmt.Sprintf("ancora:organization:%s", org)
+}
+
 // Patcher applies a ChangeSet to the in-memory graph using minimal mutations.
 // It maintains indexes so it can quickly locate existing nodes and edges
 // without scanning the full graph on every event.
