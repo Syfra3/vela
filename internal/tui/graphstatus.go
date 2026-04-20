@@ -38,10 +38,10 @@ type graphStatusLoadedMsg struct {
 }
 
 type GraphStatusModel struct {
-	metrics igraph.HealthMetrics
-	vault   vaultStats
-	loadErr error
-	loading bool
+	metrics  igraph.HealthMetrics
+	vault    vaultStats
+	loadErr  error
+	loading  bool
 	quitting bool
 }
 

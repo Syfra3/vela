@@ -28,6 +28,9 @@ A high-performance, privacy-first knowledge graph builder for codebases, documen
 # Build Vela
 go build -o vela ./cmd/vela
 
+# Run the local PR quality gate
+make verify
+
 # Extract knowledge graph from a folder
 ./vela extract ./my-repo
 
@@ -66,6 +69,25 @@ sudo mv vela /usr/local/bin/
 # Verify
 vela --help
 ```
+
+### Local quality gate
+
+Use the same gate locally that CI runs on pull requests:
+
+```bash
+make verify
+```
+
+Install repository-managed hooks to catch issues before push:
+
+```bash
+make hooks-install
+```
+
+Notes:
+- `make lint` bootstraps the pinned `golangci-lint` version automatically.
+- `make verify` uses `gotestsum` when available and falls back to `go test -v`.
+- Vela intentionally scopes automated tests to `./cmd/... ./internal/... ./pkg/...` because `tests/fixtures/detect/**` contains fixture files that are expected to break raw `go test ./...` analysis.
 
 ### MCP usage
 

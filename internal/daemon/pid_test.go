@@ -61,8 +61,6 @@ func TestPIDFileIsAliveRemovesStalePIDFile(t *testing.T) {
 }
 
 func TestPIDFileIsAliveTreatsZombieAsNotRunning(t *testing.T) {
-	t.Parallel()
-
 	pf, err := NewPIDFile(filepath.Join(t.TempDir(), "watch.pid"))
 	if err != nil {
 		t.Fatalf("NewPIDFile() error = %v", err)

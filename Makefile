@@ -1,9 +1,10 @@
 # Vela Knowledge Graph Builder - Makefile
 
-.PHONY: help build install test test-verbose test-coverage clean fmt lint run dev deps tidy cross release release-check help
+.PHONY: help build install test test-ci test-verbose test-coverage clean fmt fmt-check lint verify verify-ci run dev deps tidy cross release release-check hooks-install help
 
 # Variables
 GOTESTSUM=$(shell go env GOPATH)/bin/gotestsum
+LEFTHOOK=$(shell go env GOPATH)/bin/lefthook
 BINARY_NAME=vela
 BINARY_PATH=./cmd/vela
 BUILD_DIR=./bin
@@ -11,6 +12,8 @@ INSTALL_PATH=$(HOME)/.local/bin
 GO_FILES=$(shell find . -type f -name '*.go' -not -path "./vendor/*")
 VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS=-s -w -X main.version=$(VERSION)
+GOLANGCI_LINT_VERSION?=v2.5.0
+TEST_PACKAGES=./cmd/... ./internal/... ./pkg/...
 
 help: ## Show this help message
 	@echo 'Usage: make [target]'
@@ -32,15 +35,23 @@ install: build ## Install binary to ~/.local/bin
 
 test: ## Run all tests (jest-style summary)
 	@if command -v $(GOTESTSUM) >/dev/null 2>&1; then \
-		$(GOTESTSUM) --format testdox -- -race -timeout 30s -coverprofile=coverage.out -covermode=atomic ./...; \
+		$(GOTESTSUM) --format testdox -- -race -timeout 30s -coverprofile=coverage.out -covermode=atomic $(TEST_PACKAGES); \
 	else \
 		echo "gotestsum not found. Install with: go install gotest.tools/gotestsum@latest"; \
 		exit 1; \
 	fi
 
+test-ci: ## Run scoped CI tests with gotestsum output
+	@echo "Running tests..."
+	@if command -v $(GOTESTSUM) >/dev/null 2>&1; then \
+		$(GOTESTSUM) --format testdox -- -race -timeout 30s -coverprofile=coverage.out -covermode=atomic $(TEST_PACKAGES); \
+	else \
+		go test -v -race -timeout 30s -coverprofile=coverage.out -covermode=atomic $(TEST_PACKAGES); \
+	fi
+
 test-verbose: ## Run tests with verbose output
 	@echo "Running tests (verbose)..."
-	@go test -v -race -timeout 30s -coverprofile=coverage.out -covermode=atomic ./...
+	@go test -v -race -timeout 30s -coverprofile=coverage.out -covermode=atomic $(TEST_PACKAGES)
 
 test-coverage: ## Run tests with coverage report
 	@echo "Running tests with coverage..."
@@ -57,17 +68,28 @@ clean: ## Remove build artifacts
 
 fmt: ## Format Go code
 	@echo "Formatting code..."
-	@go fmt ./...
+	@FILES=$$(find . -name '*.go' -not -path './vendor/*' -not -path './tests/fixtures/*'); \
+	if [ -n "$$FILES" ]; then \
+		gofmt -w $$FILES; \
+	fi
 	@echo "Format complete"
 
-lint: ## Run linter (requires golangci-lint)
-	@echo "Running linter..."
-	@if command -v golangci-lint >/dev/null 2>&1; then \
-		golangci-lint run ./...; \
-	else \
-		echo "golangci-lint not installed. Install: https://golangci-lint.run/usage/install/"; \
+fmt-check: ## Fail if Go files are not formatted with gofmt
+	@echo "Checking Go formatting..."
+	@UNFORMATTED=$$(find . -name '*.go' -not -path './vendor/*' -not -path './tests/fixtures/*' -exec gofmt -l {} +); \
+	if [ -n "$$UNFORMATTED" ]; then \
+		echo "The following files need gofmt:"; \
+		echo "$$UNFORMATTED"; \
 		exit 1; \
 	fi
+
+lint: ## Run the pinned golangci-lint baseline
+	@echo "Running linter..."
+	@go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@$(GOLANGCI_LINT_VERSION) run $(TEST_PACKAGES)
+
+verify: fmt-check lint test-ci build ## Run the full local quality gate
+
+verify-ci: verify ## Run the CI quality gate
 
 run: build ## Build and run the binary
 	@echo "Running $(BINARY_NAME)..."
@@ -128,3 +150,8 @@ release: release-check test lint ## Create a new release (requires git tag)
 	@echo ""
 	@echo "Monitor progress: https://github.com/Syfra3/vela/actions"
 	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+hooks-install: ## Install repository-managed git hooks with lefthook
+	@echo "Installing git hooks with lefthook..."
+	@go install github.com/evilmartians/lefthook@latest
+	@$(LEFTHOOK) install

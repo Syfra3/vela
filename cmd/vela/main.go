@@ -897,13 +897,14 @@ func serveCmd() *cobra.Command {
 			if !httpMode {
 				return mcpserver.ServeStdio(vmcp.NewServer(eng))
 			}
-			srv := server.New(eng, port)
+			srv := server.New(eng, ancoraDB, port)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			return srv.Start(ctx)
 		},
 	}
 	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: ~/.vela/graph.json)")
+	cmd.Flags().StringVar(&ancoraDB, "ancora-db", "", "Path to the Ancora database for hybrid HTTP search")
 	cmd.Flags().BoolVar(&httpMode, "http", false, "Serve legacy HTTP endpoints instead of stdio MCP")
 	cmd.Flags().IntVar(&port, "port", 7700, "Port to listen on")
 	return cmd

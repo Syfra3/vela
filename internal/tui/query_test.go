@@ -100,7 +100,8 @@ func TestQueryModelExecutesFederatedSearch(t *testing.T) {
 	loaded, _ := m.Update(querySearcherLoadedMsg{searcher: &vquery.Searcher{}})
 	m = loaded.(QueryModel)
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("retriever")})
+	var cmd tea.Cmd
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("retriever")})
 	m = updated.(QueryModel)
 	if m.input != "retriever" {
 		t.Fatalf("input = %q, want retriever", m.input)

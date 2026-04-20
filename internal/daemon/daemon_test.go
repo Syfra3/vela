@@ -32,8 +32,6 @@ func withDaemonStubEmbeddings(t *testing.T) {
 }
 
 func TestDaemonStartStopLifecycle(t *testing.T) {
-	t.Parallel()
-
 	d := newTestDaemon(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -56,8 +54,6 @@ func TestDaemonStartStopLifecycle(t *testing.T) {
 }
 
 func TestDaemonStartReturnsAlreadyRunning(t *testing.T) {
-	t.Parallel()
-
 	d := newTestDaemon(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
