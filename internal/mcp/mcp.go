@@ -18,7 +18,10 @@ Use vela_* tools for graph structure, node lookup, path finding, and graph-aware
 Do not use Vela as canonical memory storage. Memory ownership belongs elsewhere.`
 
 // NewServer creates a stdio MCP server exposing Vela retrieval tools.
-func NewServer(engine *query.Engine) *server.MCPServer {
+func NewServer(engine *query.Engine, searcher *query.Searcher) *server.MCPServer {
+	if searcher == nil {
+		searcher = query.NewSearcher(engine, "")
+	}
 	srv := server.NewMCPServer(
 		"vela",
 		"0.1.0",
@@ -26,11 +29,11 @@ func NewServer(engine *query.Engine) *server.MCPServer {
 		server.WithInstructions(serverInstructions),
 	)
 
-	registerTools(srv, engine)
+	registerTools(srv, engine, searcher)
 	return srv
 }
 
-func registerTools(srv *server.MCPServer, engine *query.Engine) {
+func registerTools(srv *server.MCPServer, engine *query.Engine, searcher *query.Searcher) {
 	srv.AddTool(
 		markmcp.NewTool("vela_query_graph",
 			markmcp.WithDescription("Search the local graph for relevant nodes and structural context."),
@@ -93,7 +96,7 @@ func registerTools(srv *server.MCPServer, engine *query.Engine) {
 			markmcp.WithString("query", markmcp.Required(), markmcp.Description("Search query")),
 			markmcp.WithNumber("limit", markmcp.Description("Maximum number of matching nodes to return (default: 5)")),
 		),
-		handleFederatedSearch(engine),
+		handleFederatedSearch(searcher),
 	)
 }
 
@@ -203,7 +206,7 @@ func handleExplainGraph(engine *query.Engine) server.ToolHandlerFunc {
 	}
 }
 
-func handleFederatedSearch(engine *query.Engine) server.ToolHandlerFunc {
+func handleFederatedSearch(searcher *query.Searcher) server.ToolHandlerFunc {
 	return func(ctx context.Context, req markmcp.CallToolRequest) (*markmcp.CallToolResult, error) {
 		_ = ctx
 		queryText := strings.TrimSpace(stringArg(req, "query"))
@@ -211,16 +214,26 @@ func handleFederatedSearch(engine *query.Engine) server.ToolHandlerFunc {
 			return errorResult("query is required"), nil
 		}
 		limit := intArg(req, "limit", 5)
-		matches := engine.Search(queryText, limit)
-		if len(matches) == 0 {
+		resp, err := searcher.Search(queryText, limit)
+		if err != nil {
+			return errorResult(err.Error()), nil
+		}
+		if len(resp.Hits) == 0 {
 			return textResult(fmt.Sprintf("No federated matches found for %q.", queryText)), nil
 		}
 		lines := []string{fmt.Sprintf("Federated matches for %q:", queryText)}
-		for _, node := range matches {
-			lines = append(lines, formatNodeLine(node))
+		for _, hit := range resp.Hits {
+			lines = append(lines, formatSearchHitLine(hit))
 		}
 		return textResult(strings.Join(lines, "\n")), nil
 	}
+}
+
+func formatSearchHitLine(hit query.SearchHit) string {
+	kind := emptyFallback(hit.Kind, "unknown")
+	path := emptyFallback(hit.Path, "n/a")
+	source := emptyFallback(hit.PrimarySource, "unknown")
+	return fmt.Sprintf("- %s [%s] source=%s path=%s", hit.Label, kind, source, path)
 }
 
 func textResult(text string) *markmcp.CallToolResult {

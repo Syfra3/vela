@@ -10,13 +10,13 @@ import (
 
 func TestWizardValidateLocalReadiness(t *testing.T) {
 	originalCheckLLMHealth := wizardCheckLLMHealth
-	originalCheckMCPInstalled := wizardCheckMCPInstalled
+	originalCheckVelaMCPForTarget := wizardCheckVelaMCPForTarget
 	originalCheckOllama := wizardCheckOllama
 	originalGetOllamaModels := wizardGetOllamaModels
 	originalLookPath := wizardLookPath
 	t.Cleanup(func() {
 		wizardCheckLLMHealth = originalCheckLLMHealth
-		wizardCheckMCPInstalled = originalCheckMCPInstalled
+		wizardCheckVelaMCPForTarget = originalCheckVelaMCPForTarget
 		wizardCheckOllama = originalCheckOllama
 		wizardGetOllamaModels = originalGetOllamaModels
 		wizardLookPath = originalLookPath
@@ -26,9 +26,9 @@ func TestWizardValidateLocalReadiness(t *testing.T) {
 	wizardCheckOllama = func() (bool, bool, string, error) { return true, true, "/usr/bin/ollama", nil }
 	wizardGetOllamaModels = func() ([]string, error) { return []string{"llama3:latest", LocalSearchEmbeddingModel + ":latest"}, nil }
 	wizardCheckLLMHealth = func(ctx context.Context, cfg *types.LLMConfig) error { return nil }
-	wizardCheckMCPInstalled = func() bool { return true }
+	wizardCheckVelaMCPForTarget = func(target string) bool { return target == IntegrationTargetClaudeCode }
 
-	m := WizardModel{providerChoice: 0, selectedModel: "llama3", mcpTarget: 0}
+	m := WizardModel{setupMode: IntegrationModeVelaOnly, providerChoice: 0, selectedModel: "llama3", mcpTarget: 0}
 	msg := m.validate()().(validationMsg)
 
 	if msg.err != nil {
@@ -44,13 +44,13 @@ func TestWizardValidateLocalReadiness(t *testing.T) {
 
 func TestWizardValidateFailsWhenEmbeddingModelMissing(t *testing.T) {
 	originalCheckLLMHealth := wizardCheckLLMHealth
-	originalCheckMCPInstalled := wizardCheckMCPInstalled
+	originalCheckVelaMCPForTarget := wizardCheckVelaMCPForTarget
 	originalCheckOllama := wizardCheckOllama
 	originalGetOllamaModels := wizardGetOllamaModels
 	originalLookPath := wizardLookPath
 	t.Cleanup(func() {
 		wizardCheckLLMHealth = originalCheckLLMHealth
-		wizardCheckMCPInstalled = originalCheckMCPInstalled
+		wizardCheckVelaMCPForTarget = originalCheckVelaMCPForTarget
 		wizardCheckOllama = originalCheckOllama
 		wizardGetOllamaModels = originalGetOllamaModels
 		wizardLookPath = originalLookPath
@@ -60,9 +60,9 @@ func TestWizardValidateFailsWhenEmbeddingModelMissing(t *testing.T) {
 	wizardCheckOllama = func() (bool, bool, string, error) { return true, true, "/usr/bin/ollama", nil }
 	wizardGetOllamaModels = func() ([]string, error) { return []string{"llama3:latest"}, nil }
 	wizardCheckLLMHealth = func(ctx context.Context, cfg *types.LLMConfig) error { return nil }
-	wizardCheckMCPInstalled = func() bool { return true }
+	wizardCheckVelaMCPForTarget = func(string) bool { return true }
 
-	m := WizardModel{providerChoice: 0, selectedModel: "llama3", mcpTarget: 0}
+	m := WizardModel{setupMode: IntegrationModeVelaOnly, providerChoice: 0, selectedModel: "llama3", mcpTarget: 0}
 	msg := m.validate()().(validationMsg)
 
 	if msg.err == nil {
@@ -75,11 +75,9 @@ func TestWizardValidateFailsWhenEmbeddingModelMissing(t *testing.T) {
 
 func TestWizardValidateFailsWhenRemoteHealthCheckFails(t *testing.T) {
 	originalCheckLLMHealth := wizardCheckLLMHealth
-	originalCheckMCPInstalled := wizardCheckMCPInstalled
 	originalLookPath := wizardLookPath
 	t.Cleanup(func() {
 		wizardCheckLLMHealth = originalCheckLLMHealth
-		wizardCheckMCPInstalled = originalCheckMCPInstalled
 		wizardLookPath = originalLookPath
 	})
 
@@ -87,9 +85,8 @@ func TestWizardValidateFailsWhenRemoteHealthCheckFails(t *testing.T) {
 	wizardCheckLLMHealth = func(ctx context.Context, cfg *types.LLMConfig) error {
 		return errors.New("provider unreachable")
 	}
-	wizardCheckMCPInstalled = func() bool { return false }
 
-	m := WizardModel{providerChoice: 1, remoteProvider: 0, apiKey: "secret", mcpTarget: 2}
+	m := WizardModel{setupMode: IntegrationModeAncoraVela, providerChoice: 1, remoteProvider: 0, apiKey: "secret", mcpTarget: 2}
 	msg := m.validate()().(validationMsg)
 
 	if msg.err == nil {
@@ -97,6 +94,37 @@ func TestWizardValidateFailsWhenRemoteHealthCheckFails(t *testing.T) {
 	}
 	if msg.llmOK {
 		t.Fatalf("llmOK = %v, want false", msg.llmOK)
+	}
+}
+
+func TestWizardValidateAncoraVelaModeDoesNotRequireDirectVelaMCP(t *testing.T) {
+	originalCheckLLMHealth := wizardCheckLLMHealth
+	originalLookPath := wizardLookPath
+	t.Cleanup(func() {
+		wizardCheckLLMHealth = originalCheckLLMHealth
+		wizardLookPath = originalLookPath
+	})
+
+	wizardLookPath = func(file string) (string, error) {
+		switch file {
+		case "vela":
+			return "/usr/bin/vela", nil
+		case "ancora":
+			return "/usr/bin/ancora", nil
+		default:
+			return "", errors.New("missing")
+		}
+	}
+	wizardCheckLLMHealth = func(ctx context.Context, cfg *types.LLMConfig) error { return nil }
+
+	m := WizardModel{setupMode: IntegrationModeAncoraVela, providerChoice: 1, remoteProvider: 0, apiKey: "secret"}
+	msg := m.validate()().(validationMsg)
+
+	if msg.err != nil {
+		t.Fatalf("validate err = %v, want nil", msg.err)
+	}
+	if !msg.mcpOK {
+		t.Fatal("expected Ancora+Vela mode to validate MCP integration without direct Vela registration")
 	}
 }
 
@@ -118,9 +146,11 @@ func TestWizardValidationMessageMovesToErrorState(t *testing.T) {
 func TestWizardValidationFinalizesSetupAndStartsDaemon(t *testing.T) {
 	originalEnableObsidianAutoSync := wizardEnableObsidianAutoSync
 	originalEnsureDaemonRunning := wizardEnsureDaemonRunning
+	originalSaveIntegrationState := wizardSaveIntegrationState
 	t.Cleanup(func() {
 		wizardEnableObsidianAutoSync = originalEnableObsidianAutoSync
 		wizardEnsureDaemonRunning = originalEnsureDaemonRunning
+		wizardSaveIntegrationState = originalSaveIntegrationState
 	})
 
 	obsidianEnabled := false
@@ -131,8 +161,9 @@ func TestWizardValidationFinalizesSetupAndStartsDaemon(t *testing.T) {
 	wizardEnsureDaemonRunning = func() (bool, error) {
 		return true, nil
 	}
+	wizardSaveIntegrationState = func(IntegrationState) error { return nil }
 
-	updated, cmd := (WizardModel{step: StepValidation, working: true}).Update(validationMsg{
+	updated, cmd := (WizardModel{step: StepValidation, working: true, setupMode: IntegrationModeAncoraVela}).Update(validationMsg{
 		llmOK:    true,
 		mcpOK:    true,
 		messages: []string{"✓ Validation passed"},
@@ -160,13 +191,19 @@ func TestWizardValidationFinalizesSetupAndStartsDaemon(t *testing.T) {
 	if wizard.working {
 		t.Fatal("expected finalization to finish")
 	}
-	if len(wizard.message) != 5 {
+	if len(wizard.message) != 7 {
 		t.Fatalf("messages = %v, want validation + completion details", wizard.message)
 	}
-	if wizard.message[3] != "✓ Obsidian auto-sync enabled by default" {
+	if wizard.message[3] != "✓ Integration mode saved: Ancora + Vela" {
 		t.Fatalf("message[3] = %q", wizard.message[3])
 	}
-	if wizard.message[4] != "✓ Watch daemon started" {
+	if wizard.message[4] != "✓ Direct Vela MCP registration removed so primary ownership stays with Ancora" {
 		t.Fatalf("message[4] = %q", wizard.message[4])
+	}
+	if wizard.message[5] != "✓ Obsidian auto-sync enabled by default" {
+		t.Fatalf("message[5] = %q", wizard.message[5])
+	}
+	if wizard.message[6] != "✓ Watch daemon started" {
+		t.Fatalf("message[6] = %q", wizard.message[6])
 	}
 }
