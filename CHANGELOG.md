@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.5.0](https://github.com/Syfra3/vela/compare/v1.4.1...v1.5.0) (2026-04-20)
+
+
+### Features
+
+* **mcp:** add stdio graph retrieval server ([#22](https://github.com/Syfra3/vela/issues/22)) ([bfdc1bb](https://github.com/Syfra3/vela/commit/bfdc1bb0e83cb519075ddac88e785007636aac75))
+
 ## [1.4.1](https://github.com/Syfra3/vela/compare/v1.4.0...v1.4.1) (2026-04-20)
 
 
