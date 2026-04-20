@@ -897,7 +897,7 @@ func serveCmd() *cobra.Command {
 			if !httpMode {
 				return mcpserver.ServeStdio(vmcp.NewServer(eng))
 			}
-			srv := server.New(eng, ancoraDB, port)
+			srv := server.New(eng, port)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			return srv.Start(ctx)
