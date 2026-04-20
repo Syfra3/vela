@@ -12,10 +12,24 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Syfra3/vela/internal/export"
 	igraph "github.com/Syfra3/vela/internal/graph"
 	"github.com/Syfra3/vela/internal/listener"
+	"github.com/Syfra3/vela/internal/retrieval"
 	"github.com/Syfra3/vela/pkg/types"
 )
+
+func withDaemonStubEmbeddings(t *testing.T) {
+	t.Helper()
+	restore := retrieval.SetEmbedTextsForTesting(func(texts []string) ([][]float32, error) {
+		out := make([][]float32, 0, len(texts))
+		for range texts {
+			out = append(out, []float32{1, 0})
+		}
+		return out, nil
+	})
+	t.Cleanup(restore)
+}
 
 func TestDaemonStartStopLifecycle(t *testing.T) {
 	t.Parallel()
@@ -179,17 +193,83 @@ func TestDaemonAncoraSocketReconcileSyncsObsidian(t *testing.T) {
 		}
 	}
 
-	if _, ok := d.graph.NodeIndex["ancora:obs:42"]; !ok {
+	if _, ok := d.graph.NodeIndex["memory:observation:42"]; !ok {
 		t.Fatal("expected observation node in in-memory graph")
 	}
-	if _, ok := d.graph.NodeIndex["ancora:workspace:vela"]; !ok {
+	if _, ok := d.graph.NodeIndex["memory:workspace:vela"]; !ok {
 		t.Fatal("expected workspace node in in-memory graph")
 	}
-	if _, ok := d.graph.NodeIndex["ancora:visibility:work"]; !ok {
+	if _, ok := d.graph.NodeIndex["memory:visibility:work"]; !ok {
 		t.Fatal("expected visibility node in in-memory graph")
 	}
-	if _, ok := d.graph.NodeIndex["ancora:organization:glim"]; !ok {
+	if _, ok := d.graph.NodeIndex["memory:organization:glim"]; !ok {
 		t.Fatal("expected organization node in in-memory graph")
+	}
+}
+
+func TestFlushGraphPreservesExistingProjects(t *testing.T) {
+	t.Parallel()
+	withDaemonStubEmbeddings(t)
+
+	tmp := t.TempDir()
+	graphPath := filepath.Join(tmp, "graph.json")
+
+	existing := &types.Graph{
+		Nodes: []types.Node{
+			{
+				ID:       "project:vela",
+				Label:    "vela",
+				NodeType: string(types.NodeTypeProject),
+				Source:   &types.Source{Type: types.SourceTypeCodebase, Name: "vela", Path: "/work/vela"},
+			},
+			{
+				ID:       "workspace:repo:vela",
+				Label:    "vela",
+				NodeType: string(types.NodeTypeWorkspace),
+				Source:   &types.Source{Type: types.SourceTypeCodebase, Name: "vela", Path: "/work/vela"},
+			},
+		},
+		Edges: []types.Edge{{Source: "workspace:repo:vela", Target: "project:vela", Relation: "documents"}},
+	}
+	if err := export.WriteJSON(existing, tmp); err != nil {
+		t.Fatalf("WriteJSON(existing) error = %v", err)
+	}
+
+	memoryGraph, err := igraph.Build([]types.Node{
+		{
+			ID:       "memory:observation:1",
+			Label:    "Preserve projects",
+			NodeType: string(types.NodeTypeObservation),
+			Source:   &types.Source{Type: types.SourceTypeMemory, Name: "ancora"},
+		},
+	}, []types.Edge{})
+	if err != nil {
+		t.Fatalf("Build(memory graph) error = %v", err)
+	}
+
+	d := &Daemon{graph: memoryGraph, graphPath: graphPath}
+	d.flushGraph()
+
+	loaded, err := export.LoadJSON(graphPath)
+	if err != nil {
+		t.Fatalf("LoadJSON() error = %v", err)
+	}
+
+	seenProject := false
+	seenMemory := false
+	for _, node := range loaded.Nodes {
+		switch node.ID {
+		case "project:vela":
+			seenProject = true
+		case "memory:observation:1":
+			seenMemory = true
+		}
+	}
+	if !seenProject {
+		t.Fatal("expected existing project node to be preserved")
+	}
+	if !seenMemory {
+		t.Fatal("expected memory node to be persisted")
 	}
 }
 

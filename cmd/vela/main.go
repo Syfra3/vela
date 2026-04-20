@@ -4,16 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 
+	ancoradb "github.com/Syfra3/vela/internal/ancora"
 	"github.com/Syfra3/vela/internal/cache"
 	"github.com/Syfra3/vela/internal/config"
 	"github.com/Syfra3/vela/internal/daemon"
@@ -27,6 +30,7 @@ import (
 	vmcp "github.com/Syfra3/vela/internal/mcp"
 	"github.com/Syfra3/vela/internal/query"
 	"github.com/Syfra3/vela/internal/report"
+	"github.com/Syfra3/vela/internal/retrieval"
 	"github.com/Syfra3/vela/internal/security"
 	"github.com/Syfra3/vela/internal/server"
 	"github.com/Syfra3/vela/internal/tui"
@@ -76,6 +80,7 @@ codebases and technical documentation.`,
 	root.AddCommand(doctorCmd())
 	root.AddCommand(pathCmd())
 	root.AddCommand(explainCmd())
+	root.AddCommand(searchCmd())
 	root.AddCommand(queryCmd())
 	root.AddCommand(serveCmd())
 	root.AddCommand(hookCmd())
@@ -243,6 +248,9 @@ func extractCmd() *cobra.Command {
 				StartTime:   time.Now(),
 			}
 
+			// Detect project once — all files share the same source.
+			projectSrc := extract.DetectProject(root)
+
 			// Seed from the existing graph.json so that cached (unchanged)
 			// files still contribute their data. Without this, a run where
 			// all files are cache hits produces an empty graph.
@@ -256,13 +264,13 @@ func extractCmd() *cobra.Command {
 			if sn, se, loadErr := loadExistingGraphData(outDir + "/graph.json"); loadErr == nil {
 				seededNodes = sn
 				seededEdges = se
+				if fileCache != nil && !graphNodesContainProject(seededNodes, projectSrc) {
+					fileCache = nil
+				}
 			} else if fileCache != nil {
 				// No existing graph — discard cache to force full re-extraction.
 				fileCache = nil
 			}
-
-			// Detect project once — all files share the same source.
-			projectSrc := extract.DetectProject(root)
 
 			var freshNodes []types.Node
 			var freshEdges []types.Edge
@@ -322,6 +330,23 @@ func extractCmd() *cobra.Command {
 			allNodes := append(seededNodes, freshNodes...)
 			allEdges := append(seededEdges, freshEdges...)
 
+			contractFiles := make([]string, 0, len(detected.Files))
+			for _, entry := range detected.Files {
+				if extract.IsContractFile(entry.AbsPath) {
+					contractFiles = append(contractFiles, entry.AbsPath)
+				}
+			}
+			if len(contractFiles) > 0 {
+				contractNodes, contractEdges, err := extract.ExtractContract(root, contractFiles, projectSrc)
+				if err != nil {
+					return fmt.Errorf("extracting contract artifacts: %w", err)
+				}
+				allNodes, allEdges = igraph.MergeContract(allNodes, allEdges, contractNodes, contractEdges)
+			}
+			workspace := igraph.BuildWorkspace(allNodes, allEdges, nil)
+			allNodes = append(allNodes, workspace.Nodes...)
+			allEdges = append(allEdges, workspace.Edges...)
+
 			// Save cache
 			if fileCache != nil {
 				_ = fileCache.Save()
@@ -371,15 +396,7 @@ func extractCmd() *cobra.Command {
 			}
 
 			if !noViz {
-				// HTML export
-				if hErr := export.WriteHTML(tg, outDir); hErr != nil {
-					fmt.Fprintf(os.Stderr, "  warning: HTML export failed: %v\n", hErr)
-				}
-				// Obsidian vault
-				obsVaultDir := config.ResolveVaultDir(cfg.Obsidian.VaultDir)
-				if oErr := export.WriteObsidian(tg, obsVaultDir); oErr != nil {
-					fmt.Fprintf(os.Stderr, "  warning: Obsidian export failed: %v\n", oErr)
-				}
+				writeVisualExports(tg, outDir, cfg.Obsidian)
 			}
 
 			// Neo4j push (optional)
@@ -394,6 +411,7 @@ func extractCmd() *cobra.Command {
 
 			fmt.Printf("\nGraph written to %s/\n", outDir)
 			fmt.Printf("  Nodes: %d  Edges: %d\n", g.NodeCount(), g.EdgeCount())
+			fmt.Printf("  Layers: %s\n", formatLayerSummary(tg.Nodes))
 			fmt.Printf("  graph.json · GRAPH_REPORT.md")
 			if !noViz {
 				fmt.Printf(" · graph.html · obsidian/")
@@ -440,6 +458,9 @@ func extractCmd() *cobra.Command {
 					if err := export.WriteJSON(tg, outDir); err != nil {
 						return err
 					}
+					if !noViz {
+						writeVisualExports(tg, outDir, cfg.Obsidian)
+					}
 					fmt.Printf("[watch] graph updated — %d nodes, %d edges\n", len(allNodes), len(allEdges))
 					return nil
 				}
@@ -465,6 +486,17 @@ func extractCmd() *cobra.Command {
 	cmd.Flags().StringVar(&providerFlag, "provider", "", "LLM provider override (local|anthropic|openai|none)")
 	cmd.Flags().StringVar(&modelFlag, "model", "", "LLM model override")
 	return cmd
+}
+
+func writeVisualExports(g *types.Graph, outDir string, obsCfg types.ObsidianConfig) {
+	if hErr := export.WriteHTML(g, outDir); hErr != nil {
+		fmt.Fprintf(os.Stderr, "  warning: HTML export failed: %v\n", hErr)
+	}
+
+	obsVaultDir := config.ResolveVaultDir(obsCfg.VaultDir)
+	if oErr := export.WriteObsidian(g, obsVaultDir); oErr != nil {
+		fmt.Fprintf(os.Stderr, "  warning: Obsidian export failed: %v\n", oErr)
+	}
 }
 
 // ---------------------------------------------------------------------------
@@ -511,19 +543,18 @@ func doctorCmd() *cobra.Command {
 
 			client, err := llm.NewClient(&cfg.LLM)
 			if err != nil {
-				fmt.Printf("  [FAIL] %s provider: %v\n", cfg.LLM.Provider, err)
-				os.Exit(1)
+				return fmt.Errorf("%s provider: %w", cfg.LLM.Provider, err)
 			}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 
 			if err := client.Health(ctx); err != nil {
-				fmt.Printf("  [UNREACHABLE] %s: %v\n", client.Provider(), err)
-				os.Exit(1)
+				return fmt.Errorf("%s: %w", client.Provider(), err)
 			}
 
 			fmt.Printf("  [OK] %s\n", client.Provider())
+			hasFailure := false
 			for _, step := range vdoctor.IntegrationChecks(cfg, "") {
 				label := "OK"
 				if step.Status == vdoctor.StepWarn {
@@ -531,8 +562,12 @@ func doctorCmd() *cobra.Command {
 				}
 				if step.Status == vdoctor.StepFail {
 					label = "FAIL"
+					hasFailure = true
 				}
 				fmt.Printf("  [%s] %s: %s\n", label, step.Name, step.Detail)
+			}
+			if hasFailure {
+				return fmt.Errorf("doctor checks failed")
 			}
 			return nil
 		},
@@ -592,6 +627,81 @@ func explainCmd() *cobra.Command {
 	return cmd
 }
 
+func searchCmd() *cobra.Command {
+	var graphFile string
+	var ancoraDB string
+	var limit int
+	var maxHops int
+	var maxExpansions int
+	var relationFilter string
+	var jsonOut bool
+	var showMetrics bool
+	var recordMetrics bool
+
+	cmd := &cobra.Command{
+		Use:   "search <query>",
+		Short: "Run federated retrieval against Ancora and Vela's SQLite index",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			eng, err := loadEngine(graphFile)
+			if err != nil {
+				return err
+			}
+			if ancoraDB == "" {
+				ancoraDB, err = ancoradb.DefaultDBPath()
+				if err != nil {
+					return err
+				}
+			}
+			searcher := query.NewSearcher(eng, ancoraDB).WithTraversal(retrieval.TraversalOptions{
+				MaxHops:          maxHops,
+				MaxExpansions:    maxExpansions,
+				AllowedRelations: splitCSV(relationFilter),
+			})
+			resp, err := searcher.Search(strings.Join(args, " "), limit)
+			if err != nil {
+				return err
+			}
+
+			var metricsPath string
+			if recordMetrics {
+				metricsPath, err = query.WriteMetricsSnapshot(resp.Metrics)
+				if err != nil {
+					return err
+				}
+			}
+
+			if jsonOut {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				if err := enc.Encode(resp); err != nil {
+					return err
+				}
+				if metricsPath != "" {
+					fmt.Fprintf(os.Stderr, "metrics snapshot: %s\n", metricsPath)
+				}
+				return nil
+			}
+
+			printSearchResponse(resp, showMetrics)
+			if metricsPath != "" {
+				fmt.Printf("\nmetrics snapshot: %s\n", metricsPath)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: ~/.vela/graph.json)")
+	cmd.Flags().StringVar(&ancoraDB, "ancora-db", "", "Path to ancora.db (default: ~/.ancora/ancora.db)")
+	cmd.Flags().IntVar(&limit, "limit", 5, "Maximum results to return")
+	cmd.Flags().IntVar(&maxHops, "max-hops", 2, "Maximum graph traversal hops for structural retrieval")
+	cmd.Flags().IntVar(&maxExpansions, "max-expansions", 24, "Maximum graph expansions for structural retrieval")
+	cmd.Flags().StringVar(&relationFilter, "relations", "", "Comma-separated edge relations to allow during graph traversal")
+	cmd.Flags().BoolVar(&jsonOut, "json", false, "Output the federated response as JSON")
+	cmd.Flags().BoolVar(&showMetrics, "metrics", false, "Print comparison metrics after results")
+	cmd.Flags().BoolVar(&recordMetrics, "record-metrics", false, "Persist comparison metrics under ~/.vela/retrieval-history")
+	return cmd
+}
+
 func queryCmd() *cobra.Command {
 	var graphFile string
 	cmd := &cobra.Command{
@@ -611,12 +721,157 @@ func queryCmd() *cobra.Command {
 	return cmd
 }
 
+func printSearchResponse(resp query.SearchResponse, showMetrics bool) {
+	writeSearchResponse(os.Stdout, resp, showMetrics)
+}
+
+func writeSearchResponse(w io.Writer, resp query.SearchResponse, showMetrics bool) {
+	if len(resp.Routing.RoutedRepos) > 0 {
+		fmt.Fprintln(w, "Routing")
+		for _, route := range resp.Routing.RoutedRepos {
+			line := fmt.Sprintf("  %s score=%.2f", route.Repo, route.Score)
+			if len(route.Reasons) > 0 {
+				line += " reasons=" + strings.Join(route.Reasons, ",")
+			}
+			fmt.Fprintln(w, line)
+		}
+		fmt.Fprintln(w)
+	}
+
+	if len(resp.Hits) == 0 {
+		fmt.Fprintln(w, "no results")
+	} else {
+		for i, hit := range resp.Hits {
+			fmt.Fprintf(w, "%d. [%s/%s] %s", i+1, hit.PrimaryLayer, hit.PrimarySource, hit.Label)
+			if hit.Kind != "" {
+				fmt.Fprintf(w, " (%s)", hit.Kind)
+			}
+			fmt.Fprintf(w, " score=%.2f\n", hit.Score)
+			if hit.Path != "" {
+				fmt.Fprintf(w, "   path: %s\n", hit.Path)
+			}
+			if len(hit.Layers) > 0 {
+				fmt.Fprintf(w, "   layers: %s\n", strings.Join(hit.Layers, ", "))
+			}
+			if hit.Snippet != "" {
+				fmt.Fprintf(w, "   %s\n", hit.Snippet)
+			}
+			if len(hit.Signals) > 1 {
+				fmt.Fprintf(w, "   signals: %s\n", strings.Join(sortedSignalNames(hit.Signals), ", "))
+			}
+			if len(hit.Provenance) > 0 {
+				fmt.Fprintf(w, "   evidence: %s\n", formatProvenance(hit.Provenance))
+			}
+			if hit.SupportGraph != nil {
+				fmt.Fprintf(w, "   support-graph: %d nodes, %d edges\n", len(hit.SupportGraph.Nodes), len(hit.SupportGraph.Edges))
+			}
+			if len(hit.Support) > 0 {
+				fmt.Fprintf(w, "   context: %s\n", hit.Support[0])
+			}
+		}
+	}
+
+	if !showMetrics {
+		return
+	}
+
+	m := resp.Metrics
+	fmt.Fprintln(w)
+	fmt.Fprintln(w, "Metrics")
+	fmt.Fprintf(w, "  Ancora-only: latency=%dms returned=%d distinct_kinds=%d\n", m.AncoraOnly.LatencyMs, m.AncoraOnly.Returned, m.AncoraOnly.DistinctKinds)
+	fmt.Fprintf(w, "  Federated:   latency=%dms returned=%d distinct_kinds=%d hybrid=%d\n", m.Federated.LatencyMs, m.Federated.Returned, m.Federated.DistinctKinds, m.Federated.HybridResults)
+	if len(m.Federated.SignalContribution) > 0 {
+		fmt.Fprintf(w, "  Signals:     %v\n", m.Federated.SignalContribution)
+	}
+	if m.VectorRuntime != nil {
+		fmt.Fprintf(w, "  Vector:      %s/%s via %s (%s, requested=%s, sqlite-vec=%t, dims=%d)\n", m.VectorRuntime.Provider, m.VectorRuntime.Model, m.VectorRuntime.SearchMode, m.VectorRuntime.IndexBackend, m.VectorRuntime.RequestedBackend, m.VectorRuntime.SQLiteVecEnabled, m.VectorRuntime.EmbeddingDims)
+		if m.VectorRuntime.SQLiteVecReason != "" {
+			fmt.Fprintf(w, "  Vec note:    %s\n", m.VectorRuntime.SQLiteVecReason)
+		}
+	}
+	fmt.Fprintf(w, "  Overlap@%d:  %d (%.2f)\n", m.Limit, m.Comparison.OverlapAtK, m.Comparison.OverlapRatio)
+	fmt.Fprintf(w, "  Added:       %d %v\n", m.Comparison.AddedByFederated, m.Comparison.AddedBySource)
+	fmt.Fprintf(w, "  Graph cost:  %dms\n", m.Comparison.GraphLatencyMs)
+}
+
+func formatProvenance(values []query.SearchProvenance) string {
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		part := value.Layer
+		if value.Signal != "" {
+			part += "/" + value.Signal
+		}
+		if value.Source != "" {
+			part += " via " + value.Source
+		}
+		if value.Repo != "" {
+			part += " repo=" + value.Repo
+		}
+		if len(value.Reasons) > 0 {
+			part += " reasons=" + strings.Join(value.Reasons, ",")
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, "; ")
+}
+
+func formatLayerSummary(nodes []types.Node) string {
+	counts := map[string]int{}
+	for _, node := range nodes {
+		layer := "repo"
+		if key := types.CanonicalKeyForNode(node); !key.IsZero() && key.Layer != "" {
+			layer = string(key.Layer)
+		} else if node.Source != nil && types.LayerOf(node.Source.Type) != "" {
+			layer = string(types.LayerOf(node.Source.Type))
+		}
+		counts[layer]++
+	}
+	order := []string{string(types.LayerRepo), string(types.LayerContract), string(types.LayerWorkspace), string(types.LayerMemory)}
+	parts := make([]string, 0, len(order))
+	for _, layer := range order {
+		if counts[layer] == 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s=%d", layer, counts[layer]))
+	}
+	return strings.Join(parts, ", ")
+}
+
+func sortedSignalNames(signals map[string]float64) []string {
+	names := make([]string, 0, len(signals))
+	for signal := range signals {
+		names = append(names, signal)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func splitCSV(input string) []string {
+	if strings.TrimSpace(input) == "" {
+		return nil
+	}
+	parts := strings.Split(input, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		values = append(values, part)
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	return values
+}
+
 // ---------------------------------------------------------------------------
 // vela serve
 // ---------------------------------------------------------------------------
 
 func serveCmd() *cobra.Command {
 	var graphFile string
+	var ancoraDB string
 	var port int
 	var httpMode bool
 
@@ -1049,4 +1304,17 @@ func filterEdgesBySourceFile(edges []types.Edge, reextracted map[string]bool) []
 		}
 	}
 	return out
+}
+
+func graphNodesContainProject(nodes []types.Node, src *types.Source) bool {
+	if src == nil {
+		return false
+	}
+	projectID := extract.ProjectNodeID(src.Name)
+	for _, node := range nodes {
+		if node.NodeType == string(types.NodeTypeProject) && node.ID == projectID {
+			return true
+		}
+	}
+	return false
 }

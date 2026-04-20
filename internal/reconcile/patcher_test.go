@@ -19,7 +19,7 @@ func TestPatcherApplyObservationLifecycle(t *testing.T) {
 	now := time.Now().UTC()
 
 	obs := types.ObservationNode{
-		ID:           "ancora:obs:7",
+		ID:           "memory:observation:7",
 		NodeType:     types.NodeTypeObservation,
 		AncoraID:     7,
 		Title:        "Initial title",
@@ -46,7 +46,7 @@ func TestPatcherApplyObservationLifecycle(t *testing.T) {
 	if len(g.ResolvedEdges) != 2 {
 		t.Fatalf("ResolvedEdges after add = %d, want 2", len(g.ResolvedEdges))
 	}
-	for _, nodeID := range []string{"memory:ancora", "ancora:workspace:vela", "ancora:visibility:work", "ancora:organization:glim", obs.ID} {
+	for _, nodeID := range []string{"memory:root:ancora", "memory:workspace:vela", "memory:visibility:work", "memory:organization:glim", obs.ID} {
 		if _, ok := g.NodeIndex[nodeID]; !ok {
 			t.Fatalf("expected node %q in graph", nodeID)
 		}
@@ -58,7 +58,7 @@ func TestPatcherApplyObservationLifecycle(t *testing.T) {
 	updated := obs
 	updated.Title = "Updated title"
 	updated.Content = "Updated content"
-	updated.References = []types.ObsReference{{Type: "observation", Target: "12"}}
+	updated.References = []types.ObsReference{{Type: "observation", Target: "ancora:obs:12"}}
 	updated.UpdatedAt = now.Add(time.Minute)
 
 	if err := p.Apply(ChangeSet{Updated: []types.ObservationNode{updated}}); err != nil {
@@ -67,7 +67,7 @@ func TestPatcherApplyObservationLifecycle(t *testing.T) {
 	if len(g.ResolvedEdges) != 1 {
 		t.Fatalf("ResolvedEdges after update = %d, want 1", len(g.ResolvedEdges))
 	}
-	if got := g.ResolvedEdges[0]; got.Relation != string(types.EdgeTypeRelatedTo) || got.Target != "12" {
+	if got := g.ResolvedEdges[0]; got.Relation != "related_to" || got.Target != "memory:observation:12" {
 		t.Fatalf("updated edge = %#v, want related_to observation edge", got)
 	}
 

@@ -9,10 +9,24 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Syfra3/vela/internal/export"
+	"github.com/Syfra3/vela/internal/retrieval"
 	"github.com/Syfra3/vela/pkg/types"
 )
 
+func withProjectStubEmbeddings(t *testing.T) {
+	t.Helper()
+	restore := retrieval.SetEmbedTextsForTesting(func(texts []string) ([][]float32, error) {
+		out := make([][]float32, 0, len(texts))
+		for range texts {
+			out = append(out, []float32{1, 0})
+		}
+		return out, nil
+	})
+	t.Cleanup(restore)
+}
+
 func TestLoadTrackedProjectsReadsProjectMetadata(t *testing.T) {
+	withProjectStubEmbeddings(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	graphPath := writeProjectsGraph(t, home)
@@ -36,6 +50,7 @@ func TestLoadTrackedProjectsReadsProjectMetadata(t *testing.T) {
 }
 
 func TestDeleteTrackedProjectsRemovesGraphNodesAndCacheEntries(t *testing.T) {
+	withProjectStubEmbeddings(t)
 	originalHome := os.Getenv("HOME")
 	t.Cleanup(func() {
 		_ = os.Setenv("HOME", originalHome)
@@ -130,6 +145,16 @@ func TestProjectsModelMarksAndStartsActions(t *testing.T) {
 	model = updated.(ProjectsModel)
 	if cmd == nil || !model.running {
 		t.Fatal("expected refresh command and running state")
+	}
+}
+
+func TestGraphContainsProject(t *testing.T) {
+	project := &types.Source{Type: types.SourceTypeCodebase, Name: "vela", Path: "/work/vela"}
+	if graphContainsProject(&types.Graph{Nodes: []types.Node{{ID: "memory:observation:1", NodeType: string(types.NodeTypeObservation)}}}, project) {
+		t.Fatal("expected memory-only graph to report project missing")
+	}
+	if !graphContainsProject(&types.Graph{Nodes: []types.Node{{ID: "project:vela", NodeType: string(types.NodeTypeProject), Source: project}}}, project) {
+		t.Fatal("expected graph to contain project source")
 	}
 }
 

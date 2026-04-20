@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,7 +10,21 @@ import (
 )
 
 func TestIntegrationChecks_AllStagesReported(t *testing.T) {
-	t.Parallel()
+	originalLLMHealthCheck := llmHealthCheck
+	originalCheckOllama := checkOllama
+	originalGetOllamaModels := getOllamaModels
+	originalCheckMCPInstalled := checkMCPInstalled
+	t.Cleanup(func() {
+		llmHealthCheck = originalLLMHealthCheck
+		checkOllama = originalCheckOllama
+		getOllamaModels = originalGetOllamaModels
+		checkMCPInstalled = originalCheckMCPInstalled
+	})
+
+	llmHealthCheck = func(ctx context.Context, cfg *types.LLMConfig) error { return nil }
+	checkOllama = func() (bool, bool, string, error) { return true, true, "/usr/bin/ollama", nil }
+	getOllamaModels = func() ([]string, error) { return []string{"llama3:latest", "nomic-embed-text:latest"}, nil }
+	checkMCPInstalled = func() bool { return true }
 
 	tmp := t.TempDir()
 	socketPath := filepath.Join(tmp, "ancora.sock")
@@ -38,6 +53,7 @@ func TestIntegrationChecks_AllStagesReported(t *testing.T) {
 	}
 
 	cfg := &types.Config{
+		LLM: types.LLMConfig{Provider: "local", Model: "llama3"},
 		Watch: types.WatchConfig{
 			Sources: []types.WatchSourceConfig{{Name: "ancora", Socket: socketPath}},
 		},
@@ -46,12 +62,68 @@ func TestIntegrationChecks_AllStagesReported(t *testing.T) {
 	}
 
 	steps := IntegrationChecks(cfg, graphPath)
-	if len(steps) != 4 {
-		t.Fatalf("steps = %d, want 4", len(steps))
+	if len(steps) != 6 {
+		t.Fatalf("steps = %d, want 6", len(steps))
 	}
 	for _, step := range steps {
 		if step.Status != StepOK {
 			t.Fatalf("step %q status = %s, want ok (%s)", step.Name, step.Status, step.Detail)
 		}
+	}
+}
+
+func TestIntegrationChecks_FailsWhenConfiguredLocalModelMissing(t *testing.T) {
+	originalLLMHealthCheck := llmHealthCheck
+	originalCheckOllama := checkOllama
+	originalGetOllamaModels := getOllamaModels
+	originalCheckMCPInstalled := checkMCPInstalled
+	t.Cleanup(func() {
+		llmHealthCheck = originalLLMHealthCheck
+		checkOllama = originalCheckOllama
+		getOllamaModels = originalGetOllamaModels
+		checkMCPInstalled = originalCheckMCPInstalled
+	})
+
+	llmHealthCheck = func(ctx context.Context, cfg *types.LLMConfig) error { return nil }
+	checkOllama = func() (bool, bool, string, error) { return true, true, "/usr/bin/ollama", nil }
+	getOllamaModels = func() ([]string, error) { return []string{"mistral:latest"}, nil }
+	checkMCPInstalled = func() bool { return false }
+
+	cfg := &types.Config{LLM: types.LLMConfig{Provider: "local", Model: "llama3"}}
+	steps := IntegrationChecks(cfg, filepath.Join(t.TempDir(), "missing-graph.json"))
+
+	if got := steps[2]; got.Name != "LLM runtime" || got.Status != StepFail {
+		t.Fatalf("LLM step = %+v, want fail", got)
+	}
+	if got := steps[4]; got.Name != "MCP registration" || got.Status != StepWarn {
+		t.Fatalf("MCP step = %+v, want warn", got)
+	}
+}
+
+func TestIntegrationChecks_FailsWhenEmbeddingModelMissing(t *testing.T) {
+	originalLLMHealthCheck := llmHealthCheck
+	originalCheckOllama := checkOllama
+	originalGetOllamaModels := getOllamaModels
+	originalCheckMCPInstalled := checkMCPInstalled
+	t.Cleanup(func() {
+		llmHealthCheck = originalLLMHealthCheck
+		checkOllama = originalCheckOllama
+		getOllamaModels = originalGetOllamaModels
+		checkMCPInstalled = originalCheckMCPInstalled
+	})
+
+	llmHealthCheck = func(ctx context.Context, cfg *types.LLMConfig) error { return nil }
+	checkOllama = func() (bool, bool, string, error) { return true, true, "/usr/bin/ollama", nil }
+	getOllamaModels = func() ([]string, error) { return []string{"llama3:latest"}, nil }
+	checkMCPInstalled = func() bool { return true }
+
+	cfg := &types.Config{LLM: types.LLMConfig{Provider: "local", Model: "llama3"}}
+	steps := IntegrationChecks(cfg, filepath.Join(t.TempDir(), "missing-graph.json"))
+
+	if got := steps[2]; got.Name != "LLM runtime" || got.Status != StepFail {
+		t.Fatalf("LLM step = %+v, want fail", got)
+	}
+	if got := steps[2].Detail; got != "Ollama embedding model \"nomic-embed-text\" is not available" {
+		t.Fatalf("LLM detail = %q", got)
 	}
 }

@@ -8,6 +8,13 @@ import (
 	"github.com/Syfra3/vela/pkg/types"
 )
 
+type edgeKey struct {
+	source   string
+	target   string
+	relation string
+	path     string
+}
+
 // Graph wraps a gonum directed graph with auxiliary indexes for fast lookup.
 type Graph struct {
 	Directed      *simple.DirectedGraph
@@ -35,6 +42,8 @@ func (n gonumNode) ID() int64 { return n.id }
 // stdlib/external symbols) are silently dropped — they add noise and break
 // Obsidian graph view by creating isolated satellite dots.
 func Build(nodes []types.Node, edges []types.Edge) (*Graph, error) {
+	nodes, edges = Canonicalize(nodes, edges)
+
 	g := &Graph{
 		Directed:  simple.NewDirectedGraph(),
 		NodeIndex: make(map[string]int64, len(nodes)),
@@ -103,6 +112,39 @@ func Build(nodes []types.Node, edges []types.Edge) (*Graph, error) {
 	}
 
 	return g, nil
+}
+
+// Canonicalize removes duplicate node IDs and duplicate/orphaned edges while
+// preserving the first occurrence order for stable graph exports.
+func Canonicalize(nodes []types.Node, edges []types.Edge) ([]types.Node, []types.Edge) {
+	seenNodes := make(map[string]bool, len(nodes))
+	canonicalNodes := make([]types.Node, 0, len(nodes))
+	for _, n := range nodes {
+		if n.ID == "" || seenNodes[n.ID] {
+			continue
+		}
+		seenNodes[n.ID] = true
+		canonicalNodes = append(canonicalNodes, n)
+	}
+
+	seenEdges := make(map[edgeKey]bool, len(edges))
+	canonicalEdges := make([]types.Edge, 0, len(edges))
+	for _, e := range edges {
+		if e.Source == "" || e.Target == "" {
+			continue
+		}
+		if !seenNodes[e.Source] {
+			continue
+		}
+		key := edgeKey{source: e.Source, target: e.Target, relation: e.Relation, path: e.SourceFile}
+		if seenEdges[key] {
+			continue
+		}
+		seenEdges[key] = true
+		canonicalEdges = append(canonicalEdges, e)
+	}
+
+	return canonicalNodes, canonicalEdges
 }
 
 // NodeCount returns the number of nodes in the graph.

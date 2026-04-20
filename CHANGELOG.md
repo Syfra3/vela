@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.4.1](https://github.com/Syfra3/vela/compare/v1.4.0...v1.4.1) (2026-04-20)
+
+
+### Bug Fixes
+
+* use platform-specific lockFile/unlockFile in lock.go ([162e8d7](https://github.com/Syfra3/vela/commit/162e8d7109a7509984500af79bea126b4b847881))
+
+## [1.4.0](https://github.com/Syfra3/vela/compare/v1.3.1...v1.4.0) (2026-04-20)
+
+
+### Features
+
+* **architecture:** add full architecture retrieval workflow ([#18](https://github.com/Syfra3/vela/issues/18)) ([b42d08d](https://github.com/Syfra3/vela/commit/b42d08d83dcd6e41bf437fdcf2d8d64221f19fef))
+
 ## [1.3.1](https://github.com/Syfra3/vela/compare/v1.3.0...v1.3.1) (2026-04-18)
 
 

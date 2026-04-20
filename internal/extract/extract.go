@@ -51,8 +51,11 @@ func ExtractAll(
 		src = DetectProject(root)
 	}
 
-	// Project root node — one per extraction run.
+	// Project root node — one per extraction run. Stamp with repo-layer
+	// project evidence so downstream consumers can attribute routing and
+	// retrieval hits back to the repo rather than a specific artifact.
 	projectNode := CreateProjectNode(src)
+	stampRepoNode(&projectNode, EvidenceTypeProject, types.ConfidenceDeclared, src.Path)
 
 	var allNodes []types.Node
 	var allEdges []types.Edge
@@ -71,7 +74,8 @@ func ExtractAll(
 		case codeExtensions[ext]:
 			n, e, err := extractCode(path, rel)
 			if err != nil {
-				log.Printf("[debug] skipping %s: %v", rel, err)
+				// Individual parse failures should not spam the product UI when a
+				// directory contains fixture or intentionally invalid source files.
 				continue
 			}
 			rawNodes, rawEdges = n, e
@@ -101,6 +105,8 @@ func ExtractAll(
 			continue
 		}
 
+		evType, evConfidence := evidenceForExt(ext)
+
 		// Emit file node once per file.
 		if !emittedFiles[rel] {
 			emittedFiles[rel] = true
@@ -111,28 +117,34 @@ func ExtractAll(
 				SourceFile: rel,
 				Source:     src,
 			}
+			stampRepoNode(&fileNode, EvidenceTypeFilesystem, types.ConfidenceDeclared, rel)
 			allNodes = append(allNodes, fileNode)
 			// project → file
-			allEdges = append(allEdges, types.Edge{
+			containsEdge := types.Edge{
 				Source:   projectNode.ID,
 				Target:   fileNode.ID,
 				Relation: "contains",
-			})
+			}
+			stampRepoEdge(&containsEdge, EvidenceTypeFilesystem, types.ConfidenceDeclared, rel)
+			allEdges = append(allEdges, containsEdge)
 		}
 
-		// Prefix all node IDs and stamp Source.
+		// Prefix all node IDs and stamp Source + evidence metadata.
 		prefixed := make([]types.Node, 0, len(rawNodes))
 		for _, n := range rawNodes {
 			n.ID = prefixID(src.Name, n.ID)
 			n.Source = src
+			stampRepoNode(&n, evType, evConfidence, rel)
 			prefixed = append(prefixed, n)
 			// file → symbol
-			allEdges = append(allEdges, types.Edge{
+			fileContains := types.Edge{
 				Source:     fileNodeID(src.Name, rel),
 				Target:     n.ID,
 				Relation:   "contains",
 				SourceFile: rel,
-			})
+			}
+			stampRepoEdge(&fileContains, EvidenceTypeFilesystem, types.ConfidenceDeclared, rel)
+			allEdges = append(allEdges, fileContains)
 		}
 		allNodes = append(allNodes, prefixed...)
 
@@ -142,6 +154,7 @@ func ExtractAll(
 		for _, e := range rawEdges {
 			e.Source = prefixID(src.Name, e.Source)
 			// Target stays as bare callee label — Build() resolves via labelIndex.
+			stampRepoEdge(&e, evType, evConfidence, rel)
 			allEdges = append(allEdges, e)
 		}
 	}

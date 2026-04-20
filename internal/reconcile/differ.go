@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	igraph "github.com/Syfra3/vela/internal/graph"
 	"github.com/Syfra3/vela/internal/listener"
 	"github.com/Syfra3/vela/pkg/types"
 )
@@ -82,7 +83,7 @@ func parseObservationNode(ev listener.Event) (types.ObservationNode, error) {
 	}
 
 	return types.ObservationNode{
-		ID:           fmt.Sprintf("ancora:obs:%d", payload.ID),
+		ID:           igraph.MemoryObservationID(payload.ID),
 		NodeType:     types.NodeTypeObservation,
 		AncoraID:     payload.ID,
 		Title:        payload.Title,

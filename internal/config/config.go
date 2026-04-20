@@ -24,6 +24,13 @@ func defaults() *types.Config {
 			Timeout:        60 * time.Second,
 			MaxChunkTokens: 8000,
 		},
+		Embedding: types.EmbeddingConfig{
+			Provider:      "ollama",
+			Model:         "nomic-embed-text",
+			Endpoint:      "http://localhost:11434",
+			Timeout:       60 * time.Second,
+			VectorBackend: "sqlite-cosine",
+		},
 		Extraction: types.ExtractionConfig{
 			CodeLanguages: []string{"go", "python", "typescript", "rust", "java"},
 			IncludeDocs:   true,

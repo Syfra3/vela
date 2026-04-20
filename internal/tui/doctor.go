@@ -93,7 +93,7 @@ func (m DoctorModel) ViewContent() string {
 		Foreground(lipgloss.Color("196"))
 
 	if m.checking {
-		b.WriteString(textStyle.Render("Checking LLM providers..."))
+		b.WriteString(textStyle.Render("Checking configured provider and integrations..."))
 		b.WriteString("\n\n")
 	}
 
@@ -146,49 +146,30 @@ func (m DoctorModel) runHealthCheck() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		// Check all providers
-		providers := []string{"local", "anthropic", "openai"}
-		results := make(chan healthCheckMsg, len(providers))
-
-		for _, p := range providers {
-			go func(provider string) {
-				cfg := &types.LLMConfig{
-					Provider: provider,
-					Timeout:  10 * time.Second,
-				}
-
-				// Copy settings from main config if available
-				if m.cfg != nil {
-					if provider == "local" {
-						cfg.Endpoint = m.cfg.LLM.Endpoint
-						cfg.Model = m.cfg.LLM.Model
-					} else {
-						cfg.APIKey = m.cfg.LLM.APIKey
-					}
-				}
-
-				client, err := llm.NewClient(cfg)
-				if err != nil {
-					results <- healthCheckMsg{provider: provider, ok: false, err: err}
-					return
-				}
-
-				err = client.Health(ctx)
-				results <- healthCheckMsg{provider: provider, ok: err == nil, err: err}
-			}(p)
-		}
-
-		collected := make([]healthCheckMsg, 0, len(providers))
-		for range providers {
-			select {
-			case result := <-results:
-				collected = append(collected, result)
-			case <-ctx.Done():
-				collected = append(collected, healthCheckMsg{provider: "unknown", ok: false, err: ctx.Err()})
-				return doctorReportMsg{llmResults: collected, integrationChecks: vdoctor.IntegrationChecks(m.cfg, "")}
+		llmCfg := types.LLMConfig{Provider: "local", Timeout: 10 * time.Second}
+		if m.cfg != nil {
+			llmCfg = m.cfg.LLM
+			if llmCfg.Timeout == 0 {
+				llmCfg.Timeout = 10 * time.Second
 			}
 		}
 
-		return doctorReportMsg{llmResults: collected, integrationChecks: vdoctor.IntegrationChecks(m.cfg, "")}
+		client, err := llm.NewClient(&llmCfg)
+		result := healthCheckMsg{provider: llmCfg.Provider}
+		if err != nil {
+			result.ok = false
+			result.err = err
+			return doctorReportMsg{llmResults: []healthCheckMsg{result}, integrationChecks: vdoctor.IntegrationChecks(m.cfg, "")}
+		}
+
+		result.provider = client.Provider()
+		if err := client.Health(ctx); err != nil {
+			result.ok = false
+			result.err = err
+		} else {
+			result.ok = true
+		}
+
+		return doctorReportMsg{llmResults: []healthCheckMsg{result}, integrationChecks: vdoctor.IntegrationChecks(m.cfg, "")}
 	}
 }

@@ -1,321 +1,156 @@
-# PRD: Vela — Knowledge Explorer & Graph Builder
+# PRD: Vela Full Local-First Retrieval Architecture
 
-**Project**: Vela  
-**Repo**: github.com/Syfra3/vela  
-**Author**: G33N / Syfra3  
-**Date**: 2026-04-12  
-**Status**: Draft  
+**Project**: Vela
+**Repo**: github.com/Syfra3/vela
+**Branch**: `feature/ralph-full-architecture-workflow`
+**Status**: Draft
+**Primary User**: Local solo developer
 
----
+## Problem
 
-## 1. Problem Statement
+Vela needs to move from repo-local graph tooling into a full local-first retrieval system that can answer architectural questions across repositories, workspaces, contracts, and durable memory without collapsing everything into one noisy graph.
 
-Modern software engineering increasingly relies on multi-repo microservice architectures. These systems suffer from a fundamental knowledge problem:
+The current architecture direction is already defined in `syfra/VELA_ARCHITECTURE.md`, but the implementation workflow is not yet encoded as a practical, testable Ralph execution plan.
 
-- **No one knows what depends on what.** Dependencies between services live in runtime behaviour, not documentation.
-- **Documentation rots.** README files, architecture diagrams, and ADRs fall out of sync with the code.
-- **Onboarding takes months.** New engineers spend weeks just mapping the system before they can contribute.
-- **Breaking changes are invisible.** There is no automated way to ask "if I change this interface, what services break?"
-- **Existing tools require cloud or Python.** Tools like Graphify (Python) work well but require a Python runtime and send documentation content to cloud LLMs, which is unacceptable for private or enterprise codebases.
+## Users
 
----
+### Primary User
 
-## 2. Solution
+- local solo developer building and validating Vela on one machine
 
-**Vela** is a Go-native, privacy-first knowledge graph builder for codebases and technical documentation.
+### Secondary Users
 
-Vela automatically extracts concepts, relationships, and dependencies from code, markdown, PDFs, and configuration files across multiple repositories, and builds a queryable knowledge graph that can be explored interactively via a Bubbletea TUI or exported to JSON/HTML/Obsidian.
+- developer exploring a large monolith through subsystem routing
+- developer exploring several related repos through workspace routing
+- maintainer validating installation, setup, doctor checks, and retrieval correctness
 
-### Core Insight
-- **Code extraction is 100% local.** Tree-sitter AST parsing runs entirely on-device with no LLM calls. Zero cost, zero latency, zero privacy risk.
-- **Document extraction uses a pluggable LLM.** Markdown/PDF/comment extraction uses an LLM for Named Entity Recognition and Relationship Extraction — but the provider is configurable: local (Ollama, llama.cpp) or remote (Claude, GPT-4o).
-- **Clustering is Go + Python.** Graph construction and analysis run in Go (gonum). Community detection uses Leiden (graspologic via Python subprocess) — the best clustering algorithm, called only once at the end.
-- **Single binary.** Unlike Graphify, Vela ships as a single Go binary. No Python runtime required by the end user.
+## Goals
 
----
+- Implement the full layered architecture, not a reduced phase-only subset.
+- Keep the core local-first and usable without cloud services.
+- Preserve SQLite as the correctness-path baseline for indexing and retrieval.
+- Support repo-local deep retrieval, workspace routing, contract truth, and memory-aware fusion.
+- Add install validation, doctor validation, and an Ancora-like setup wizard.
+- Make retrieval explainable with provenance and evidence-aware ranking.
+- Encode the implementation into a Ralph workflow that can be run story by story.
 
-## 3. Target Users
+## Non-Goals
 
-| User | Pain | How Vela Helps |
-|------|------|----------------|
-| **Platform Engineer** | No map of 30+ microservices and their dependencies | `vela extract ./repos --directed` → visual graph of all service dependencies |
-| **New Developer** | 3-month onboarding to understand system architecture | `GRAPH_REPORT.md` shows god nodes, communities, and entry points in minutes |
-| **Tech Lead** | Can't assess the blast radius of a refactor | `vela query path "UserSchema" "PaymentController"` → exact dependency chain |
-| **Security Engineer** | Unknown data flows between services | Graph shows all service-to-service data flows extracted from docs + code |
-| **DevOps / SRE** | Architecture docs 6 months out of date | `vela extract --watch` auto-updates graph as code changes |
+- Replacing the SQLite baseline with a mandatory remote service
+- Building one giant unified symbol graph across all repos
+- Mixing memory observations directly into repo code graphs
+- Treating derived workspace edges as contract truth
+- Shipping an architecture that cannot be validated through tests, CLI flows, TUI flows, and install verification
 
----
+## Scope
 
-## 4. Architecture
+This PRD includes all major architecture components described in `VELA_ARCHITECTURE.md`:
 
-### Hybrid: Go Core + Python Subprocess
+- Repo Graph and repo-local indexes
+- Contract Graph
+- Workspace Graph
+- Memory Graph
+- Identity Resolver
+- Memory Reference Binder
+- Evidence Model
+- Retrieval Orchestrator
+- CLI commands
+- TUI validation surfaces
+- doctor and installation verification
+- setup wizard
+- Ralph workflow assets in `workflows/ralph/`
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                     Vela CLI / TUI                       │
-│                      (Go / Cobra)                        │
-└────────────────────────┬────────────────────────────────┘
-                         │
-         ┌───────────────┼───────────────┐
-         ▼               ▼               ▼
-   ┌───────────┐  ┌────────────┐  ┌──────────────┐
-   │  Detect   │  │  Extract   │  │    Export    │
-   │ (Go/fs)   │  │ (Go+LLM)  │  │  (Go/JSON    │
-   └───────────┘  └─────┬──────┘  │   HTML/Obs)  │
-                        │         └──────────────┘
-              ┌─────────┴──────────┐
-              ▼                    ▼
-        ┌──────────┐        ┌────────────┐
-        │   Code   │        │    Docs    │
-        │ (Tree-   │        │   (LLM     │
-        │ sitter)  │        │  Provider) │
-        └──────────┘        └─────┬──────┘
-                                  │
-                    ┌─────────────┼──────────────┐
-                    ▼             ▼               ▼
-             ┌──────────┐ ┌────────────┐ ┌────────────┐
-             │  Local   │ │ Anthropic  │ │   OpenAI   │
-             │ (Ollama/ │ │  (Claude)  │ │  (GPT-4o)  │
-             │ llama.cpp│ └────────────┘ └────────────┘
-             └──────────┘
-                         │
-                         ▼
-              ┌─────────────────────┐
-              │   Graph (gonum)     │
-              │   Build + Analyze   │
-              └──────────┬──────────┘
-                         │
-                         ▼
-              ┌─────────────────────┐
-              │ Leiden Clustering   │
-              │ (Python subprocess  │
-              │  graspologic)       │
-              └──────────┬──────────┘
-                         │
-                         ▼
-              ┌─────────────────────┐
-              │  Bubbletea TUI      │
-              │  (Progress / Query) │
-              └─────────────────────┘
-```
+## Success Criteria
 
-### Directory Structure
+- `go test ./...` passes for the implemented feature set.
+- extraction, search, path, explain, query, doctor, and related CLI flows pass smoke validation.
+- doctor checks validate graph health, local dependencies, memory integration, and install readiness.
+- the TUI doctor/setup flow can be validated interactively by a local terminal user.
+- installation verification succeeds on a fresh local setup path.
+- the setup wizard behaves like Ancora in spirit: guided, local-first, and able to verify readiness instead of only writing config.
+- retrieval validation demonstrates route-first, retrieve-deeply-second behavior across memory, workspace, contract, and repo layers.
+- workflow docs and Ralph assets are present, consistent, and runnable.
 
-```
-vela/
-├── cmd/vela/main.go              # CLI entry point
-├── internal/
-│   ├── detect/detect.go          # File collection + .velignore
-│   ├── extract/
-│   │   ├── extract.go            # Dispatcher (code vs doc)
-│   │   ├── code.go               # Tree-sitter AST extraction
-│   │   ├── doc.go                # LLM-based doc/PDF extraction
-│   │   └── schema.go             # Extraction result types
-│   ├── graph/
-│   │   ├── build.go              # Graph construction (gonum)
-│   │   ├── cluster.go            # Leiden wrapper (Python subprocess)
-│   │   ├── analyze.go            # God nodes + surprises + questions
-│   │   └── types.go              # Graph node/edge types
-│   ├── llm/
-│   │   ├── client.go             # Provider dispatcher
-│   │   ├── local.go              # Ollama / llama.cpp
-│   │   ├── anthropic.go          # Claude
-│   │   └── openai.go             # GPT-4o (OpenAI-compatible)
-│   ├── tui/
-│   │   ├── app.go                # Bubbletea model
-│   │   ├── progress.go           # Progress renderer (%, ETA, file)
-│   │   └── styles.go             # Lipgloss styles
-│   ├── report/report.go          # GRAPH_REPORT.md generation
-│   ├── export/
-│   │   ├── json.go               # graph.json
-│   │   ├── html.go               # Interactive vis.js HTML
-│   │   └── obsidian.go           # Obsidian vault
-│   ├── cache/cache.go            # SHA256 incremental cache
-│   └── security/security.go      # Input validation
-├── pkg/types/types.go            # Shared types + interfaces
-└── go.mod
-```
+## Major Components
 
----
+### Repo Graph
 
-## 5. Features
+- per-repo extraction boundary
+- repo-local lexical and vector retrieval
+- deep code retrieval with bounded updates and explainable provenance
 
-### Phase 0 — PoC (must have before anything else)
-| Feature | Description |
-|---------|-------------|
-| File detection | Walk directory, filter by extension, respect `.velignore` |
-| Go AST extraction | Tree-sitter parses Go files → functions, structs, interfaces, calls |
-| Basic graph | gonum graph from extracted nodes/edges |
-| JSON export | Output `vela-out/graph.json` |
-| CLI | `vela extract <path>` command via Cobra |
+### Contract Graph
 
-**Success gate**: `vela extract .` on the Vela repo itself produces a valid `graph.json`.
+- declared service and interface truth from artifacts such as OpenAPI, proto, manifests, and config
+- separate from repo code truth and workspace routing truth
 
-### Phase 1 — Core Extraction
-| Feature | Description |
-|---------|-------------|
-| Multi-language AST | Add Python, TypeScript, JavaScript, Java, Rust |
-| LLM doc extraction | Markdown, `.txt`, inline comments with LLM provider |
-| PDF extraction | ledongthuc/pdf → text → LLM extraction |
-| LLM providers | local (Ollama/llama.cpp), anthropic (Claude), openai (GPT-4o) |
-| JSON Schema enforcement | Force structured output from local models (GBNF grammar) |
-| Document chunking | Split large docs for local models with limited context |
-| SHA256 caching | Skip unchanged files on re-runs |
-| Input validation | Path containment, label sanitization |
+### Workspace Graph
 
-### Phase 2 — Analysis & Exports
-| Feature | Description |
-|---------|-------------|
-| Leiden clustering | Python subprocess → graspologic → community assignments |
-| God nodes | Highest-degree concepts in the graph |
-| Surprise edges | High-scoring cross-file/cross-domain connections |
-| Suggested questions | 4-5 questions the graph is uniquely positioned to answer |
-| GRAPH_REPORT.md | Human-readable summary report |
-| HTML export | Interactive vis.js visualization (`graph.html`) |
-| Obsidian export | Vault with wikilinks matching graph structure |
+- lightweight routing graph over repos, services, domains, packages, and dependencies
+- used to decide where to search next
 
-### Phase 3 — Bubbletea TUI
-| Feature | Description |
-|---------|-------------|
-| Real-time progress | File name, chunks processed/total, %, elapsed, ETA |
-| Worker pool | Configurable concurrent LLM requests (1-N, respects local hardware) |
-| Provider health check | Shows LLM provider status before starting extraction |
-| Interactive query | Query the graph from TUI: `path`, `query`, `explain` |
-| Community explorer | Browse communities and god nodes interactively |
+### Memory Graph
 
-### Phase 4 — Advanced (Future)
-| Feature | Description |
-|---------|-------------|
-| `--watch` mode | fsnotify-based auto-update as files change |
-| `--update` mode | Incremental re-extraction (changed files only) |
-| MCP server | `vela serve graph.json` — structured graph access via MCP protocol |
-| Neo4j export | `--neo4j-push bolt://localhost:7687` |
-| Git hooks | `vela hook install` — rebuild graph on commit/branch switch |
-| Ancora integration | `vela extract → graph nodes linked to Ancora observations` |
+- structured layer over Ancora-backed observations, decisions, bugs, preferences, and sessions
+- linked to code entities by reference rather than duplication
 
----
+### Identity Resolver
 
-## 6. LLM Provider Strategy
+- produces canonical keys for cross-graph joins
+- prevents each layer from inventing identity independently
 
-### Why pluggable?
+### Memory Reference Binder
 
-The extraction quality vs. cost/privacy tradeoff is different for every user:
+- keeps memory references live as code moves
+- marks references as current, redirected, stale, or ambiguous
 
-| Provider | Quality | Cost | Privacy | Best For |
-|----------|---------|------|---------|----------|
-| **local (Ollama)** | Good (8B models) | Free | 100% local | Private codebases, cost-sensitive |
-| **local (llama.cpp)** | Good | Free | 100% local | Offline, custom models |
-| **anthropic (Claude)** | Excellent | $$$ | Cloud | Best quality, non-sensitive docs |
-| **openai (GPT-4o)** | Excellent | $$$ | Cloud | Best quality, OpenAI-compatible APIs |
+### Evidence Model
 
-### Local LLM Engineering Constraints
+- typed evidence across all graph edges and entities
+- supports confidence, provenance, and ranking policy
 
-When using local models, Vela must handle:
-1. **JSON Schema enforcement** — GBNF grammar forces structured output at token level (no freeform text)
-2. **Document chunking** — Split docs into 8k-token chunks for models with limited context windows
-3. **Worker pool** — 1-2 concurrent requests (local hardware bottleneck), shown in TUI
-4. **Few-shot prompting** — Optimized system prompt for 8B models to extract implicit relationships
+### Retrieval Orchestrator
 
----
+- classifies query scope
+- routes through memory, contract, workspace, and repo layers
+- fuses evidence into explainable answers
 
-## 7. TUI Progress Requirements
+### Local Validation Surfaces
 
-The TUI is critical for user confidence during long extraction runs. Users MUST be able to:
+- CLI commands in `cmd/vela`
+- TUI flows in `internal/tui`
+- doctor checks in `internal/doctor`
+- setup wizard in `internal/setup`
 
-1. **See what is being processed**: current file name (truncated to fit)
-2. **See completion**: `chunks processed / total chunks` + percentage bar
-3. **Estimate duration**: elapsed time + ETA in `Xm Ys` format
-4. **Know the LLM provider**: name + health status (`ready` / `offline`)
-5. **NOT kill the process**: confidence that it's running, not stuck
+## Validation
 
-The progress state is driven by `types.ExtractionProgress` which tracks files, chunks, and time. The `EstimatedRemainingSeconds()` method gives real-time ETA from the current processing rate.
+- unit and integration coverage for graph, retrieval, query, doctor, setup, TUI, extraction, and Ancora-backed memory flows
+- CLI smoke validation for extraction and query-oriented commands
+- TUI walkthrough validation for doctor/setup flows
+- installation verification on a clean local path
+- retrieval benchmark or scenario validation using architecture-shaped questions and routing expectations
+- docs validation for workflow usage and local setup
 
----
+## Risks
 
-## 8. Configuration
+- the scope is large and can drift if stories are too fine-grained or poorly ordered
+- canonical identity and rebinding can become brittle if evidence is underspecified
+- retrieval can look structurally correct while still failing real query quality checks
+- doctor and wizard flows can lie if they validate config presence instead of real runtime behavior
+- optional accelerator support can accidentally fork the logical model if fallback parity is not enforced
 
-`~/.vela/config.yaml`:
-```yaml
-llm:
-  provider: "local"        # local | anthropic | openai
-  model: "llama3"          # depends on provider
-  endpoint: "http://localhost:11434"  # for local providers
-  api_key: ""              # for remote providers
-  timeout: 60s
-  max_chunk_tokens: 8000
+## Ralph Workflow
 
-extraction:
-  code_languages: ["go", "python", "typescript", "rust", "java"]
-  include_docs: true
-  include_images: false    # requires vision model
-  chunk_size: 8000
-  cache_dir: "~/.vela/cache"
+The implementation is tracked in `workflows/ralph/prd.json` as 12 substantial stories grouped around architectural boundaries instead of dozens of tiny tasks.
 
-ui:
-  theme: "dark"
-  show_progress: true
-  enable_colors: true
-```
+Maintainer-facing workflow and validation guidance lives in `docs/RALPH_WORKFLOW.md`.
 
-Also: `.velignore` file (same syntax as `.gitignore`) for excluding paths.
-
----
-
-## 9. CLI Interface
+Run the loop with:
 
 ```bash
-# Core
-vela extract <path>                     # extract graph from folder
-vela extract <path> --directed          # preserve edge direction
-vela extract <path> --no-viz            # skip HTML, JSON only
-vela extract <path> --provider local    # override LLM provider
-vela extract <path> --model llama3      # override model
-
-# Query (Phase 2+)
-vela query "what connects auth to payments?"
-vela path "UserSchema" "PaymentController"
-vela explain "AuthService"
-
-# Config
-vela config init                        # create ~/.vela/config.yaml
-vela doctor                             # check LLM provider health
-
-# Advanced (Phase 4)
-vela extract <path> --watch             # auto-update on file changes
-vela extract <path> --update            # incremental update
-vela serve vela-out/graph.json          # start MCP server
-vela hook install                       # install git hooks
+./workflows/ralph/ralph.sh --status
+./workflows/ralph/ralph.sh
+./workflows/ralph/ralph.sh --all
 ```
 
----
-
-## 10. Success Metrics
-
-| Phase | Success Criteria |
-|-------|-----------------|
-| Phase 0 | `vela extract .` on Vela repo produces valid `graph.json` with nodes and edges |
-| Phase 1 | Extract Go + TypeScript + Python + docs from a 5-repo microservice demo. LLM providers switchable via config. |
-| Phase 2 | `GRAPH_REPORT.md` shows correct god nodes and community structure. HTML graph opens in browser. |
-| Phase 3 | TUI shows real-time progress on a 50-file corpus without UX freezes. ETA within 20% accuracy. |
-| Phase 4 | `--watch` detects file changes and updates graph within 5 seconds (code files, AST-only path). |
-
----
-
-## 11. Non-Goals (Explicit)
-
-- **Ancora integration** — deferred, not in scope for Phases 0-3
-- **Video/audio transcription** — deferred (cgo complexity), Phase 4+
-- **Managed cloud service** — Vela is a CLI tool, not SaaS
-- **Replace Graphify** — Vela is inspired by Graphify but not a drop-in replacement
-
----
-
-## 12. Risks
-
-| Risk | Mitigation |
-|------|-----------|
-| Louvain vs Leiden quality gap | Using Python graspologic (Leiden) directly. No quality gap. |
-| Local LLM extraction quality on 8B models | Few-shot prompts + GBNF JSON schema enforcement + tested on real corpora |
-| go-tree-sitter bindings incomplete | Fallback: subprocess to Python tree-sitter for missing languages |
-| Large graph performance (gonum) | Benchmark in Phase 0 on real corpus. gonum is compiled, expected fast. |
-| Python subprocess reliability | Isolate to single `cluster.go` module. Wrap with clear error handling. |
+The loop reads `prd.json`, picks the next pending story, launches the configured coding agent, and appends progress to `progress.txt`. Use `docs/RALPH_WORKFLOW.md` as the source of truth for setup expectations, validation coverage, and architecture-shaped benchmark scenarios.

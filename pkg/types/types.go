@@ -269,6 +269,16 @@ type LLMConfig struct {
 	MaxChunkTokens int           `yaml:"max_chunk_tokens"`
 }
 
+// EmbeddingConfig holds configuration for local embedding generation.
+type EmbeddingConfig struct {
+	Provider      string        `yaml:"provider"` // ollama
+	Model         string        `yaml:"model"`
+	Endpoint      string        `yaml:"endpoint"`
+	Timeout       time.Duration `yaml:"timeout"`
+	VectorBackend string        `yaml:"vector_backend"`  // sqlite-cosine, sqlite-vec
+	SQLiteVecPath string        `yaml:"sqlite_vec_path"` // optional extension path
+}
+
 // ExtractionConfig holds configuration for extraction behavior
 type ExtractionConfig struct {
 	CodeLanguages []string `yaml:"code_languages"`
@@ -307,6 +317,7 @@ type GraphConfig struct {
 // Config is the global configuration for Vela
 type Config struct {
 	LLM        LLMConfig        `yaml:"llm"`
+	Embedding  EmbeddingConfig  `yaml:"embedding"`
 	Extraction ExtractionConfig `yaml:"extraction"`
 	UI         UIConfig         `yaml:"ui"`
 	Watch      WatchConfig      `yaml:"watch"`

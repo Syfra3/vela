@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 )
 
-// GraphLock holds an exclusive advisory flock on ~/.vela/graph.lock so the
+// GraphLock holds an exclusive advisory lock on ~/.vela/graph.lock so the
 // daemon and vela extract cannot write graph.json concurrently.
 type GraphLock struct {
 	f *os.File
