@@ -182,10 +182,10 @@ func ExtractContract(root string, files []string, src *types.Source) ([]types.No
 // intentionally ignored — contract-layer granularity is service / endpoint.
 
 type openAPIDoc struct {
-	OpenAPI string                                   `yaml:"openapi" json:"openapi"`
-	Swagger string                                   `yaml:"swagger" json:"swagger"`
-	Info    struct{ Title string }                   `yaml:"info" json:"info"`
-	Paths   map[string]map[string]map[string]any     `yaml:"paths" json:"paths"`
+	OpenAPI string                               `yaml:"openapi" json:"openapi"`
+	Swagger string                               `yaml:"swagger" json:"swagger"`
+	Info    struct{ Title string }               `yaml:"info" json:"info"`
+	Paths   map[string]map[string]map[string]any `yaml:"paths" json:"paths"`
 }
 
 var httpMethods = map[string]bool{

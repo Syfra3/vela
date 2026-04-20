@@ -20,13 +20,13 @@ func writeFile(t *testing.T, dir, name, body string) string {
 
 func TestIsContractFile(t *testing.T) {
 	cases := map[string]bool{
-		"foo.proto":         true,
-		"openapi.yaml":      true,
-		"svc.openapi.json":  true,
-		"swagger.yml":       true,
-		"random.yaml":       false,
-		"main.go":           false,
-		"README.md":         false,
+		"foo.proto":        true,
+		"openapi.yaml":     true,
+		"svc.openapi.json": true,
+		"swagger.yml":      true,
+		"random.yaml":      false,
+		"main.go":          false,
+		"README.md":        false,
 	}
 	for path, want := range cases {
 		if got := IsContractFile(path); got != want {

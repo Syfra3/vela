@@ -1,9 +1,9 @@
 package tui
 
 import (
+	vdoctor "github.com/Syfra3/vela/internal/doctor"
 	"strings"
 	"testing"
-	vdoctor "github.com/Syfra3/vela/internal/doctor"
 )
 
 func TestNewDoctorModelShowsLoadingImmediately(t *testing.T) {

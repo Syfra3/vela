@@ -4,15 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/Syfra3/vela/internal/config"
+	"github.com/Syfra3/vela/internal/llm"
+	"github.com/Syfra3/vela/internal/setup"
+	"github.com/Syfra3/vela/pkg/types"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
-	"github.com/Syfra3/vela/internal/config"
-	"github.com/Syfra3/vela/internal/llm"
-	"github.com/Syfra3/vela/internal/setup"
-	"github.com/Syfra3/vela/pkg/types"
 )
 
 var llmHealthCheck = func(ctx context.Context, cfg *types.LLMConfig) error {
