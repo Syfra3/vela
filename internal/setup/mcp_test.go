@@ -71,6 +71,44 @@ func TestCheckMCPNotInstalled(t *testing.T) {
 	}
 }
 
+func TestCheckMCPInstalledDetectsClaudeCodeConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	originalHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", originalHome)
+
+	configPath := filepath.Join(tmpDir, ".claude", "mcp", "vela.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{"command":"vela","args":["serve"]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if !CheckMCPInstalled() {
+		t.Fatal("expected Claude Code MCP config to be detected")
+	}
+}
+
+func TestCheckMCPInstalledRejectsMalformedClaudeCodeConfig(t *testing.T) {
+	tmpDir := t.TempDir()
+	originalHome := os.Getenv("HOME")
+	os.Setenv("HOME", tmpDir)
+	defer os.Setenv("HOME", originalHome)
+
+	configPath := filepath.Join(tmpDir, ".claude", "mcp", "vela.json")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte(`{"command":"vela"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if CheckMCPInstalled() {
+		t.Fatal("expected malformed Claude Code MCP config to be rejected")
+	}
+}
+
 func TestUninstallMCPRemovesVelaEntries(t *testing.T) {
 	tmpDir := t.TempDir()
 	originalHome := os.Getenv("HOME")

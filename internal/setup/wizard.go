@@ -30,25 +30,31 @@ var wizardCheckLLMHealth = func(ctx context.Context, cfg *types.LLMConfig) error
 }
 
 var wizardCheckMCPInstalled = CheckMCPInstalled
+var wizardCheckVelaMCPForTarget = CheckVelaMCPInstalledForTarget
+var wizardCheckAncoraMCPForTarget = CheckAncoraMCPInstalledForTarget
 var wizardCheckOllama = CheckOllama
 var wizardGetOllamaModels = GetOllamaModels
 var wizardLookPath = exec.LookPath
 var wizardEnableObsidianAutoSync = enableObsidianAutoSync
 var wizardEnsureDaemonRunning = ensureDaemonRunning
+var wizardSaveIntegrationState = SaveIntegrationState
+var wizardLoadIntegrationState = LoadIntegrationState
 
 // Step-by-step linear wizard flow:
 // 1. Check system requirements
-// 2. Choose local vs remote LLM
-// 3. Configure local (install Ollama + model) OR configure remote (API keys)
-// 4. Configure MCP
-// 5. Validate installation
-// 6. Finish
+// 2. Choose integration mode
+// 3. Choose local vs remote LLM (for Vela-enabled modes)
+// 4. Configure local (install Ollama + model) OR configure remote (API keys)
+// 5. Configure MCP (Vela-only mode)
+// 6. Validate installation
+// 7. Finish
 
 type WizardStep int
 
 const (
 	StepWelcome WizardStep = iota
 	StepSystemCheck
+	StepModeChoice
 	StepProviderChoice
 	StepLocalSetup  // Install Ollama + start + pull model
 	StepRemoteSetup // Configure API keys
@@ -85,6 +91,7 @@ type WizardModel struct {
 
 	// Provider choice
 	providerChoice int // 0=local, 1=remote
+	setupMode      string
 
 	// Local setup state
 	ollamaInstalled bool
@@ -99,7 +106,7 @@ type WizardModel struct {
 	keyInput       string
 
 	// MCP config
-	mcpTarget     int // 0=OpenCode, 1=Claude Desktop, 2=Skip
+	mcpTarget     int // 0=Claude Code, 1=OpenCode, 2=Skip
 	mcpConfigured bool
 
 	// Validation results
@@ -112,12 +119,17 @@ type WizardModel struct {
 }
 
 func NewWizard() WizardModel {
-	return WizardModel{
+	m := WizardModel{
 		step:           StepSystemCheck, // Start at system check, not welcome
 		providerChoice: 0,
+		setupMode:      IntegrationModeAncoraVela,
 		selectedModel:  "llama3",
 		working:        true, // Show "checking..." immediately
 	}
+	if state, err := wizardLoadIntegrationState(); err == nil && state != nil && validIntegrationMode(state.Mode) {
+		m.setupMode = state.Mode
+	}
+	return m
 }
 
 func (m WizardModel) Init() tea.Cmd {
@@ -252,7 +264,13 @@ func (m WizardModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.addMessage(fmt.Sprintf("✓ Models %s and %s ready", m.selectedModel, LocalSearchEmbeddingModel))
 			}
-			m.step = StepMCPConfig
+			if m.setupMode == IntegrationModeVelaOnly {
+				m.step = StepMCPConfig
+			} else {
+				m.step = StepValidation
+				m.working = true
+				return m, m.validate()
+			}
 		} else {
 			m.step = StepError
 			m.err = msg.err
@@ -360,6 +378,21 @@ func (m WizardModel) handleEnter() (tea.Model, tea.Cmd) {
 
 	case StepSystemCheck:
 		if m.sysOK && !m.working {
+			m.step = StepModeChoice
+		}
+
+	case StepModeChoice:
+		switch m.cursor {
+		case 0:
+			m.setupMode = IntegrationModeAncoraOnly
+			m.step = StepValidation
+			m.working = true
+			return m, m.validate()
+		case 1:
+			m.setupMode = IntegrationModeAncoraVela
+			m.step = StepProviderChoice
+		case 2:
+			m.setupMode = IntegrationModeVelaOnly
 			m.step = StepProviderChoice
 		}
 
@@ -380,7 +413,13 @@ func (m WizardModel) handleEnter() (tea.Model, tea.Cmd) {
 		if m.keyInput != "" {
 			m.apiKey = m.keyInput
 			m.addMessage("✓ API key configured")
-			m.step = StepMCPConfig
+			if m.setupMode == IntegrationModeVelaOnly {
+				m.step = StepMCPConfig
+			} else {
+				m.step = StepValidation
+				m.working = true
+				return m, m.validate()
+			}
 		}
 
 	case StepMCPConfig:
@@ -404,6 +443,8 @@ func (m WizardModel) handleEnter() (tea.Model, tea.Cmd) {
 
 func (m WizardModel) getMaxCursor() int {
 	switch m.step {
+	case StepModeChoice:
+		return 2 // ancora-only, ancora+vela, vela-only
 	case StepProviderChoice:
 		return 1 // local, remote
 	case StepRemoteSetup:
@@ -430,6 +471,8 @@ func (m WizardModel) ViewContent() string {
 		return m.viewWelcome()
 	case StepSystemCheck:
 		return m.viewSystemCheck()
+	case StepModeChoice:
+		return m.viewModeChoice()
 	case StepProviderChoice:
 		return m.viewProviderChoice()
 	case StepLocalSetup:
@@ -588,6 +631,31 @@ func (m WizardModel) viewSystemCheck() string {
 	return b.String()
 }
 
+func (m WizardModel) viewModeChoice() string {
+	var b strings.Builder
+	b.WriteString(textStyle.Render("Choose integration mode:"))
+	b.WriteString("\n\n")
+
+	options := []string{
+		"Ancora only (memory MCP stays in Ancora; disable Vela MCP ownership)",
+		"Ancora + Vela (Ancora stays primary MCP; Vela powers graph retrieval)",
+		"Vela only (register Vela directly as the MCP surface)",
+	}
+
+	for i, opt := range options {
+		cursor := "  "
+		style := textStyle
+		if i == m.cursor {
+			cursor = cursorStyle.Render("▸ ")
+			style = cursorStyle
+		}
+		b.WriteString(cursor + style.Render(opt) + "\n")
+	}
+
+	b.WriteString("\n")
+	return b.String()
+}
+
 func (m WizardModel) viewProviderChoice() string {
 	var b strings.Builder
 	b.WriteString(textStyle.Render("Choose LLM provider:"))
@@ -717,7 +785,7 @@ func (m WizardModel) viewRemoteSetup() string {
 
 func (m WizardModel) viewMCPConfig() string {
 	var b strings.Builder
-	b.WriteString(textStyle.Render("Configure MCP server for:"))
+	b.WriteString(textStyle.Render("Register Vela directly as MCP in:"))
 	b.WriteString("\n\n")
 
 	options := []string{
@@ -762,6 +830,8 @@ func (m WizardModel) viewValidation() string {
 func (m WizardModel) viewComplete() string {
 	var b strings.Builder
 	b.WriteString(successStyle.Render("✓ Setup Complete!"))
+	b.WriteString("\n\n")
+	b.WriteString(textStyle.Render(fmt.Sprintf("Mode: %s", integrationModeLabel(m.setupMode))))
 	b.WriteString("\n\n")
 	b.WriteString(textStyle.Render("Installation summary:"))
 	b.WriteString("\n\n")
@@ -1038,6 +1108,20 @@ func (m WizardModel) installMCP() tea.Cmd {
 			return mcpInstallMsg{success: false, err: err}
 		}
 
+		if m.mcpTarget == 0 {
+			data, err := json.MarshalIndent(map[string]interface{}{
+				"command": "vela",
+				"args":    []string{"serve"},
+			}, "", "  ")
+			if err != nil {
+				return mcpInstallMsg{success: false, err: err}
+			}
+			if err := os.WriteFile(configPath, data, 0644); err != nil {
+				return mcpInstallMsg{success: false, err: err}
+			}
+			return mcpInstallMsg{success: true, err: nil}
+		}
+
 		var cfg map[string]interface{}
 		data, err := os.ReadFile(configPath)
 		if err != nil {
@@ -1074,8 +1158,11 @@ func (m WizardModel) installMCP() tea.Cmd {
 
 func (m WizardModel) validate() tea.Cmd {
 	return func() tea.Msg {
-		messages := make([]string, 0, 4)
-		if _, err := wizardLookPath("vela"); err != nil {
+		messages := make([]string, 0, 6)
+		messages = append(messages, fmt.Sprintf("✓ Integration mode selected: %s", integrationModeLabel(m.setupMode)))
+
+		velaPath, err := wizardLookPath("vela")
+		if err != nil {
 			return validationMsg{
 				llmOK:    false,
 				mcpOK:    false,
@@ -1083,68 +1170,88 @@ func (m WizardModel) validate() tea.Cmd {
 				err:      fmt.Errorf("vela binary is not on PATH; MCP clients will not be able to launch 'vela serve'"),
 			}
 		}
+		_ = velaPath
 		messages = append(messages, "✓ Vela binary is available on PATH")
 
-		llmCfg := &types.LLMConfig{Timeout: 10 * time.Second}
-		if m.providerChoice == 0 {
-			llmCfg.Provider = "local"
-			llmCfg.Model = m.selectedModel
-			llmCfg.Endpoint = "http://localhost:11434"
+		llmOK := true
+		if m.setupMode != IntegrationModeAncoraOnly {
+			llmCfg := &types.LLMConfig{Timeout: 10 * time.Second}
+			if m.providerChoice == 0 {
+				llmCfg.Provider = "local"
+				llmCfg.Model = m.selectedModel
+				llmCfg.Endpoint = "http://localhost:11434"
 
-			installed, running, _, err := wizardCheckOllama()
-			if err != nil {
-				return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("checking Ollama: %w", err)}
-			}
-			if !installed {
-				return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("Ollama is not installed")}
-			}
-			if !running {
-				return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("Ollama is not running")}
+				installed, running, _, err := wizardCheckOllama()
+				if err != nil {
+					return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("checking Ollama: %w", err)}
+				}
+				if !installed {
+					return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("Ollama is not installed")}
+				}
+				if !running {
+					return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("Ollama is not running")}
+				}
+
+				models, err := wizardGetOllamaModels()
+				if err != nil {
+					return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("listing Ollama models: %w", err)}
+				}
+				if !wizardHasModel(models, m.selectedModel) {
+					return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("Ollama model %q is not available", m.selectedModel)}
+				}
+				if !wizardHasModel(models, LocalSearchEmbeddingModel) {
+					return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("Ollama embedding model %q is not available", LocalSearchEmbeddingModel)}
+				}
+				messages = append(messages, fmt.Sprintf("✓ Ollama is running with model %s", m.selectedModel))
+				messages = append(messages, fmt.Sprintf("✓ Retrieval embedding model %s is available", LocalSearchEmbeddingModel))
+			} else {
+				llmCfg.Provider = "anthropic"
+				if m.remoteProvider == 1 {
+					llmCfg.Provider = "openai"
+				}
+				llmCfg.APIKey = m.apiKey
+				if strings.TrimSpace(m.apiKey) == "" {
+					return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("API key is required for remote provider setup")}
+				}
+				messages = append(messages, fmt.Sprintf("✓ %s API key configured", llmCfg.Provider))
 			}
 
-			models, err := wizardGetOllamaModels()
-			if err != nil {
-				return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("listing Ollama models: %w", err)}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := wizardCheckLLMHealth(ctx, llmCfg); err != nil {
+				return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("LLM health check failed: %w", err)}
 			}
-			if !wizardHasModel(models, m.selectedModel) {
-				return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("Ollama model %q is not available", m.selectedModel)}
-			}
-			if !wizardHasModel(models, LocalSearchEmbeddingModel) {
-				return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("Ollama embedding model %q is not available", LocalSearchEmbeddingModel)}
-			}
-			messages = append(messages, fmt.Sprintf("✓ Ollama is running with model %s", m.selectedModel))
-			messages = append(messages, fmt.Sprintf("✓ Retrieval embedding model %s is available", LocalSearchEmbeddingModel))
 		} else {
-			llmCfg.Provider = "anthropic"
-			if m.remoteProvider == 1 {
-				llmCfg.Provider = "openai"
-			}
-			llmCfg.APIKey = m.apiKey
-			if strings.TrimSpace(m.apiKey) == "" {
-				return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("API key is required for remote provider setup")}
-			}
-			messages = append(messages, fmt.Sprintf("✓ %s API key configured", llmCfg.Provider))
+			messages = append(messages, "✓ Vela runtime setup skipped for Ancora-only mode")
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := wizardCheckLLMHealth(ctx, llmCfg); err != nil {
-			return validationMsg{llmOK: false, mcpOK: false, messages: messages, err: fmt.Errorf("LLM health check failed: %w", err)}
-		}
-
-		mcpOK := m.mcpTarget == 2
-		if m.mcpTarget < 2 {
-			if !wizardCheckMCPInstalled() {
-				return validationMsg{llmOK: true, mcpOK: false, messages: messages, err: fmt.Errorf("MCP registration not found after setup")}
+		mcpOK := true
+		switch m.setupMode {
+		case IntegrationModeVelaOnly:
+			target := m.selectedMCPTarget()
+			messages = append(messages, fmt.Sprintf("✓ Primary MCP target: %s", targetLabel(target)))
+			if target == IntegrationTargetSkip {
+				messages = append(messages, "✓ MCP setup skipped by choice")
+				break
 			}
-			mcpOK = true
-			messages = append(messages, "✓ MCP client registration verified")
-		} else {
-			messages = append(messages, "✓ MCP setup skipped by choice")
+			if !wizardCheckVelaMCPForTarget(target) {
+				return validationMsg{llmOK: llmOK, mcpOK: false, messages: messages, err: fmt.Errorf("Vela MCP registration not found for %s", targetLabel(target))}
+			}
+			messages = append(messages, "✓ Vela MCP registration verified")
+		case IntegrationModeAncoraOnly, IntegrationModeAncoraVela:
+			if _, err := wizardLookPath("ancora"); err != nil {
+				return validationMsg{llmOK: llmOK, mcpOK: false, messages: messages, err: fmt.Errorf("ancora binary is not on PATH; Ancora remains the primary MCP surface in %s mode", integrationModeLabel(m.setupMode))}
+			}
+			messages = append(messages, "✓ Ancora binary is available on PATH")
+			if m.setupMode == IntegrationModeAncoraVela {
+				messages = append(messages, "✓ Ancora will expose forwarded Vela retrieval tools once its MCP server is started")
+			} else {
+				messages = append(messages, "✓ Ancora-only mode disables forwarded Vela retrieval tools")
+			}
 		}
 
 		return validationMsg{
-			llmOK:    true,
+			llmOK:    llmOK,
 			mcpOK:    mcpOK,
 			messages: messages,
 			err:      nil,
@@ -1155,6 +1262,22 @@ func (m WizardModel) validate() tea.Cmd {
 func (m WizardModel) finalizeSetup() tea.Cmd {
 	return func() tea.Msg {
 		messages := make([]string, 0, 2)
+
+		if err := wizardSaveIntegrationState(IntegrationState{
+			Mode:      m.setupMode,
+			MCPTarget: m.selectedMCPTarget(),
+			UpdatedBy: "vela",
+		}); err != nil {
+			return setupFinalizeMsg{messages: messages, err: fmt.Errorf("saving integration mode: %w", err)}
+		}
+		messages = append(messages, fmt.Sprintf("✓ Integration mode saved: %s", integrationModeLabel(m.setupMode)))
+
+		if m.setupMode != IntegrationModeVelaOnly {
+			if err := UninstallMCP(); err != nil {
+				return setupFinalizeMsg{messages: messages, err: fmt.Errorf("removing stale Vela MCP registration: %w", err)}
+			}
+			messages = append(messages, "✓ Direct Vela MCP registration removed so primary ownership stays with Ancora")
+		}
 
 		if err := wizardEnableObsidianAutoSync(true); err != nil {
 			return setupFinalizeMsg{messages: messages, err: fmt.Errorf("enabling Obsidian auto-sync: %w", err)}
@@ -1263,4 +1386,15 @@ func wizardHasModel(models []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func (m WizardModel) selectedMCPTarget() string {
+	switch m.mcpTarget {
+	case 0:
+		return IntegrationTargetClaudeCode
+	case 1:
+		return IntegrationTargetOpenCode
+	default:
+		return IntegrationTargetSkip
+	}
 }

@@ -57,6 +57,7 @@ type MenuModel struct {
 	message    string // status/error message
 	installed  bool   // MCP installation status
 	version    string // version string to display
+	setupMode  string
 
 	// Global integration status shown in every screen header
 	ancoraOK bool // ancora mcp socket alive
@@ -78,12 +79,17 @@ type MenuModel struct {
 
 // NewMenuModel creates the main menu TUI.
 func NewMenuModel() MenuModel {
+	setupMode := setup.IntegrationModeVelaOnly
+	if state, err := setup.LoadIntegrationState(); err == nil && state != nil && state.Mode != "" {
+		setupMode = state.Mode
+	}
 	m := MenuModel{
 		screen:     screenMain,
 		cursor:     0,
 		termWidth:  100,
 		termHeight: 24,
 		installed:  setup.CheckMCPInstalled(),
+		setupMode:  setupMode,
 	}
 	m.rebuildMenu()
 	return m
@@ -99,13 +105,15 @@ func NewMenuModelWithVersion(ver string) MenuModel {
 func (m *MenuModel) rebuildMenu() {
 	m.items = []menuItem{}
 
-	if !m.installed {
-		m.items = append(m.items, menuItem{
-			label:       "Setup Environment",
-			description: "Install Ollama, configure LLM, and setup MCP server",
-			key:         "install",
-		})
+	setupDescription := fmt.Sprintf("Current mode: %s", setupModeSummary(m.setupMode))
+	if m.setupMode == setup.IntegrationModeVelaOnly && m.installed {
+		setupDescription = "Current mode: Vela only (direct MCP registration active)"
 	}
+	m.items = append(m.items, menuItem{
+		label:       "Setup Environment",
+		description: setupDescription,
+		key:         "install",
+	})
 
 	m.items = append(m.items, []menuItem{
 		{
@@ -412,10 +420,21 @@ func (m MenuModel) renderStatusLine() string {
 	// Vela: always ready
 	velaStr := dim.Render("ready")
 
-	// Vela MCP: installed in agent config
+	// Primary MCP ownership is mode-aware.
 	mcpStr := dim.Render("offline")
-	if m.installed {
-		mcpStr = lipgloss.NewStyle().Foreground(colorSuccess).Render("operational")
+	switch m.setupMode {
+	case setup.IntegrationModeAncoraOnly:
+		mcpStr = dim.Render("ancora-owned")
+	case setup.IntegrationModeAncoraVela:
+		mcpStr = dim.Render("ancora+vela")
+	case setup.IntegrationModeVelaOnly:
+		if m.installed {
+			mcpStr = lipgloss.NewStyle().Foreground(colorSuccess).Render("operational")
+		}
+	default:
+		if m.installed {
+			mcpStr = lipgloss.NewStyle().Foreground(colorSuccess).Render("operational")
+		}
 	}
 
 	// Ancora MCP: socket probe
@@ -444,6 +463,19 @@ func (m MenuModel) renderFooter(helpText string) string {
 	b.WriteString(renderSeparator())
 	b.WriteString(helpStyle.Render("\n" + helpText))
 	return b.String()
+}
+
+func setupModeSummary(mode string) string {
+	switch mode {
+	case setup.IntegrationModeAncoraOnly:
+		return "Ancora only"
+	case setup.IntegrationModeAncoraVela:
+		return "Ancora + Vela"
+	case setup.IntegrationModeVelaOnly:
+		return "Vela only"
+	default:
+		return "unconfigured"
+	}
 }
 
 func renderAsciiLogo() string {
@@ -500,6 +532,9 @@ func (m MenuModel) updateInstall(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.installWizard.Quitting() {
 		m.screen = screenMain
 		m.installed = setup.CheckMCPInstalled() // Refresh status
+		if state, err := setup.LoadIntegrationState(); err == nil && state != nil && state.Mode != "" {
+			m.setupMode = state.Mode
+		}
 		m.rebuildMenu()
 		return m, nil
 	}

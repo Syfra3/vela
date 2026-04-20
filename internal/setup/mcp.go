@@ -8,10 +8,13 @@ import (
 	"runtime"
 )
 
-// CheckMCPInstalled checks if vela is configured in OpenCode or Claude Desktop MCP settings.
+// CheckMCPInstalled checks if vela is configured in a supported MCP client.
 func CheckMCPInstalled() bool {
 	// Check OpenCode first
 	if checkOpenCode() {
+		return true
+	}
+	if checkClaudeCode() {
 		return true
 	}
 	// Fallback to Claude Desktop
@@ -75,33 +78,70 @@ func removeServerEntry(configPath, serverName string) error {
 }
 
 func checkOpenCode() bool {
-	configPath := getOpenCodeConfigPath()
-	if configPath == "" {
-		return false
-	}
+	return configHasNamedServer(getOpenCodeConfigPath(), "vela")
+}
 
-	data, err := os.ReadFile(configPath)
-	if err != nil {
-		return false
-	}
-
-	var cfg map[string]interface{}
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return false
-	}
-
-	// Check if mcpServers.vela exists
-	mcpServers, ok := cfg["mcpServers"].(map[string]interface{})
-	if !ok {
-		return false
-	}
-
-	_, velaExists := mcpServers["vela"]
-	return velaExists
+func checkOpenCodeServer(serverName string) bool {
+	return configHasNamedServer(getOpenCodeConfigPath(), serverName)
 }
 
 func checkClaudeDesktop() bool {
-	configPath := getClaudeDesktopConfigPath()
+	return configHasNamedServer(getClaudeDesktopConfigPath(), "vela")
+}
+
+func checkClaudeDesktopServer(serverName string) bool {
+	return configHasNamedServer(getClaudeDesktopConfigPath(), serverName)
+}
+
+func checkClaudeCode() bool {
+	return checkClaudeCodeServer("vela")
+}
+
+func checkClaudeCodeServer(serverName string) bool {
+	configPath := getClaudeCodeConfigPath()
+	if configPath == "" {
+		return false
+	}
+
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		return false
+	}
+
+	var direct struct {
+		Command string   `json:"command"`
+		Args    []string `json:"args"`
+	}
+	if err := json.Unmarshal(data, &direct); err == nil && direct.Command == serverName && len(direct.Args) > 0 {
+		return true
+	}
+
+	return configHasNamedServer(configPath, serverName)
+}
+
+func CheckVelaMCPInstalledForTarget(target string) bool {
+	switch target {
+	case IntegrationTargetClaudeCode:
+		return checkClaudeCodeServer("vela")
+	case IntegrationTargetOpenCode:
+		return checkOpenCodeServer("vela")
+	default:
+		return false
+	}
+}
+
+func CheckAncoraMCPInstalledForTarget(target string) bool {
+	switch target {
+	case IntegrationTargetClaudeCode:
+		return checkClaudeCodeServer("ancora")
+	case IntegrationTargetOpenCode:
+		return checkOpenCodeServer("ancora")
+	default:
+		return false
+	}
+}
+
+func configHasNamedServer(configPath, serverName string) bool {
 	if configPath == "" {
 		return false
 	}
@@ -121,8 +161,8 @@ func checkClaudeDesktop() bool {
 		return false
 	}
 
-	_, velaExists := mcpServers["vela"]
-	return velaExists
+	_, exists := mcpServers[serverName]
+	return exists
 }
 
 func getOpenCodeConfigPath() string {

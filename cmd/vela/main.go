@@ -894,8 +894,14 @@ func serveCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("loading graph: %w", err)
 			}
+			if ancoraDB == "" {
+				if resolved, err := ancoradb.DefaultDBPath(); err == nil {
+					ancoraDB = resolved
+				}
+			}
+			searcher := query.NewSearcher(eng, ancoraDB)
 			if !httpMode {
-				return mcpserver.ServeStdio(vmcp.NewServer(eng))
+				return mcpserver.ServeStdio(vmcp.NewServer(eng, searcher))
 			}
 			srv := server.New(eng, ancoraDB, port)
 			ctx, cancel := context.WithCancel(context.Background())

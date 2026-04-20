@@ -2,14 +2,17 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Syfra3/vela/internal/query"
 	mcppkg "github.com/mark3labs/mcp-go/mcp"
+	_ "modernc.org/sqlite"
 )
 
 func newTestEngine(t *testing.T) *query.Engine {
@@ -41,7 +44,7 @@ func callResultText(t *testing.T, res *mcppkg.CallToolResult) string {
 }
 
 func TestNewServerRegistersApprovedTools(t *testing.T) {
-	srv := NewServer(newTestEngine(t))
+	srv := NewServer(newTestEngine(t), nil)
 	tools := srv.ListTools()
 	if len(tools) != 7 {
 		t.Fatalf("expected 7 tools, got %d", len(tools))
@@ -63,6 +66,33 @@ func TestNewServerRegistersApprovedTools(t *testing.T) {
 	}
 	if len(want) != 0 {
 		t.Fatalf("missing tools: %v", want)
+	}
+}
+
+func TestHandleFederatedSearchUsesAncoraSearcher(t *testing.T) {
+	dbPath := seedAncoraDB(t, []map[string]any{{
+		"title":        "Identity resolver decision",
+		"content":      "Use canonical observation ids when fusing ancora and graph hits.",
+		"type":         "decision",
+		"workspace":    "vela",
+		"visibility":   "work",
+		"organization": "syfra",
+		"topic_key":    "vela/identity-resolver",
+		"references":   nil,
+		"deleted_at":   nil,
+	}})
+
+	h := handleFederatedSearch(query.NewSearcher(newTestEngine(t), dbPath))
+	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"query": "identity resolver", "limit": 5}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	text := callResultText(t, res)
+	if !strings.Contains(text, "Identity resolver decision") {
+		t.Fatalf("expected Ancora-backed federated hit, got %q", text)
+	}
+	if !strings.Contains(text, "source=ancora") {
+		t.Fatalf("expected federated hit to report ancora source, got %q", text)
 	}
 }
 
@@ -122,4 +152,57 @@ func queryTestGraph(t *testing.T, dir string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func seedAncoraDB(t *testing.T, rows []map[string]any) string {
+	t.Helper()
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "ancora.db")
+
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open seed db: %v", err)
+	}
+	defer db.Close()
+
+	_, err = db.Exec(`CREATE TABLE observations (
+		id         INTEGER PRIMARY KEY,
+		sync_id    TEXT,
+		session_id TEXT,
+		type       TEXT,
+		title      TEXT NOT NULL,
+		content    TEXT NOT NULL DEFAULT '',
+		tool_name  TEXT,
+		workspace  TEXT,
+		visibility TEXT NOT NULL DEFAULT 'work',
+		organization TEXT,
+		topic_key  TEXT,
+		"references" TEXT,
+		revision_count  INTEGER DEFAULT 0,
+		duplicate_count INTEGER DEFAULT 0,
+		last_seen_at    TEXT,
+		created_at TEXT NOT NULL,
+		updated_at TEXT NOT NULL,
+		deleted_at TEXT
+	)`)
+	if err != nil {
+		t.Fatalf("create table: %v", err)
+	}
+
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, row := range rows {
+		_, err = db.Exec(`INSERT INTO observations
+			(title, content, type, workspace, visibility, organization, topic_key, "references", created_at, updated_at, deleted_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			row["title"], row["content"], row["type"],
+			row["workspace"], row["visibility"], row["organization"],
+			row["topic_key"], row["references"],
+			now, now, row["deleted_at"],
+		)
+		if err != nil {
+			t.Fatalf("insert row: %v", err)
+		}
+	}
+
+	return dbPath
 }
