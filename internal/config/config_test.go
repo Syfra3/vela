@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -74,25 +75,23 @@ func TestFindGraphFileReadsLegacyGlobalPath(t *testing.T) {
 	}
 }
 
-func TestLoadReadsEmbeddingConfig(t *testing.T) {
+func TestWriteDefaultOmitsLegacyRuntimeSections(t *testing.T) {
 	tmp := t.TempDir()
 	t.Setenv("HOME", tmp)
 
-	cfgDir := filepath.Join(tmp, ".vela")
-	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
-		t.Fatalf("mkdir config dir: %v", err)
-	}
-
-	configYAML := []byte("embedding:\n  provider: ollama\n  model: all-minilm\n  endpoint: http://localhost:4242\n  vector_backend: sqlite-vec\n  sqlite_vec_path: /tmp/sqlite-vec.so\n")
-	if err := os.WriteFile(filepath.Join(cfgDir, "config.yaml"), configYAML, 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	cfg, err := Load()
+	path, err := WriteDefault(false)
 	if err != nil {
-		t.Fatalf("Load() error = %v", err)
+		t.Fatalf("WriteDefault() error = %v", err)
 	}
-	if cfg.Embedding.Provider != "ollama" || cfg.Embedding.Model != "all-minilm" || cfg.Embedding.Endpoint != "http://localhost:4242" || cfg.Embedding.VectorBackend != "sqlite-vec" || cfg.Embedding.SQLiteVecPath != "/tmp/sqlite-vec.so" {
-		t.Fatalf("unexpected embedding config: %+v", cfg.Embedding)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", path, err)
+	}
+	text := string(data)
+	for _, blocked := range []string{"llm:", "embedding:", "watch:", "daemon:"} {
+		if strings.Contains(text, blocked) {
+			t.Fatalf("expected default config to omit legacy section %q, got:\n%s", blocked, text)
+		}
 	}
 }

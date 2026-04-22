@@ -14,6 +14,10 @@ const (
 	memoryBindingSuggestionsKey = "binding_suggestions"
 	memoryBoundTargetKey        = "bound_target"
 	memoryReferenceTargetKey    = "reference_target"
+	MemoryEvidenceReference     = "reference"
+	RefRepoFile                 = "repo:file:"
+	RefRepoSymbol               = "repo:symbol:"
+	RefWorkspaceRepo            = "workspace:repo:"
 )
 
 // MemoryReferenceBinding captures the live binding state for a memory reference.

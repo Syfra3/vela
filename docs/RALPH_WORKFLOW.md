@@ -99,18 +99,15 @@ Purpose: prevent fake confidence from config-only checks.
 
 Primary automated coverage:
 
-- `go test ./internal/doctor ./internal/setup ./internal/tui ./cmd/vela`
-- `internal/doctor/integration_test.go`
-- `internal/setup/wizard_test.go`
+- `go test ./internal/tui ./cmd/vela`
+- `internal/tui/query_test.go`
+- `cmd/vela/main_test.go`
 
 Acceptance scenarios:
 
-- Doctor validates configured Ancora source, daemon/socket reachability, graph
-  health, provider runtime readiness, MCP registration, and Obsidian export
-  state.
-- The setup wizard fails when provider health or installation readiness is not
-  real.
-- `vela doctor` exits non-zero when readiness checks fail.
+- Classic TUI exposes extraction, graph status, and query over the new backend.
+- `vela serve` exposes query-only MCP/HTTP transports.
+- CLI help omits removed watch/search/provider-era flags.
 
 ### 4. Indexing and extraction
 
@@ -118,19 +115,15 @@ Purpose: prove graph materialization stays grounded in repo-local correctness.
 
 Primary automated coverage:
 
-- `go test ./internal/extract ./internal/retrieval`
+- `go test ./internal/extract`
 - `internal/extract/extract_test.go`
 - `internal/extract/contract_test.go`
-- `internal/extract/ancora_test.go`
-- `internal/retrieval/repo_local_test.go`
 
 Acceptance scenarios:
 
 - Extraction stamps layer and evidence metadata consistently across code,
-  contract, project, and memory inputs.
-- Repo-local lexical and vector retrieval remain repo-scoped and explainable.
-- Memory ingestion stays separate from repo graph structure while preserving
-  references.
+  contract, and project inputs.
+- Unsupported doc/LLM paths stay out of the active build surface.
 
 ### 5. Retrieval and graph-layer behavior
 
@@ -139,11 +132,10 @@ disconnected indexes.
 
 Primary automated coverage:
 
-- `go test ./pkg/types ./internal/graph ./internal/query ./internal/reconcile`
+- `go test ./pkg/types ./internal/graph ./internal/query`
 - `pkg/types/architecture_test.go`
 - `internal/graph/contract_test.go`
 - `internal/graph/workspace_test.go`
-- `internal/graph/memory_test.go`
 
 Benchmark scenarios:
 
@@ -151,10 +143,7 @@ Benchmark scenarios:
   queries such as `billing`.
 - Contract truth beats weaker derived edges when the same relation appears in
   multiple layers.
-- Memory references expose `current`, `redirected`, `stale`, or `ambiguous`
-  binding state instead of silently decaying.
-- Federated retrieval returns layered provenance showing which hits came from
-  memory, workspace, contract, and repo evidence.
+- Query output stays grounded in workspace, contract, and repo evidence.
 
 ## Architecture-Shaped Benchmark Examples
 

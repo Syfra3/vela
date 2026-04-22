@@ -15,7 +15,6 @@ import (
 	"github.com/Syfra3/vela/internal/export"
 	"github.com/Syfra3/vela/internal/extract"
 	"github.com/Syfra3/vela/internal/graph"
-	"github.com/Syfra3/vela/internal/llm"
 	"github.com/Syfra3/vela/pkg/types"
 )
 
@@ -44,10 +43,11 @@ var (
 )
 
 type ProjectsModel struct {
-	cursor   int
-	quitting bool
-	loading  bool
-	running  bool
+	cursor        int
+	quitting      bool
+	loading       bool
+	running       bool
+	preferredPath string
 
 	graphPath string
 	projects  []trackedProject
@@ -59,13 +59,14 @@ type ProjectsModel struct {
 }
 
 func NewProjectsModel() ProjectsModel {
-	return ProjectsModel{
-		loading:  true,
-		selected: make(map[string]bool),
-	}
+	return NewProjectsModelWithGraphPath("")
 }
 
-func (m ProjectsModel) Init() tea.Cmd { return loadTrackedProjectsCmd() }
+func NewProjectsModelWithGraphPath(graphPath string) ProjectsModel {
+	return ProjectsModel{loading: true, selected: make(map[string]bool), preferredPath: strings.TrimSpace(graphPath)}
+}
+
+func (m ProjectsModel) Init() tea.Cmd { return loadTrackedProjectsCmd(m.preferredPath) }
 
 func (m ProjectsModel) Quitting() bool { return m.quitting }
 
@@ -84,7 +85,6 @@ func (m ProjectsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.pruneSelections()
 		return m, nil
-
 	case projectsActionMsg:
 		m.running = false
 		m.message = msg.message
@@ -92,8 +92,7 @@ func (m ProjectsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err != nil {
 			m.message = msg.err.Error()
 		}
-		return m, loadTrackedProjectsCmd()
-
+		return m, loadTrackedProjectsCmd(m.graphPath)
 	case tea.KeyMsg:
 		if m.loading || m.running {
 			switch msg.String() {
@@ -107,17 +106,14 @@ func (m ProjectsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "esc", "b":
 			m.quitting = true
 			return m, nil
-
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
 			}
-
 		case "down", "j":
 			if m.cursor < len(m.projects)-1 {
 				m.cursor++
 			}
-
 		case "x", " ":
 			if project, ok := m.currentProject(); ok {
 				if m.selected[project.NodeID] {
@@ -126,7 +122,6 @@ func (m ProjectsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.selected[project.NodeID] = true
 				}
 			}
-
 		case "d":
 			marked := m.markedProjects()
 			if len(marked) == 0 {
@@ -137,7 +132,6 @@ func (m ProjectsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.running = true
 			m.message = ""
 			return m, deleteTrackedProjectsCmd(m.graphPath, marked)
-
 		case "enter", "r":
 			project, ok := m.currentProject()
 			if !ok {
@@ -148,7 +142,6 @@ func (m ProjectsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, refreshTrackedProjectCmd(m.graphPath, project)
 		}
 	}
-
 	return m, nil
 }
 
@@ -156,7 +149,6 @@ func (m ProjectsModel) View() string { return m.ViewContent() }
 
 func (m ProjectsModel) ViewContent() string {
 	var b strings.Builder
-
 	textStyle := lipgloss.NewStyle().Foreground(colorText)
 	mutedStyle := lipgloss.NewStyle().Foreground(colorSubtext)
 	accentStyle := lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
@@ -167,14 +159,12 @@ func (m ProjectsModel) ViewContent() string {
 		b.WriteString(mutedStyle.Render("Loading tracked projects..."))
 		return b.String()
 	}
-
 	if m.err != nil {
 		b.WriteString(errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
 		b.WriteString("\n\n")
 		b.WriteString(mutedStyle.Render("Run Extract first to create graph.json, then return here."))
 		return b.String()
 	}
-
 	if len(m.projects) == 0 {
 		b.WriteString(mutedStyle.Render("No tracked codebases found in graph.json."))
 		b.WriteString("\n\n")
@@ -184,7 +174,6 @@ func (m ProjectsModel) ViewContent() string {
 
 	b.WriteString(accentStyle.Render("Tracked Codebases"))
 	b.WriteString("\n\n")
-
 	for i, project := range m.projects {
 		cursor := "  "
 		rowStyle := textStyle
@@ -192,12 +181,10 @@ func (m ProjectsModel) ViewContent() string {
 			cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▸ ")
 			rowStyle = rowStyle.Copy().Foreground(colorAccent)
 		}
-
 		mark := "[ ]"
 		if m.selected[project.NodeID] {
 			mark = warnStyle.Render("[x]")
 		}
-
 		b.WriteString(fmt.Sprintf("%s%s %s\n", cursor, mark, rowStyle.Render(project.Name)))
 		if project.Path != "" {
 			b.WriteString(mutedStyle.Render("     " + project.Path))
@@ -212,7 +199,6 @@ func (m ProjectsModel) ViewContent() string {
 		}
 		b.WriteString("\n")
 	}
-
 	b.WriteString(mutedStyle.Render("Delete removes tracked graph/cache data only. It does not delete source directories."))
 	if m.running {
 		b.WriteString("\n\n")
@@ -225,7 +211,6 @@ func (m ProjectsModel) ViewContent() string {
 			b.WriteString(textStyle.Render(m.message))
 		}
 	}
-
 	return b.String()
 }
 
@@ -236,7 +221,7 @@ func (m ProjectsModel) FooterHelp() string {
 	if m.running {
 		return "waiting for project action to finish"
 	}
-	return "↑↓ navigate • x mark • Enter/r refresh selected • d delete marked • esc back"
+	return "↑↓ navigate • x mark • Enter/r refresh • d delete marked • esc back"
 }
 
 func (m ProjectsModel) currentProject() (trackedProject, bool) {
@@ -271,10 +256,10 @@ func (m *ProjectsModel) pruneSelections() {
 	}
 }
 
-func loadTrackedProjectsCmd() tea.Cmd {
+func loadTrackedProjectsCmd(graphPath string) tea.Cmd {
 	return func() tea.Msg {
-		projects, graphPath, err := loadTrackedProjectsFunc()
-		return projectsLoadedMsg{projects: projects, graphPath: graphPath, err: err}
+		projects, resolvedGraphPath, err := loadTrackedProjectsFunc(strings.TrimSpace(graphPath))
+		return projectsLoadedMsg{projects: projects, graphPath: resolvedGraphPath, err: err}
 	}
 }
 
@@ -292,37 +277,32 @@ func refreshTrackedProjectCmd(graphPath string, project trackedProject) tea.Cmd 
 	}
 }
 
-func loadTrackedProjects() ([]trackedProject, string, error) {
-	graphPath, err := config.FindGraphFile(".")
-	if err != nil {
-		return nil, "", err
+func loadTrackedProjects(preferredGraphPath string) ([]trackedProject, string, error) {
+	graphPath := strings.TrimSpace(preferredGraphPath)
+	if graphPath == "" {
+		var err error
+		graphPath, err = config.FindGraphFile(".")
+		if err != nil {
+			return nil, "", err
+		}
 	}
-
-	g, err := loadExistingGraph(graphPath)
+	g, err := loadGraph(graphPath)
 	if err != nil {
 		return nil, graphPath, err
 	}
-
 	projects := make([]trackedProject, 0)
 	for _, node := range g.Nodes {
 		if node.NodeType != string(types.NodeTypeProject) {
 			continue
 		}
-		projects = append(projects, trackedProject{
-			Name:   node.Label,
-			NodeID: node.ID,
-			Path:   projectPath(node),
-			Remote: projectRemote(node),
-		})
+		projects = append(projects, trackedProject{Name: node.Label, NodeID: node.ID, Path: projectPath(node), Remote: projectRemote(node)})
 	}
-
 	sort.Slice(projects, func(i, j int) bool {
 		if projects[i].Name == projects[j].Name {
 			return projects[i].Path < projects[j].Path
 		}
 		return projects[i].Name < projects[j].Name
 	})
-
 	return projects, graphPath, nil
 }
 
@@ -330,21 +310,17 @@ func deleteTrackedProjects(graphPath string, projects []trackedProject) (string,
 	if len(projects) == 0 {
 		return "No projects selected.", nil
 	}
-
-	g, err := loadExistingGraph(graphPath)
+	g, err := loadGraph(graphPath)
 	if err != nil {
 		return "", err
 	}
-
 	nodes, edges := removeProjectsFromGraph(g, projects)
 	if err := export.WriteJSON(&types.Graph{Nodes: nodes, Edges: edges}, filepath.Dir(graphPath)); err != nil {
 		return "", err
 	}
-
 	if err := pruneProjectCache(projects); err != nil {
 		return "", err
 	}
-
 	return fmt.Sprintf("Removed %d tracked project(s).", len(projects)), nil
 }
 
@@ -352,12 +328,10 @@ func refreshTrackedProject(graphPath string, project trackedProject) (string, er
 	if project.Path == "" {
 		return "", fmt.Errorf("project path metadata is unavailable; re-extract the codebase once from disk to enable refresh")
 	}
-
 	cfg, err := config.Load()
 	if err != nil {
 		return "", fmt.Errorf("loading config: %w", err)
 	}
-
 	files, err := trackedProjectFiles(project.Path)
 	if err != nil {
 		return "", err
@@ -365,47 +339,33 @@ func refreshTrackedProject(graphPath string, project trackedProject) (string, er
 	if len(files) == 0 {
 		return "", fmt.Errorf("no supported files found in %s", project.Path)
 	}
-
-	var provider types.LLMProvider
-	if cfg.LLM.Provider != "" && cfg.LLM.Provider != "none" {
-		if llmClient, lErr := llm.NewClient(&cfg.LLM); lErr == nil {
-			provider = llmClient
-		}
-	}
-
 	projectSrc := extract.DetectProject(project.Path)
-	freshNodes, freshEdges, err := extract.ExtractAll(project.Path, files, provider, projectSrc, cfg.LLM.MaxChunkTokens)
+	freshNodes, freshEdges, err := extract.ExtractAll(project.Path, files, nil, projectSrc, cfg.LLM.MaxChunkTokens)
 	if err != nil {
 		return "", err
 	}
-
-	existing, err := loadExistingGraph(graphPath)
+	existing, err := loadGraph(graphPath)
 	if err != nil {
 		return "", err
 	}
 	seededNodes, seededEdges := removeProjectsFromGraph(existing, []trackedProject{project})
-
 	g, buildErr := graph.Build(append(seededNodes, freshNodes...), append(seededEdges, freshEdges...))
 	if buildErr != nil {
 		return "", fmt.Errorf("building graph: %w", buildErr)
 	}
-
 	tg := g.ToTypes()
 	if err := export.WriteJSON(tg, filepath.Dir(graphPath)); err != nil {
 		return "", fmt.Errorf("writing graph.json: %w", err)
 	}
-
 	if err := refreshProjectCache(cfg.Extraction.CacheDir, project.Path, files); err != nil {
 		return "", err
 	}
-
 	if cfg.Obsidian.AutoSync {
 		vaultDir := config.ResolveVaultDir(cfg.Obsidian.VaultDir)
 		if err := export.WriteObsidian(tg, vaultDir); err != nil {
 			return "", fmt.Errorf("obsidian auto-sync: %w", err)
 		}
 	}
-
 	return fmt.Sprintf("Refreshed %s.", project.Name), nil
 }
 
@@ -414,12 +374,7 @@ func trackedProjectFiles(dir string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("detecting files: %w", err)
 	}
-
-	extSet := map[string]bool{
-		".go": true, ".py": true, ".ts": true, ".tsx": true,
-		".js": true, ".jsx": true, ".md": true, ".txt": true, ".pdf": true,
-	}
-
+	extSet := map[string]bool{".go": true, ".py": true, ".ts": true, ".tsx": true, ".js": true, ".jsx": true, ".md": true, ".txt": true, ".pdf": true}
 	files := make([]string, 0, len(detected.Files))
 	for _, entry := range detected.Files {
 		if extSet[filepath.Ext(entry.AbsPath)] {
@@ -435,7 +390,6 @@ func removeProjectsFromGraph(g *types.Graph, projects []trackedProject) ([]types
 	for _, project := range projects {
 		projectNames[projectNameFromID(project.NodeID)] = true
 	}
-
 	removedNodeIDs := make(map[string]bool)
 	nodes := make([]types.Node, 0, len(g.Nodes))
 	for _, node := range g.Nodes {
@@ -445,7 +399,6 @@ func removeProjectsFromGraph(g *types.Graph, projects []trackedProject) ([]types
 		}
 		nodes = append(nodes, node)
 	}
-
 	edges := make([]types.Edge, 0, len(g.Edges))
 	for _, edge := range g.Edges {
 		if removedNodeIDs[edge.Source] || removedNodeIDs[edge.Target] {
@@ -453,7 +406,6 @@ func removeProjectsFromGraph(g *types.Graph, projects []trackedProject) ([]types
 		}
 		edges = append(edges, edge)
 	}
-
 	return nodes, edges
 }
 
@@ -462,7 +414,6 @@ func refreshProjectCache(cacheDir, projectPath string, files []string) error {
 	if err != nil {
 		return fmt.Errorf("loading cache: %w", err)
 	}
-
 	fileCache.DeletePrefix(projectPath)
 	for _, file := range files {
 		sha, err := cache.SHA256File(file)
@@ -471,7 +422,6 @@ func refreshProjectCache(cacheDir, projectPath string, files []string) error {
 		}
 		fileCache.Mark(file, sha)
 	}
-
 	if err := fileCache.Save(); err != nil {
 		return fmt.Errorf("saving cache: %w", err)
 	}
@@ -483,12 +433,10 @@ func pruneProjectCache(projects []trackedProject) error {
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
-
 	fileCache, err := cache.Load(cfg.Extraction.CacheDir)
 	if err != nil {
 		return fmt.Errorf("loading cache: %w", err)
 	}
-
 	changed := false
 	for _, project := range projects {
 		if project.Path == "" {
@@ -531,9 +479,7 @@ func projectRemote(node types.Node) string {
 	return ""
 }
 
-func projectNameFromID(nodeID string) string {
-	return strings.TrimPrefix(nodeID, "project:")
-}
+func projectNameFromID(nodeID string) string { return strings.TrimPrefix(nodeID, "project:") }
 
 func belongsToAnyProject(nodeID string, projectNames map[string]bool) bool {
 	for name := range projectNames {

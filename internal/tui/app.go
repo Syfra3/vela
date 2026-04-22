@@ -44,13 +44,13 @@ type Model struct {
 	mode tuiMode
 
 	// Extraction state
-	progress     types.ExtractionProgress
-	providerName string
-	providerOK   bool
-	workers      []WorkerStatus
-	done         bool
-	updatesCh    <-chan types.ProgressUpdate
-	workerCh     <-chan WorkerUpdate
+	progress    types.ExtractionProgress
+	backendName string
+	backendOK   bool
+	workers     []WorkerStatus
+	done        bool
+	updatesCh   <-chan types.ProgressUpdate
+	workerCh    <-chan WorkerUpdate
 
 	// Query state
 	queryInput  string
@@ -71,8 +71,8 @@ type Model struct {
 func NewProgram(
 	progressCh <-chan types.ProgressUpdate,
 	workerCh <-chan WorkerUpdate,
-	providerName string,
-	providerOK bool,
+	backendName string,
+	backendOK bool,
 	numWorkers int,
 	queryFn func(string) string,
 ) *tea.Program {
@@ -84,15 +84,15 @@ func NewProgram(
 		workers[i] = WorkerStatus{ID: i, Idle: true}
 	}
 	m := Model{
-		mode:         modeExtract,
-		updatesCh:    progressCh,
-		workerCh:     workerCh,
-		providerName: providerName,
-		providerOK:   providerOK,
-		workers:      workers,
-		queryFn:      queryFn,
-		termWidth:    100,
-		termHeight:   24,
+		mode:        modeExtract,
+		updatesCh:   progressCh,
+		workerCh:    workerCh,
+		backendName: backendName,
+		backendOK:   backendOK,
+		workers:     workers,
+		queryFn:     queryFn,
+		termWidth:   100,
+		termHeight:  24,
 	}
 	return tea.NewProgram(m, tea.WithAltScreen())
 }
@@ -221,14 +221,14 @@ func (m Model) viewExtract() string {
 	sb.WriteString(styleHeader.Render(" Vela — Extracting Knowledge Graph "))
 	sb.WriteString("\n\n")
 
-	// Provider status
+	// Backend status
 	provStatus := styleOK.Render("ready")
-	if !m.providerOK {
-		provStatus = styleWarn.Render("offline")
+	if !m.backendOK {
+		provStatus = styleWarn.Render("standby")
 	}
 	sb.WriteString(fmt.Sprintf("  %s  %s  [%s]\n\n",
-		styleLabel.Render("LLM Provider:"),
-		m.providerName,
+		styleLabel.Render("Build Backend:"),
+		m.backendName,
 		provStatus,
 	))
 

@@ -276,6 +276,16 @@ func preferredLayer(edge types.Edge) types.Layer {
 	return ""
 }
 
+func nodeLayer(node types.Node) types.Layer {
+	if key := types.CanonicalKeyForNode(node); !key.IsZero() && key.Layer != "" {
+		return key.Layer
+	}
+	if node.Source != nil {
+		return types.LayerOf(node.Source.Type)
+	}
+	return ""
+}
+
 // Path finds the shortest directed path from nodeA to nodeB.
 // Returns a human-readable string.
 func (e *Engine) Path(fromLabel, toLabel string) string {
@@ -287,6 +297,15 @@ func (e *Engine) Path(fromLabel, toLabel string) string {
 	}
 	if !toOK {
 		return fmt.Sprintf("node %q not found in graph", toLabel)
+	}
+	if fromID, ok := e.intToID[fromInt]; ok {
+		if toID, ok := e.intToID[toInt]; ok {
+			fromNode, fromNodeOK := e.nodeByID[fromID]
+			toNode, toNodeOK := e.nodeByID[toID]
+			if fromNodeOK && toNodeOK && isFileNode(fromNode) && isFileNode(toNode) {
+				return e.fileDependencyPath(fromID, toID, fromLabel, toLabel)
+			}
+		}
 	}
 
 	shortest := path.DijkstraFrom(simple.Node(fromInt), e.directed)
@@ -305,6 +324,44 @@ func (e *Engine) Path(fromLabel, toLabel string) string {
 				labels[i] = nodeID
 			}
 		}
+	}
+	return strings.Join(labels, " → ")
+}
+
+func (e *Engine) fileDependencyPath(fromID, toID, fromLabel, toLabel string) string {
+	prev := map[string]string{}
+	queue := []string{fromID}
+	visited := map[string]bool{fromID: true}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		if current == toID {
+			break
+		}
+		for _, edge := range e.graph.Edges {
+			if !isFileDependencyEdge(edge, e.nodeByID) || edge.Source != current {
+				continue
+			}
+			next := edge.Target
+			if visited[next] {
+				continue
+			}
+			visited[next] = true
+			prev[next] = current
+			queue = append(queue, next)
+		}
+	}
+	if !visited[toID] {
+		return fmt.Sprintf("no path found from %q to %q", fromLabel, toLabel)
+	}
+	pathIDs := []string{toID}
+	for current := toID; current != fromID; {
+		current = prev[current]
+		pathIDs = append([]string{current}, pathIDs...)
+	}
+	labels := make([]string, 0, len(pathIDs))
+	for _, nodeID := range pathIDs {
+		labels = append(labels, e.describeRef(nodeID))
 	}
 	return strings.Join(labels, " → ")
 }

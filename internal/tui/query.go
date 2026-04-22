@@ -2,288 +2,246 @@ package tui
 
 import (
 	"fmt"
-	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
-	"github.com/Syfra3/vela/internal/ancora"
+	"github.com/Syfra3/vela/internal/app"
 	"github.com/Syfra3/vela/internal/config"
 	vquery "github.com/Syfra3/vela/internal/query"
+	"github.com/Syfra3/vela/pkg/types"
 )
 
-const queryResultLimit = 5
-
-type querySearcherLoadedMsg struct {
-	searcher *vquery.Searcher
-	err      error
+type queryRunner interface {
+	RunRequest(req types.QueryRequest) (string, error)
 }
 
-type querySearchResultMsg struct {
-	response vquery.SearchResponse
-	err      error
+type queryFinishedMsg struct {
+	output string
+	err    error
 }
 
-var (
-	queryLoadSearcherFunc = loadQuerySearcher
-	querySearchFunc       = runFederatedSearch
+var queryKinds = []types.QueryKind{
+	types.QueryKindDependencies,
+	types.QueryKindReverseDependencies,
+	types.QueryKindImpact,
+	types.QueryKindPath,
+	types.QueryKindExplain,
+}
+
+var queryLoadEngineFunc = func(graphPath string) (queryRunner, error) {
+	if strings.TrimSpace(graphPath) == "" {
+		resolved, err := config.FindGraphFile(".")
+		if err != nil {
+			return nil, err
+		}
+		graphPath = resolved
+	}
+	return vquery.LoadFromFile(graphPath)
+}
+
+var queryRunRequestFunc = func(r queryRunner, req types.QueryRequest) (string, error) {
+	return r.RunRequest(req)
+}
+
+type queryField int
+
+const (
+	queryFieldKind queryField = iota
+	queryFieldSubject
+	queryFieldTarget
+	queryFieldLimit
 )
 
-// QueryModel is the TUI model for interactive federated search.
 type QueryModel struct {
-	input       string
-	searcher    *vquery.Searcher
-	response    vquery.SearchResponse
-	hasSearched bool
-	quitting    bool
-	loading     bool
-	loadingText string
-	err         error
+	kindIndex int
+	subject   string
+	target    string
+	limit     string
+	output    string
+	err       error
+	running   bool
+	quitting  bool
+	focus     queryField
 }
 
 func NewQueryModel() QueryModel {
-	return QueryModel{
-		loading:     true,
-		loadingText: "Loading SQLite search index...",
-	}
+	return QueryModel{limit: fmt.Sprintf("%d", types.DefaultQueryLimit), focus: queryFieldSubject}
 }
 
-func (m QueryModel) Init() tea.Cmd {
-	return loadQuerySearcherCmd()
-}
-
-func (m QueryModel) Quitting() bool {
-	return m.quitting
-}
+func (m QueryModel) Init() tea.Cmd  { return nil }
+func (m QueryModel) Quitting() bool { return m.quitting }
 
 func (m QueryModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case querySearcherLoadedMsg:
-		m.searcher = msg.searcher
-		m.loading = false
-		m.loadingText = ""
+	case queryFinishedMsg:
+		m.running = false
+		m.output = msg.output
 		m.err = msg.err
 		return m, nil
-
-	case querySearchResultMsg:
-		m.loading = false
-		m.loadingText = ""
-		m.hasSearched = msg.err == nil
-		m.err = msg.err
-		if msg.err == nil {
-			m.response = msg.response
-		}
-		return m, nil
-
 	case tea.KeyMsg:
+		if m.running {
+			if msg.String() == "esc" || msg.String() == "ctrl+c" {
+				m.quitting = true
+			}
+			return m, nil
+		}
 		switch msg.String() {
-		case "ctrl+c", "esc", "q":
+		case "ctrl+c", "esc":
 			m.quitting = true
 			return m, nil
-
-		case "r":
-			m.loading = true
-			m.loadingText = "Loading SQLite search index..."
-			m.err = nil
-			return m, loadQuerySearcherCmd()
-		}
-
-		if m.loading {
+		case "tab":
+			m.focus = (m.focus + 1) % 4
 			return m, nil
+		case "shift+tab":
+			if m.focus == 0 {
+				m.focus = 3
+			} else {
+				m.focus--
+			}
+			return m, nil
+		case "up", "k":
+			if m.focus == queryFieldKind && m.kindIndex > 0 {
+				m.kindIndex--
+			}
+			return m, nil
+		case "down", "j":
+			if m.focus == queryFieldKind && m.kindIndex < len(queryKinds)-1 {
+				m.kindIndex++
+			}
+			return m, nil
+		case "enter":
+			req, err := m.request()
+			if err != nil {
+				m.err = err
+				return m, nil
+			}
+			m.running = true
+			m.err = nil
+			return m, runQueryCmd(req)
 		}
 
 		switch msg.Type {
-		case tea.KeyEnter:
-			input := strings.TrimSpace(m.input)
-			if input == "" {
-				m.err = fmt.Errorf("query cannot be empty")
-				return m, nil
-			}
-			if m.searcher == nil {
-				m.err = fmt.Errorf("search is not ready")
-				return m, nil
-			}
-			m.loading = true
-			m.loadingText = fmt.Sprintf("Searching for %q...", input)
-			m.err = nil
-			return m, runQuerySearchCmd(m.searcher, input)
-
 		case tea.KeyBackspace, tea.KeyDelete:
-			if len(m.input) > 0 {
-				runes := []rune(m.input)
-				m.input = string(runes[:len(runes)-1])
-			}
-
+			m.deleteRune()
 		case tea.KeyRunes:
-			m.input += msg.String()
+			m.appendText(msg.String())
 		case tea.KeySpace:
-			m.input += " "
+			m.appendText(" ")
 		}
 	}
-
 	return m, nil
 }
 
-func (m QueryModel) View() string {
-	return m.ViewContent()
+func runQueryCmd(req types.QueryRequest) tea.Cmd {
+	return func() tea.Msg {
+		graphPath, err := config.FindGraphFile(".")
+		if err != nil {
+			return queryFinishedMsg{err: err}
+		}
+		output, _, err := app.QueryService{
+			LoadEngine: func(path string) (app.QueryRunner, error) {
+				return queryLoadEngineFunc(path)
+			},
+		}.Run(app.QueryRequestInput{
+			GraphPath:         graphPath,
+			Kind:              req.Kind,
+			Subject:           req.Subject,
+			Target:            req.Target,
+			Limit:             req.Limit,
+			IncludeProvenance: req.IncludeProvenance,
+		})
+		if err == nil && output == "" {
+			engine, lerr := queryLoadEngineFunc(graphPath)
+			if lerr != nil {
+				return queryFinishedMsg{err: lerr}
+			}
+			output, err = queryRunRequestFunc(engine, req)
+		}
+		return queryFinishedMsg{output: output, err: err}
+	}
 }
+
+func (m *QueryModel) appendText(text string) {
+	switch m.focus {
+	case queryFieldSubject:
+		m.subject += text
+	case queryFieldTarget:
+		m.target += text
+	case queryFieldLimit:
+		if text == " " {
+			return
+		}
+		m.limit += text
+	}
+}
+
+func (m *QueryModel) deleteRune() {
+	trim := func(input string) string {
+		if len(input) == 0 {
+			return input
+		}
+		runes := []rune(input)
+		return string(runes[:len(runes)-1])
+	}
+	switch m.focus {
+	case queryFieldSubject:
+		m.subject = trim(m.subject)
+	case queryFieldTarget:
+		m.target = trim(m.target)
+	case queryFieldLimit:
+		m.limit = trim(m.limit)
+	}
+}
+
+func (m QueryModel) request() (types.QueryRequest, error) {
+	req := types.QueryRequest{Kind: queryKinds[m.kindIndex], Subject: strings.TrimSpace(m.subject)}
+	if strings.TrimSpace(m.limit) != "" {
+		fmt.Sscanf(m.limit, "%d", &req.Limit)
+	}
+	req.Target = strings.TrimSpace(m.target)
+	req = req.Normalize()
+	return req, req.Validate()
+}
+
+func (m QueryModel) View() string { return m.ViewContent() }
 
 func (m QueryModel) ViewContent() string {
 	var b strings.Builder
-
-	textStyle := lipgloss.NewStyle().Foreground(colorText)
-	dimStyle := lipgloss.NewStyle().Foreground(colorSubtext)
-	inputStyle := lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
-	resultStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(colorOverlay).
-		Padding(0, 1)
-	metaStyle := lipgloss.NewStyle().Foreground(colorSubtext)
-
-	b.WriteString(textStyle.Render("Federated search combines Ancora memory with Vela's SQLite-backed graph index."))
-	b.WriteString("\n\n")
-	b.WriteString(inputStyle.Render("> " + m.input))
-	if !m.loading {
-		b.WriteString(dimStyle.Render("█"))
+	b.WriteString("Kinds\n")
+	for i, kind := range queryKinds {
+		cursor := "  "
+		if m.focus == queryFieldKind && i == m.kindIndex {
+			cursor = "▸ "
+		}
+		b.WriteString(fmt.Sprintf("%s%s\n", cursor, kind))
 	}
+	b.WriteString("\n")
+	b.WriteString(renderField("subject", m.subject, m.focus == queryFieldSubject))
+	b.WriteString("\n")
+	b.WriteString(renderField("target", m.target, m.focus == queryFieldTarget))
+	b.WriteString("\n")
+	b.WriteString(renderField("limit", m.limit, m.focus == queryFieldLimit))
 	b.WriteString("\n\n")
-
-	if m.loading {
-		b.WriteString(dimStyle.Render(m.loadingText))
-		b.WriteString("\n\n")
+	if m.running {
+		b.WriteString("Running query...\n\n")
 	}
-
 	if m.err != nil {
 		b.WriteString(errorStyle.Render("Error: " + m.err.Error()))
 		b.WriteString("\n\n")
 	}
-
-	if m.hasSearched {
-		if len(m.response.Hits) == 0 {
-			b.WriteString(dimStyle.Render(fmt.Sprintf("No results for %q.", m.response.Query)))
-			b.WriteString("\n")
-		} else {
-			for i, hit := range m.response.Hits {
-				var lines []string
-				title := fmt.Sprintf("%d. [%s] %s", i+1, sourceLabel(hit.PrimarySource), hit.Label)
-				if hit.Kind != "" {
-					title += " (" + hit.Kind + ")"
-				}
-				lines = append(lines, title)
-
-				var meta []string
-				meta = append(meta, fmt.Sprintf("score %.2f", hit.Score))
-				if len(hit.Sources) > 1 {
-					meta = append(meta, "sources: "+joinSourceLabels(hit.Sources))
-				}
-				if hit.Path != "" {
-					meta = append(meta, truncate(hit.Path, 72))
-				}
-				if len(hit.Signals) > 1 {
-					meta = append(meta, "signals: "+joinSignalLabels(hit.Signals))
-				}
-				if hit.SupportGraph != nil {
-					meta = append(meta, fmt.Sprintf("support %dn/%de", len(hit.SupportGraph.Nodes), len(hit.SupportGraph.Edges)))
-				}
-				lines = append(lines, metaStyle.Render(strings.Join(meta, "  |  ")))
-
-				if hit.Snippet != "" {
-					lines = append(lines, textStyle.Render(hit.Snippet))
-				}
-				if len(hit.Support) > 0 {
-					lines = append(lines, dimStyle.Render("context: "+hit.Support[0]))
-				}
-
-				b.WriteString(resultStyle.Render(strings.Join(lines, "\n")))
-				b.WriteString("\n\n")
-			}
-		}
-
-		b.WriteString(dimStyle.Render(searchMetricsSummary(m.response.Metrics)))
-		b.WriteString("\n")
+	if strings.TrimSpace(m.output) != "" {
+		b.WriteString(styleBorder.Render(m.output))
+		b.WriteString("\n\n")
 	}
-
+	b.WriteString("Supported kinds: dependencies, reverse_dependencies, impact, path, explain.\n")
 	return b.String()
 }
 
-func (m QueryModel) ModeName() string {
-	return "Search"
-}
-
-func loadQuerySearcherCmd() tea.Cmd {
-	return func() tea.Msg {
-		searcher, err := queryLoadSearcherFunc()
-		return querySearcherLoadedMsg{searcher: searcher, err: err}
+func renderField(label, value string, focused bool) string {
+	prefix := "  "
+	if focused {
+		prefix = "▸ "
 	}
-}
-
-func runQuerySearchCmd(searcher *vquery.Searcher, input string) tea.Cmd {
-	return func() tea.Msg {
-		response, err := querySearchFunc(searcher, input)
-		return querySearchResultMsg{response: response, err: err}
-	}
-}
-
-func loadQuerySearcher() (*vquery.Searcher, error) {
-	graphPath, err := config.FindGraphFile(".")
-	if err != nil {
-		return nil, err
-	}
-	engine, err := vquery.LoadFromFile(graphPath)
-	if err != nil {
-		return nil, err
-	}
-	ancoraDBPath, err := ancora.DefaultDBPath()
-	if err != nil {
-		return nil, err
-	}
-	return vquery.NewSearcher(engine, ancoraDBPath), nil
-}
-
-func runFederatedSearch(searcher *vquery.Searcher, input string) (vquery.SearchResponse, error) {
-	return searcher.Search(input, queryResultLimit)
-}
-
-func searchMetricsSummary(metrics vquery.SearchMetrics) string {
-	return fmt.Sprintf(
-		"Ancora %dms/%d  |  Federated %dms/%d  |  overlap@%d %d  |  added %d",
-		metrics.AncoraOnly.LatencyMs,
-		metrics.AncoraOnly.Returned,
-		metrics.Federated.LatencyMs,
-		metrics.Federated.Returned,
-		metrics.Limit,
-		metrics.Comparison.OverlapAtK,
-		metrics.Comparison.AddedByFederated,
-	)
-}
-
-func sourceLabel(source string) string {
-	switch source {
-	case "ancora":
-		return "Ancora"
-	case "vela_graph":
-		return "Graph"
-	case "hybrid":
-		return "Hybrid"
-	default:
-		return source
-	}
-}
-
-func joinSourceLabels(sources []string) string {
-	labels := make([]string, 0, len(sources))
-	for _, source := range sources {
-		labels = append(labels, sourceLabel(source))
-	}
-	return strings.Join(labels, ", ")
-}
-
-func joinSignalLabels(signals map[string]float64) string {
-	labels := make([]string, 0, len(signals))
-	for signal := range signals {
-		labels = append(labels, strings.Title(signal))
-	}
-	sort.Strings(labels)
-	return strings.Join(labels, ", ")
+	return fmt.Sprintf("%s%s: %s", prefix, label, value)
 }

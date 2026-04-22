@@ -63,10 +63,8 @@ func evidenceForExt(ext string) (string, types.Confidence) {
 	switch ext {
 	case ".go", ".py", ".ts", ".tsx", ".js", ".jsx":
 		return EvidenceTypeAST, types.ConfidenceExtracted
-	case ".md", ".txt":
-		return EvidenceTypeDocLLM, types.ConfidenceInferred
-	case ".pdf":
-		return EvidenceTypePDFLLM, types.ConfidenceInferred
+	case ".md", ".txt", ".pdf":
+		return EvidenceTypeFilesystem, types.ConfidenceInferred
 	}
 	return EvidenceTypeFilesystem, types.ConfidenceInferred
 }

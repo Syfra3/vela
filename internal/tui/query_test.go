@@ -3,169 +3,360 @@ package tui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	vquery "github.com/Syfra3/vela/internal/query"
+	"github.com/Syfra3/vela/internal/app"
+	"github.com/Syfra3/vela/pkg/types"
 )
 
-func TestNewQueryModelStartsLoading(t *testing.T) {
-	t.Parallel()
-
-	m := NewQueryModel()
-	if !m.loading {
-		t.Fatal("expected search model to start loading")
-	}
-	if !strings.Contains(m.ViewContent(), "Loading SQLite search index...") {
-		t.Fatalf("expected loading state in view, got %q", m.ViewContent())
-	}
-}
-
-func TestHandleMenuSelectSearchStartsInit(t *testing.T) {
+func TestMenuModelRestoresClassicMainSurface(t *testing.T) {
 	t.Parallel()
 
 	m := NewMenuModel()
-	searchIndex := -1
+	got := make([]string, 0, len(m.items))
+	for _, item := range m.items {
+		got = append(got, item.key)
+	}
+	joined := strings.Join(got, ",")
+	if joined != "extract,graphstatus,obsidian,query,projects,purge,quit" {
+		t.Fatalf("menu keys = %q, want extract,graphstatus,obsidian,query,projects,purge,quit", joined)
+	}
+	view := m.View()
+	if !strings.Contains(view, "██╗   ██╗███████╗██╗") {
+		t.Fatalf("expected branded VELA header in view, got %q", view)
+	}
+	if strings.Contains(view, "_    __    __") {
+		t.Fatalf("did not expect legacy compact header in view, got %q", view)
+	}
+	for _, want := range []string{"Status:", "Classic navigation restored"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected classic header content %q in view, got %q", want, view)
+		}
+	}
+}
+
+func TestHandleMenuSelectObsidianRestoresExportScreen(t *testing.T) {
+	t.Parallel()
+
+	m := NewMenuModel()
+	obsidianIndex := -1
 	for i, item := range m.items {
-		if item.key == "query" {
-			searchIndex = i
-			if item.label != "Search" {
-				t.Fatalf("menu label = %q, want Search", item.label)
-			}
+		if item.key == "obsidian" {
+			obsidianIndex = i
 			break
 		}
 	}
-	if searchIndex == -1 {
-		t.Fatal("search menu item not found")
+	if obsidianIndex == -1 {
+		t.Fatal("obsidian menu item not found")
 	}
 
-	m.cursor = searchIndex
+	m.cursor = obsidianIndex
 	updated, cmd := m.handleMenuSelect()
+	menu := updated.(MenuModel)
+
+	if menu.screen != screenObsidian {
+		t.Fatalf("screen = %v, want %v", menu.screen, screenObsidian)
+	}
+	if cmd == nil {
+		t.Fatal("expected obsidian export command")
+	}
+	view := menu.viewObsidian()
+	for _, want := range []string{"Export to Obsidian", "starting export", "Progress:  0 / 4 chunks"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected %q in obsidian view, got %q", want, view)
+		}
+	}
+	if !strings.Contains(view, "██╗   ██╗███████╗██╗") {
+		t.Fatalf("expected branded VELA header in export view, got %q", view)
+	}
+}
+
+func TestViewObsidianShowsProgressContextWhileRunning(t *testing.T) {
+	t.Parallel()
+
+	m := NewMenuModelWithVersion("0.1.0")
+	m.screen = screenObsidian
+	m.obsidianRunning = true
+	m.obsidianStep = 2
+	m.obsidianTotal = 4
+	m.obsidianStatus = "loading graph.json"
+	m.obsidianStarted = time.Now().Add(-2 * time.Second)
+
+	view := m.viewObsidian()
+	for _, want := range []string{"Export to Obsidian", "loading graph.json", "Progress:  2 / 4 chunks"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected %q in obsidian progress view, got %q", want, view)
+		}
+	}
+}
+
+func TestHandleMenuSelectQueryStartsClassicQueryScreen(t *testing.T) {
+	t.Parallel()
+
+	m := NewMenuModel()
+	queryIndex := -1
+	for i, item := range m.items {
+		if item.key == "query" {
+			queryIndex = i
+			break
+		}
+	}
+	if queryIndex == -1 {
+		t.Fatal("query menu item not found")
+	}
+
+	m.cursor = queryIndex
+	updated, _ := m.handleMenuSelect()
 	menu := updated.(MenuModel)
 
 	if menu.screen != screenQuery {
 		t.Fatalf("screen = %v, want %v", menu.screen, screenQuery)
 	}
-	if !menu.queryModel.loading {
-		t.Fatal("expected search screen to start loading")
+	view := menu.viewQuery()
+	if !strings.Contains(view, "dependencies") || !strings.Contains(view, "reverse_dependencies") {
+		t.Fatalf("expected query kinds in view, got %q", view)
 	}
-	if cmd == nil {
-		t.Fatal("expected search selection to return init command")
-	}
-	if !strings.Contains(menu.viewQuery(), "Type to edit") {
-		t.Fatalf("expected search footer, got %q", menu.viewQuery())
+	if strings.Contains(view, "Graph-truth only") {
+		t.Fatalf("did not expect reduced subtitle in view, got %q", view)
 	}
 }
 
-func TestQueryModelExecutesFederatedSearch(t *testing.T) {
-	originalLoad := queryLoadSearcherFunc
-	originalSearch := querySearchFunc
+func TestExtractModelNavigatesFoldersThenRunsBuildSummary(t *testing.T) {
+	originalReadDir := readDirEntries
+	originalRun := runTUIBuild
 	t.Cleanup(func() {
-		queryLoadSearcherFunc = originalLoad
-		querySearchFunc = originalSearch
+		readDirEntries = originalReadDir
+		runTUIBuild = originalRun
 	})
 
-	queryLoadSearcherFunc = func() (*vquery.Searcher, error) {
-		return &vquery.Searcher{}, nil
+	readDirEntries = func(root string) ([]dirEntry, error) {
+		switch root {
+		case "/repo":
+			return []dirEntry{{Name: "cmd", Path: "/repo/cmd", IsDir: true}, {Name: "README.md", Path: "/repo/README.md", IsDir: false}}, nil
+		case "/repo/cmd":
+			return []dirEntry{{Name: "vela", Path: "/repo/cmd/vela", IsDir: true}}, nil
+		default:
+			return nil, nil
+		}
 	}
-	querySearchFunc = func(searcher *vquery.Searcher, input string) (vquery.SearchResponse, error) {
-		return vquery.SearchResponse{
-			Query: input,
-			Hits: []vquery.SearchHit{{
-				ID:      "code:retriever",
-				Label:   "FederatedRetriever",
-				Kind:    "struct",
-				Path:    "internal/query/search.go",
-				Snippet: "Combines graph and memory retrieval into one ranked result set.",
-				Support: []string{"FederatedRetriever -[calls]-> ResultRanker (hop 1)"},
-				SupportGraph: &vquery.SupportGraph{
-					Nodes: []vquery.SupportNode{{ID: "code:retriever", Label: "FederatedRetriever"}, {ID: "code:ranker", Label: "ResultRanker"}},
-					Edges: []vquery.SupportEdge{{FromID: "code:retriever", ToID: "code:ranker", Relation: "calls", Hop: 1}},
-				},
-				Score:         7.5,
-				PrimarySource: "vela_graph",
-				Sources:       []string{"vela_graph", "ancora"},
-				Signals:       map[string]float64{"lexical": 5, "structural": 2.5},
-			}},
-			Metrics: vquery.SearchMetrics{
-				Limit:      5,
-				AncoraOnly: vquery.StrategyMetrics{LatencyMs: 2, Returned: 1},
-				Federated:  vquery.StrategyMetrics{LatencyMs: 4, Returned: 1, SignalContribution: map[string]int{"lexical": 1, "structural": 1}},
-				Comparison: vquery.ComparisonMetrics{OverlapAtK: 1, AddedByFederated: 0},
+	runTUIBuild = func(req BuildRunRequest) (BuildRunResult, error) {
+		return BuildRunResult{GraphPath: "/repo/cmd/vela/.vela/graph.json", HTMLPath: "/repo/cmd/vela/.vela/graph.html", ObsidianPath: "/vault/obsidian", Files: 3, Facts: 2}, nil
+	}
+
+	m := NewExtractModelWithRoot("/repo")
+	if !strings.Contains(m.ViewContent(), "Browse folders") {
+		t.Fatalf("expected browser copy in initial view, got %q", m.ViewContent())
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	m = updated.(ExtractModel)
+	if m.phase != extractPhaseBrowse {
+		t.Fatalf("phase = %v, want browse", m.phase)
+	}
+	if m.currentDir != "/repo/cmd" {
+		t.Fatalf("currentDir = %q, want /repo/cmd", m.currentDir)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(ExtractModel)
+	if m.phase != extractPhaseConfirm {
+		t.Fatalf("phase after select current = %v, want confirm", m.phase)
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(ExtractModel)
+	if !m.running {
+		t.Fatal("expected build to enter running state from confirm screen")
+	}
+
+	updated, _ = m.Update(buildFinishedMsg{result: BuildRunResult{GraphPath: "/repo/cmd/vela/.vela/graph.json", HTMLPath: "/repo/cmd/vela/.vela/graph.html", ObsidianPath: "/vault/obsidian", Files: 3, Facts: 2}})
+	m = updated.(ExtractModel)
+	view := m.ViewContent()
+	for _, want := range []string{"Build summary", "graph.json", "graph.html", "/vault/obsidian"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected %q in view, got %q", want, view)
+		}
+	}
+}
+
+func TestExtractModelRunningViewShowsProgressBar(t *testing.T) {
+	t.Parallel()
+
+	m := ExtractModel{
+		phase:      extractPhaseRunning,
+		startedAt:  time.Now().Add(-3 * time.Second),
+		totalFiles: 12,
+		stage:      types.BuildStageScan,
+		stageCount: 42,
+		events:     []app.BuildEvent{{Kind: app.BuildEventStart, Message: "build started"}, {Kind: app.BuildEventStage, Stage: types.BuildStageDetect, Message: "detected source files", Count: 12}, {Kind: app.BuildEventStage, Stage: types.BuildStageScan, Message: "scanned source graph", Count: 42}},
+	}
+
+	view := m.ViewContent()
+	for _, want := range []string{"Running extraction", "Files discovered: 12", "Current stage: scan (42)", "Recent events:"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected %q in extraction progress view, got %q", want, view)
+		}
+	}
+}
+
+func TestExtractModelRunsAsyncBuild(t *testing.T) {
+	originalReadDir := readDirEntries
+	original := runTUIBuild
+	t.Cleanup(func() {
+		readDirEntries = originalReadDir
+		runTUIBuild = original
+	})
+
+	readDirEntries = func(root string) ([]dirEntry, error) {
+		return []dirEntry{{Name: "repo", Path: "/tmp/repo", IsDir: true}}, nil
+	}
+
+	runTUIBuild = func(req BuildRunRequest) (BuildRunResult, error) {
+		return BuildRunResult{
+			GraphPath: "/tmp/repo/.vela/graph.json",
+			Files:     3,
+			Facts:     2,
+			Stages: []BuildStageSummary{
+				{Name: "detect", Count: 3},
+				{Name: "drivers", Count: 2},
 			},
 		}, nil
 	}
 
-	m := NewQueryModel()
-	loaded, _ := m.Update(querySearcherLoadedMsg{searcher: &vquery.Searcher{}})
-	m = loaded.(QueryModel)
+	m := NewExtractModelWithRoot("/tmp")
 
-	var cmd tea.Cmd
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("retriever")})
-	m = updated.(QueryModel)
-	if m.input != "retriever" {
-		t.Fatalf("input = %q, want retriever", m.input)
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(ExtractModel)
+	if m.phase != extractPhaseBrowse {
+		t.Fatalf("phase = %v, want browse", m.phase)
+	}
+	if m.currentDir != "/tmp/repo" {
+		t.Fatalf("currentDir = %q, want /tmp/repo", m.currentDir)
+	}
+
+	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(ExtractModel)
+	if m.phase != extractPhaseConfirm {
+		t.Fatalf("phase after select current = %v, want confirm", m.phase)
 	}
 
 	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = updated.(QueryModel)
-	if !m.loading {
-		t.Fatal("expected loading state while search command is running")
+	m = updated.(ExtractModel)
+	if !m.running {
+		t.Fatal("expected build to enter running state")
 	}
 	if cmd == nil {
-		t.Fatal("expected enter to trigger search command")
+		t.Fatal("expected build command")
 	}
 
-	updated, _ = m.Update(querySearchResultMsg{response: vquery.SearchResponse{
-		Query: "retriever",
-		Hits: []vquery.SearchHit{{
-			ID:      "code:retriever",
-			Label:   "FederatedRetriever",
-			Kind:    "struct",
-			Path:    "internal/query/search.go",
-			Snippet: "Combines graph and memory retrieval into one ranked result set.",
-			Support: []string{"FederatedRetriever -[calls]-> ResultRanker (hop 1)"},
-			SupportGraph: &vquery.SupportGraph{
-				Nodes: []vquery.SupportNode{{ID: "code:retriever", Label: "FederatedRetriever"}, {ID: "code:ranker", Label: "ResultRanker"}},
-				Edges: []vquery.SupportEdge{{FromID: "code:retriever", ToID: "code:ranker", Relation: "calls", Hop: 1}},
-			},
-			Score:         7.5,
-			PrimarySource: "vela_graph",
-			Sources:       []string{"vela_graph", "ancora"},
-			Signals:       map[string]float64{"lexical": 5, "structural": 2.5},
-		}},
-		Metrics: vquery.SearchMetrics{
-			Limit:      5,
-			AncoraOnly: vquery.StrategyMetrics{LatencyMs: 2, Returned: 1},
-			Federated:  vquery.StrategyMetrics{LatencyMs: 4, Returned: 1, SignalContribution: map[string]int{"lexical": 1, "structural": 1}},
-			Comparison: vquery.ComparisonMetrics{OverlapAtK: 1, AddedByFederated: 0},
-		},
+	updated, _ = m.Update(buildFinishedMsg{result: BuildRunResult{
+		GraphPath: "/tmp/repo/.vela/graph.json",
+		Files:     3,
+		Facts:     2,
+		Stages:    []BuildStageSummary{{Name: "detect", Count: 3}},
 	}})
-	m = updated.(QueryModel)
+	m = updated.(ExtractModel)
 
+	if m.running {
+		t.Fatal("expected build to stop running after completion")
+	}
+	if !strings.Contains(m.ViewContent(), "/tmp/repo/.vela/graph.json") {
+		t.Fatalf("expected graph path in view, got %q", m.ViewContent())
+	}
+}
+
+func TestExtractModelBrowsesIntoFolderAndSelectsCurrentDirectory(t *testing.T) {
+	originalReadDir := readDirEntries
+	t.Cleanup(func() {
+		readDirEntries = originalReadDir
+	})
+
+	readDirEntries = func(root string) ([]dirEntry, error) {
+		switch root {
+		case "/repo":
+			return []dirEntry{{Name: "cmd", Path: "/repo/cmd", IsDir: true}, {Name: "pkg", Path: "/repo/pkg", IsDir: true}}, nil
+		case "/repo/cmd":
+			return []dirEntry{{Name: "vela", Path: "/repo/cmd/vela", IsDir: true}}, nil
+		default:
+			return nil, nil
+		}
+	}
+
+	m := NewExtractModelWithRoot("/repo")
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(ExtractModel)
+
+	if m.phase != extractPhaseBrowse {
+		t.Fatalf("phase after entering directory = %v, want browse", m.phase)
+	}
+	if m.currentDir != "/repo/cmd" {
+		t.Fatalf("currentDir = %q, want /repo/cmd", m.currentDir)
+	}
+	if !strings.Contains(m.ViewContent(), "Current folder") {
+		t.Fatalf("expected current folder copy in browser view, got %q", m.ViewContent())
+	}
+
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = updated.(ExtractModel)
+	if m.phase != extractPhaseConfirm {
+		t.Fatalf("phase after selecting current folder = %v, want confirm", m.phase)
+	}
+	if m.selected != "/repo/cmd" {
+		t.Fatalf("selected = %q, want /repo/cmd", m.selected)
+	}
+	if !strings.Contains(m.ViewContent(), "/repo/cmd") {
+		t.Fatalf("expected selected path in confirm view, got %q", m.ViewContent())
+	}
+}
+
+func TestQueryModelRunsGraphTruthRequest(t *testing.T) {
+	originalLoad := queryLoadEngineFunc
+	originalRun := queryRunRequestFunc
+	t.Cleanup(func() {
+		queryLoadEngineFunc = originalLoad
+		queryRunRequestFunc = originalRun
+	})
+
+	queryLoadEngineFunc = func(graphPath string) (queryRunner, error) {
+		return stubQueryRunner{}, nil
+	}
+	queryRunRequestFunc = func(r queryRunner, req types.QueryRequest) (string, error) {
+		return "Dependencies for \"AuthService\":\n  - Database via uses", nil
+	}
+
+	m := NewQueryModel()
+	for _, r := range "AuthService" {
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		m = updated.(QueryModel)
+	}
+
+	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	m = updated.(QueryModel)
+	if !m.running {
+		t.Fatal("expected query to enter running state")
+	}
+	if cmd == nil {
+		t.Fatal("expected query command")
+	}
+
+	updated, _ = m.Update(queryFinishedMsg{output: "Dependencies for \"AuthService\":\n  - Database via uses"})
+	m = updated.(QueryModel)
+	if m.running {
+		t.Fatal("expected query to finish")
+	}
 	view := m.ViewContent()
-	if !m.hasSearched {
-		t.Fatal("expected search response to mark hasSearched")
+	if !strings.Contains(view, "Dependencies for \"AuthService\"") {
+		t.Fatalf("expected query output in view, got %q", view)
 	}
-	if !strings.Contains(view, "FederatedRetriever") {
-		t.Fatalf("expected result label in view, got %q", view)
+	if !strings.Contains(view, "dependencies") {
+		t.Fatalf("expected query kind list in view, got %q", view)
 	}
-	if !strings.Contains(view, "[Graph]") {
-		t.Fatalf("expected source label in view, got %q", view)
-	}
-	if !strings.Contains(view, "sources: Graph, Ancora") {
-		t.Fatalf("expected federated source summary in view, got %q", view)
-	}
-	if !strings.Contains(view, "signals: Lexical, Structural") {
-		t.Fatalf("expected signal summary in view, got %q", view)
-	}
-	if !strings.Contains(view, "support 2n/1e") {
-		t.Fatalf("expected structured support summary in view, got %q", view)
-	}
-	if !strings.Contains(view, "context: FederatedRetriever -[calls]-> ResultRanker") {
-		t.Fatalf("expected structural context in view, got %q", view)
-	}
-	if !strings.Contains(view, "Ancora 2ms/1  |  Federated 4ms/1") {
-		t.Fatalf("expected metrics summary in view, got %q", view)
-	}
+}
+
+type stubQueryRunner struct{}
+
+func (stubQueryRunner) RunRequest(req types.QueryRequest) (string, error) {
+	return "", nil
 }

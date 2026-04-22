@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/Syfra3/vela/internal/graph"
-	"github.com/Syfra3/vela/internal/retrieval"
 	"github.com/Syfra3/vela/pkg/types"
 )
 
@@ -63,9 +62,6 @@ func WriteJSON(g *types.Graph, outDir string) error {
 	if err := os.WriteFile(outPath, data, 0644); err != nil {
 		return fmt.Errorf("writing %s: %w", outPath, err)
 	}
-	if err := retrieval.SyncGraph(g, retrieval.DBPath(outDir)); err != nil {
-		return fmt.Errorf("writing retrieval.db: %w", err)
-	}
 	return nil
 }
 
@@ -103,9 +99,6 @@ func WriteJSONAtomic(g *types.Graph, outDir string) error {
 	if err := os.Rename(tmp, outPath); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("renaming temp file: %w", err)
-	}
-	if err := retrieval.SyncGraph(g, retrieval.DBPath(outDir)); err != nil {
-		return fmt.Errorf("writing retrieval.db: %w", err)
 	}
 	return nil
 }

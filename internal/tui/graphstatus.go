@@ -38,32 +38,47 @@ type graphStatusLoadedMsg struct {
 }
 
 type GraphStatusModel struct {
-	metrics  igraph.HealthMetrics
-	vault    vaultStats
-	loadErr  error
-	loading  bool
-	quitting bool
+	graphPath    string
+	metrics      igraph.HealthMetrics
+	vault        vaultStats
+	loadErr      error
+	loading      bool
+	quitting     bool
+	termWidth    int
+	termHeight   int
+	scrollOffset int
 }
 
 func NewGraphStatusModel() GraphStatusModel {
-	return GraphStatusModel{loading: true}
+	return GraphStatusModel{loading: true, termWidth: 100, termHeight: 24}
+}
+
+func NewGraphStatusModelWithGraphPath(graphPath string) GraphStatusModel {
+	return GraphStatusModel{graphPath: graphPath, loading: true, termWidth: 100, termHeight: 24}
 }
 
 func (m GraphStatusModel) Quitting() bool { return m.quitting }
 
 func (m GraphStatusModel) Init() tea.Cmd {
-	return loadMetricsCmd()
+	return loadMetricsCmd(m.graphPath)
 }
 
-func loadMetricsCmd() tea.Cmd {
+func loadMetricsCmd(graphPath string) tea.Cmd {
 	return func() tea.Msg {
-		graphPath, err := config.FindGraphFile(".")
-		if err != nil {
-			return graphStatusLoadedMsg{loadErr: err}
+		resolvedGraphPath := graphPath
+		if strings.TrimSpace(resolvedGraphPath) == "" {
+			var err error
+			resolvedGraphPath, err = config.FindGraphFile(".")
+			if err != nil {
+				return graphStatusLoadedMsg{loadErr: err}
+			}
 		}
-		outDir := filepath.Dir(graphPath)
-		mx, loadErr := igraph.LoadHealthMetrics(graphPath, 5)
-		vs := loadVaultStats(filepath.Join(outDir, "obsidian"))
+		mx, loadErr := igraph.LoadHealthMetrics(resolvedGraphPath, 5)
+		cfg, cfgErr := config.Load()
+		if cfgErr != nil {
+			return graphStatusLoadedMsg{metrics: mx, loadErr: cfgErr}
+		}
+		vs := loadVaultStats(filepath.Join(config.ResolveVaultDir(cfg.Obsidian.VaultDir), "obsidian"))
 		return graphStatusLoadedMsg{metrics: mx, vault: vs, loadErr: loadErr}
 	}
 }
@@ -105,6 +120,12 @@ func (m GraphStatusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.vault = msg.vault
 		m.loadErr = msg.loadErr
 		m.loading = false
+		m.clampScroll()
+		return m, nil
+	case tea.WindowSizeMsg:
+		m.termWidth = msg.Width
+		m.termHeight = msg.Height
+		m.clampScroll()
 		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -112,13 +133,53 @@ func (m GraphStatusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 		case "r":
 			m.loading = true
-			return m, loadMetricsCmd()
+			m.scrollOffset = 0
+			return m, loadMetricsCmd(m.graphPath)
+		case "up", "k":
+			if m.scrollOffset > 0 {
+				m.scrollOffset--
+			}
+		case "down", "j":
+			if m.scrollOffset < m.maxScrollOffset() {
+				m.scrollOffset++
+			}
+		case "pgup", "b", "ctrl+u":
+			m.scrollOffset -= m.viewportHeight()
+			m.clampScroll()
+		case "pgdown", "f", "ctrl+d":
+			m.scrollOffset += m.viewportHeight()
+			m.clampScroll()
 		}
 	}
 	return m, nil
 }
 
 func (m GraphStatusModel) ViewContent() string {
+	content := m.renderContent()
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	if len(lines) == 1 && lines[0] == "" {
+		return ""
+	}
+	viewportHeight := m.viewportHeight()
+	if viewportHeight <= 0 || len(lines) <= viewportHeight {
+		return content
+	}
+	start := m.scrollOffset
+	if start < 0 {
+		start = 0
+	}
+	maxStart := len(lines) - viewportHeight
+	if start > maxStart {
+		start = maxStart
+	}
+	end := start + viewportHeight
+	if end > len(lines) {
+		end = len(lines)
+	}
+	return strings.Join(lines[start:end], "\n")
+}
+
+func (m GraphStatusModel) renderContent() string {
 	var b strings.Builder
 
 	text := lipgloss.NewStyle().Foreground(colorText)
@@ -269,18 +330,29 @@ func (m GraphStatusModel) ViewContent() string {
 		rankStyle := lipgloss.NewStyle().Foreground(colorSubtext).Width(3)
 		degStyle := lipgloss.NewStyle().Foreground(colorText)
 		fileStyle := lipgloss.NewStyle().Foreground(colorSubtext)
+		contentWidth := m.contentWidth()
+		nameWidth := 24
+		if contentWidth > 72 {
+			nameWidth = contentWidth - 46
+		}
+		if nameWidth < 18 {
+			nameWidth = 18
+		}
+		if nameWidth > 48 {
+			nameWidth = 48
+		}
 
 		for i, n := range mx.TopByOutDegree {
 			shortFile := filepath.Base(n.File)
 			kindColor := nodeKindColor(n.Kind)
-			nameStyle := lipgloss.NewStyle().Foreground(kindColor).Width(24)
+			nameStyle := lipgloss.NewStyle().Foreground(kindColor).Width(nameWidth).MaxWidth(nameWidth)
 			kindTag := lipgloss.NewStyle().Foreground(kindColor).Faint(true).Render("[" + n.Kind + "]")
 			b.WriteString(fmt.Sprintf("  %s %s %s %s  %s\n",
 				rankStyle.Render(fmt.Sprintf("%d.", i+1)),
-				nameStyle.Render(n.Label),
+				nameStyle.Render(truncateMiddle(n.Label, nameWidth)),
 				kindTag,
 				degStyle.Render(fmt.Sprintf("out:%d in:%d", n.OutDeg, n.InDeg)),
-				fileStyle.Render(shortFile),
+				fileStyle.Render(truncateMiddle(shortFile, 24)),
 			))
 		}
 		b.WriteString("\n")
@@ -316,5 +388,65 @@ func (m GraphStatusModel) ViewContent() string {
 func (m GraphStatusModel) View() string { return m.ViewContent() }
 
 func (m GraphStatusModel) FooterHelp() string {
-	return "r refresh • esc back to menu"
+	if m.maxScrollOffset() > 0 {
+		return "↑↓ scroll • pgup/pgdn page • r reload • esc back"
+	}
+	return "r refresh • esc back"
+}
+
+func (m GraphStatusModel) contentWidth() int {
+	width := m.termWidth - 8
+	if width < 60 {
+		width = 60
+	}
+	return width
+}
+
+func (m GraphStatusModel) viewportHeight() int {
+	height := m.termHeight - 14
+	if height < 8 {
+		height = 8
+	}
+	return height
+}
+
+func (m *GraphStatusModel) clampScroll() {
+	if m == nil {
+		return
+	}
+	maxOffset := m.maxScrollOffset()
+	if m.scrollOffset < 0 {
+		m.scrollOffset = 0
+	}
+	if m.scrollOffset > maxOffset {
+		m.scrollOffset = maxOffset
+	}
+}
+
+func (m GraphStatusModel) maxScrollOffset() int {
+	if m.loading || m.loadErr != nil {
+		return 0
+	}
+	lines := strings.Split(strings.TrimRight(m.renderContent(), "\n"), "\n")
+	viewportHeight := m.viewportHeight()
+	if len(lines) <= viewportHeight {
+		return 0
+	}
+	return len(lines) - viewportHeight
+}
+
+func truncateMiddle(value string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= max {
+		return value
+	}
+	if max <= 3 {
+		return string(runes[:max])
+	}
+	head := (max - 1) / 2
+	tail := max - head - 1
+	return string(runes[:head]) + "…" + string(runes[len(runes)-tail:])
 }

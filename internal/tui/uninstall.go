@@ -12,8 +12,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/Syfra3/vela/internal/config"
-	"github.com/Syfra3/vela/internal/daemon"
-	"github.com/Syfra3/vela/internal/setup"
 )
 
 type uninstallState int
@@ -34,12 +32,7 @@ type uninstallResultMsg struct {
 	err    error
 }
 
-var (
-	uninstallStopDaemon  = stopRunningDaemon
-	uninstallRemoveMCP   = setup.UninstallMCP
-	uninstallRemoveSvc   = daemon.UninstallService
-	uninstallTargetsFunc = uninstallTargets
-)
+var uninstallTargetsFunc = uninstallTargets
 
 type UninstallModel struct {
 	state    uninstallState
@@ -67,7 +60,7 @@ func (m UninstallModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "ctrl+c", "esc", "b":
 				m.quitting = true
 				return m, nil
-			case "enter", "u":
+			case "enter", "u", "p":
 				m.state = uninstallStateRunning
 				m.err = nil
 				m.result = uninstallResult{}
@@ -80,13 +73,11 @@ func (m UninstallModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		}
-
 	case uninstallResultMsg:
 		m.state = uninstallStateDone
 		m.result = msg.result
 		m.err = msg.err
 	}
-
 	return m, nil
 }
 
@@ -94,7 +85,6 @@ func (m UninstallModel) View() string { return m.ViewContent() }
 
 func (m UninstallModel) ViewContent() string {
 	var b strings.Builder
-
 	textStyle := lipgloss.NewStyle().Foreground(colorText)
 	warnStyle := lipgloss.NewStyle().Foreground(colorWarn).Bold(true)
 	errorStyle := lipgloss.NewStyle().Foreground(colorErr)
@@ -103,29 +93,26 @@ func (m UninstallModel) ViewContent() string {
 
 	switch m.state {
 	case uninstallStateConfirm:
-		b.WriteString(warnStyle.Render("This removes Vela integrations and deletes Vela-managed data."))
+		b.WriteString(warnStyle.Render("This purges Vela-managed graph, cache, and export data."))
 		b.WriteString("\n")
-		b.WriteString(textStyle.Render("It will stop the watch daemon, remove MCP registration, uninstall the watch service when present, and delete:"))
+		b.WriteString(textStyle.Render("It deletes only Vela-managed paths:"))
 		b.WriteString("\n\n")
 		for _, target := range m.targets {
 			b.WriteString(textStyle.Render("  • " + target))
 			b.WriteString("\n")
 		}
 		b.WriteString("\n")
-		b.WriteString(mutedStyle.Render("Custom Ollama models and non-Vela files outside these paths are left alone."))
-
+		b.WriteString(mutedStyle.Render("Source repositories are not deleted. Custom files outside these paths are left alone."))
 	case uninstallStateRunning:
-		b.WriteString(textStyle.Render("Removing Vela integrations and data..."))
-
+		b.WriteString(textStyle.Render("Purging Vela-managed data..."))
 	case uninstallStateDone:
 		if m.err != nil {
-			b.WriteString(errorStyle.Render(fmt.Sprintf("Uninstall failed: %v", m.err)))
+			b.WriteString(errorStyle.Render(fmt.Sprintf("Purge failed: %v", m.err)))
 			b.WriteString("\n")
 		} else {
-			b.WriteString(successStyle.Render("Vela uninstall complete."))
+			b.WriteString(successStyle.Render("Purge complete."))
 			b.WriteString("\n")
 		}
-
 		if len(m.result.Removed) > 0 {
 			b.WriteString("\n")
 			b.WriteString(textStyle.Render("Removed:"))
@@ -135,7 +122,6 @@ func (m UninstallModel) ViewContent() string {
 				b.WriteString("\n")
 			}
 		}
-
 		if len(m.result.Warnings) > 0 {
 			b.WriteString("\n")
 			b.WriteString(warnStyle.Render("Warnings:"))
@@ -146,16 +132,15 @@ func (m UninstallModel) ViewContent() string {
 			}
 		}
 	}
-
 	return b.String()
 }
 
 func (m UninstallModel) FooterHelp() string {
 	switch m.state {
 	case uninstallStateConfirm:
-		return "u/Enter uninstall • esc back"
+		return "p/u/Enter purge • esc back"
 	case uninstallStateRunning:
-		return "waiting for uninstall to finish"
+		return "waiting for purge to finish"
 	default:
 		return "Enter or esc back to menu"
 	}
@@ -173,53 +158,34 @@ func uninstallAll() (uninstallResult, error) {
 	if err != nil {
 		return uninstallResult{}, err
 	}
-
 	result := uninstallResult{}
-
-	if err := uninstallStopDaemon(); err != nil && !errors.Is(err, daemon.ErrNotRunning) {
-		result.Warnings = append(result.Warnings, fmt.Sprintf("stop daemon: %v", err))
-	}
-	if err := uninstallRemoveSvc(); err != nil && !strings.Contains(err.Error(), "not supported") {
-		result.Warnings = append(result.Warnings, fmt.Sprintf("remove watch service: %v", err))
-	}
-	if err := uninstallRemoveMCP(); err != nil {
-		result.Warnings = append(result.Warnings, fmt.Sprintf("remove MCP config: %v", err))
-	}
-
 	for _, target := range targets {
 		if _, err := os.Stat(target); os.IsNotExist(err) {
 			continue
 		} else if err != nil {
 			return result, fmt.Errorf("checking %s: %w", target, err)
 		}
-
 		if err := os.RemoveAll(target); err != nil {
 			return result, fmt.Errorf("removing %s: %w", target, err)
 		}
 		result.Removed = append(result.Removed, target)
 	}
-
 	return result, nil
 }
 
 func uninstallTargets() ([]string, error) {
 	targets := []string{config.OutDir(".")}
 	vaultDir := config.DefaultVaultDir()
-
 	if cfg, err := config.Load(); err == nil {
 		vaultDir = config.ResolveVaultDir(cfg.Obsidian.VaultDir)
 	}
-
 	if vaultDir != "" {
 		if filepath.Clean(vaultDir) == filepath.Clean(config.DefaultVaultDir()) {
-			// Default vault dir is entirely Vela-managed — remove it whole.
 			targets = append(targets, vaultDir)
 		} else {
-			// Custom vault: only remove the Vela-exported subdirectory.
 			targets = append(targets, filepath.Join(vaultDir, "obsidian"))
 		}
 	}
-
 	return uniqueSortedPaths(targets), nil
 }
 
@@ -237,3 +203,5 @@ func uniqueSortedPaths(paths []string) []string {
 	sort.Strings(unique)
 	return unique
 }
+
+var _ = errors.New

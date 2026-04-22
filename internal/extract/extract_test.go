@@ -1,6 +1,7 @@
 package extract
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -143,9 +144,9 @@ func TestEvidenceForExt(t *testing.T) {
 		{".py", EvidenceTypeAST, types.ConfidenceExtracted},
 		{".ts", EvidenceTypeAST, types.ConfidenceExtracted},
 		{".js", EvidenceTypeAST, types.ConfidenceExtracted},
-		{".md", EvidenceTypeDocLLM, types.ConfidenceInferred},
-		{".txt", EvidenceTypeDocLLM, types.ConfidenceInferred},
-		{".pdf", EvidenceTypePDFLLM, types.ConfidenceInferred},
+		{".md", EvidenceTypeFilesystem, types.ConfidenceInferred},
+		{".txt", EvidenceTypeFilesystem, types.ConfidenceInferred},
+		{".pdf", EvidenceTypeFilesystem, types.ConfidenceInferred},
 		{".xyz", EvidenceTypeFilesystem, types.ConfidenceInferred},
 	}
 	for _, tc := range cases {
@@ -154,5 +155,44 @@ func TestEvidenceForExt(t *testing.T) {
 			t.Errorf("evidenceForExt(%q) = (%q, %q), want (%q, %q)",
 				tc.ext, gotType, gotConf, tc.wantType, tc.wantConfid)
 		}
+	}
+}
+
+func TestExtractAll_EmitsFileNodesAndStaticFileEdgesForBarrels(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "index.ts"), []byte("export * from './foo'\n"), 0o644); err != nil {
+		t.Fatalf("write index.ts: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "foo.ts"), []byte("export const foo = () => 1\n"), 0o644); err != nil {
+		t.Fatalf("write foo.ts: %v", err)
+	}
+
+	src := &types.Source{Type: types.SourceTypeCodebase, Name: "barrel", Path: root}
+	nodes, edges, err := ExtractAll(root, []string{filepath.Join(root, "index.ts"), filepath.Join(root, "foo.ts")}, nil, src)
+	if err != nil {
+		t.Fatalf("ExtractAll error: %v", err)
+	}
+
+	seenIndex := false
+	seenFoo := false
+	seenDep := false
+	for _, node := range nodes {
+		if node.ID == "barrel:file:index.ts" {
+			seenIndex = true
+		}
+		if node.ID == "barrel:file:foo.ts" {
+			seenFoo = true
+		}
+	}
+	for _, edge := range edges {
+		if edge.Source == "barrel:file:index.ts" && edge.Target == "barrel:file:foo.ts" && edge.Relation == string(types.FactKindDependsOn) {
+			seenDep = true
+		}
+	}
+	if !seenIndex || !seenFoo {
+		t.Fatalf("expected barrel file nodes, got nodes=%v", nodes)
+	}
+	if !seenDep {
+		t.Fatalf("expected static file dependency edge, got edges=%v", edges)
 	}
 }

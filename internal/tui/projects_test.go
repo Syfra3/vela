@@ -9,29 +9,15 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/Syfra3/vela/internal/export"
-	"github.com/Syfra3/vela/internal/retrieval"
 	"github.com/Syfra3/vela/pkg/types"
 )
 
-func withProjectStubEmbeddings(t *testing.T) {
-	t.Helper()
-	restore := retrieval.SetEmbedTextsForTesting(func(texts []string) ([][]float32, error) {
-		out := make([][]float32, 0, len(texts))
-		for range texts {
-			out = append(out, []float32{1, 0})
-		}
-		return out, nil
-	})
-	t.Cleanup(restore)
-}
-
 func TestLoadTrackedProjectsReadsProjectMetadata(t *testing.T) {
-	withProjectStubEmbeddings(t)
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	graphPath := writeProjectsGraph(t, home)
 
-	projects, gotGraphPath, err := loadTrackedProjects()
+	projects, gotGraphPath, err := loadTrackedProjects(graphPath)
 	if err != nil {
 		t.Fatalf("loadTrackedProjects() error = %v", err)
 	}
@@ -50,17 +36,8 @@ func TestLoadTrackedProjectsReadsProjectMetadata(t *testing.T) {
 }
 
 func TestDeleteTrackedProjectsRemovesGraphNodesAndCacheEntries(t *testing.T) {
-	withProjectStubEmbeddings(t)
-	originalHome := os.Getenv("HOME")
-	t.Cleanup(func() {
-		_ = os.Setenv("HOME", originalHome)
-	})
-
 	home := t.TempDir()
-	if err := os.Setenv("HOME", home); err != nil {
-		t.Fatalf("set HOME: %v", err)
-	}
-
+	t.Setenv("HOME", home)
 	graphPath := writeProjectsGraph(t, home)
 	cacheDir := filepath.Join(home, ".vela", "cache")
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
@@ -79,9 +56,9 @@ func TestDeleteTrackedProjectsRemovesGraphNodesAndCacheEntries(t *testing.T) {
 		t.Fatalf("message = %q", message)
 	}
 
-	g, err := loadExistingGraph(graphPath)
+	g, err := loadGraph(graphPath)
 	if err != nil {
-		t.Fatalf("loadExistingGraph() error = %v", err)
+		t.Fatalf("loadGraph() error = %v", err)
 	}
 	if len(g.Nodes) != 2 {
 		t.Fatalf("remaining nodes = %d, want 2", len(g.Nodes))
@@ -99,10 +76,10 @@ func TestDeleteTrackedProjectsRemovesGraphNodesAndCacheEntries(t *testing.T) {
 	if string(cacheData) == string(cacheJSON) {
 		t.Fatal("expected cache file to change")
 	}
-	if string(cacheData) == "" || contains(string(cacheData), "/work/alpha/main.go") {
+	if strings.Contains(string(cacheData), "/work/alpha/main.go") {
 		t.Fatalf("alpha cache entry still present: %s", string(cacheData))
 	}
-	if !contains(string(cacheData), "/work/vela/main.go") {
+	if !strings.Contains(string(cacheData), "/work/vela/main.go") {
 		t.Fatalf("expected vela cache entry preserved: %s", string(cacheData))
 	}
 }
@@ -115,18 +92,10 @@ func TestProjectsModelMarksAndStartsActions(t *testing.T) {
 		refreshTrackedProjectFunc = originalRefresh
 	})
 
-	deleteTrackedProjectsFunc = func(string, []trackedProject) (string, error) {
-		return "deleted", nil
-	}
-	refreshTrackedProjectFunc = func(string, trackedProject) (string, error) {
-		return "refreshed", nil
-	}
+	deleteTrackedProjectsFunc = func(string, []trackedProject) (string, error) { return "deleted", nil }
+	refreshTrackedProjectFunc = func(string, trackedProject) (string, error) { return "refreshed", nil }
 
-	model := ProjectsModel{
-		graphPath: "/tmp/graph.json",
-		projects:  []trackedProject{{Name: "vela", NodeID: "project:vela", Path: "/work/vela"}},
-		selected:  map[string]bool{},
-	}
+	model := ProjectsModel{graphPath: "/tmp/graph.json", projects: []trackedProject{{Name: "vela", NodeID: "project:vela", Path: "/work/vela"}}, selected: map[string]bool{}}
 
 	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
 	model = updated.(ProjectsModel)
@@ -148,61 +117,20 @@ func TestProjectsModelMarksAndStartsActions(t *testing.T) {
 	}
 }
 
-func TestGraphContainsProject(t *testing.T) {
-	project := &types.Source{Type: types.SourceTypeCodebase, Name: "vela", Path: "/work/vela"}
-	if graphContainsProject(&types.Graph{Nodes: []types.Node{{ID: "memory:observation:1", NodeType: string(types.NodeTypeObservation)}}}, project) {
-		t.Fatal("expected memory-only graph to report project missing")
-	}
-	if !graphContainsProject(&types.Graph{Nodes: []types.Node{{ID: "project:vela", NodeType: string(types.NodeTypeProject), Source: project}}}, project) {
-		t.Fatal("expected graph to contain project source")
-	}
-}
-
 func writeProjectsGraph(t *testing.T, home string) string {
 	t.Helper()
-
 	outDir := filepath.Join(home, ".vela")
-
 	g := &types.Graph{
 		Nodes: []types.Node{
-			{
-				ID:       "project:alpha",
-				Label:    "alpha",
-				NodeType: string(types.NodeTypeProject),
-				Metadata: map[string]interface{}{"path": "/work/alpha"},
-				Source:   &types.Source{Type: types.SourceTypeCodebase, Name: "alpha", Path: "/work/alpha"},
-			},
-			{
-				ID:         "alpha:file:main.go",
-				Label:      "main.go",
-				NodeType:   string(types.NodeTypeFile),
-				SourceFile: "main.go",
-				Source:     &types.Source{Type: types.SourceTypeCodebase, Name: "alpha", Path: "/work/alpha"},
-			},
-			{
-				ID:       "project:vela",
-				Label:    "vela",
-				NodeType: string(types.NodeTypeProject),
-				Metadata: map[string]interface{}{"path": "/work/vela", "remote": "https://github.com/org/vela.git"},
-				Source:   &types.Source{Type: types.SourceTypeCodebase, Name: "vela", Path: "/work/vela", Remote: "https://github.com/org/vela.git"},
-			},
-			{
-				ID:         "vela:file:main.go",
-				Label:      "main.go",
-				NodeType:   string(types.NodeTypeFile),
-				SourceFile: "main.go",
-				Source:     &types.Source{Type: types.SourceTypeCodebase, Name: "vela", Path: "/work/vela"},
-			},
+			{ID: "project:alpha", Label: "alpha", NodeType: string(types.NodeTypeProject), Metadata: map[string]interface{}{"path": "/work/alpha"}, Source: &types.Source{Type: types.SourceTypeCodebase, Name: "alpha", Path: "/work/alpha"}},
+			{ID: "alpha:file:main.go", Label: "main.go", NodeType: string(types.NodeTypeFile), SourceFile: "main.go", Source: &types.Source{Type: types.SourceTypeCodebase, Name: "alpha", Path: "/work/alpha"}},
+			{ID: "project:vela", Label: "vela", NodeType: string(types.NodeTypeProject), Metadata: map[string]interface{}{"path": "/work/vela", "remote": "https://github.com/org/vela.git"}, Source: &types.Source{Type: types.SourceTypeCodebase, Name: "vela", Path: "/work/vela", Remote: "https://github.com/org/vela.git"}},
+			{ID: "vela:file:main.go", Label: "main.go", NodeType: string(types.NodeTypeFile), SourceFile: "main.go", Source: &types.Source{Type: types.SourceTypeCodebase, Name: "vela", Path: "/work/vela"}},
 		},
 		Edges: []types.Edge{{Source: "project:alpha", Target: "alpha:file:main.go", Relation: "contains"}},
 	}
-
 	if err := export.WriteJSON(g, outDir); err != nil {
 		t.Fatalf("WriteJSON() error = %v", err)
 	}
 	return filepath.Join(outDir, "graph.json")
-}
-
-func contains(s, substr string) bool {
-	return strings.Contains(s, substr)
 }

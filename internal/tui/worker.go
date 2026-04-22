@@ -1,5 +1,12 @@
 package tui
 
+// BuildStatus is the classic TUI build lifecycle summary.
+type BuildStatus struct {
+	Running bool
+	Done    bool
+	Error   string
+}
+
 // WorkerStatus describes the current state of one extraction worker.
 type WorkerStatus struct {
 	ID     int
