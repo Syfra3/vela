@@ -8,6 +8,7 @@ import (
 
 	"github.com/Syfra3/vela/internal/config"
 	"github.com/Syfra3/vela/internal/export"
+	igraph "github.com/Syfra3/vela/internal/graph"
 	"github.com/Syfra3/vela/internal/pipeline"
 	"github.com/Syfra3/vela/internal/scip"
 	"github.com/Syfra3/vela/pkg/types"
@@ -137,6 +138,6 @@ func defaultRunPipeline(ctx context.Context, outDir string, req types.BuildReque
 	if err != nil {
 		return pipeline.Result{}, fmt.Errorf("load SCIP registry: %w", err)
 	}
-	builder := pipeline.NewBuilder(pipeline.Config{Registry: registry, OutDir: outDir, Observer: observer})
+	builder := pipeline.NewBuilder(pipeline.Config{Registry: registry, OutDir: outDir, Observer: observer, Cluster: igraph.RunLeiden})
 	return builder.Build(ctx, req)
 }

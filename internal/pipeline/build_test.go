@@ -75,6 +75,20 @@ type fakePatcher struct {
 	err    error
 }
 
+type fakeClusterer struct {
+	partition map[string]int
+	err       error
+	called    int
+}
+
+func (c *fakeClusterer) Run(*igraph.Graph) (map[string]int, error) {
+	c.called++
+	if c.err != nil {
+		return nil, c.err
+	}
+	return c.partition, nil
+}
+
 func (p *fakePatcher) Name() string { return p.name }
 
 func (p *fakePatcher) Patch(context.Context, types.BuildRequest, []types.Fact) ([]types.Fact, error) {
@@ -138,6 +152,7 @@ func TestBuilderBuild_RunsDetectScanDriverPatchMergeAndPersist(t *testing.T) {
 
 	var persisted *types.Graph
 	var persistedPath string
+	clusterer := &fakeClusterer{partition: map[string]int{"svc": 7, "db": 9}}
 	builder := NewBuilder(Config{
 		Detect: func(string) ([]string, error) {
 			return []string{filepath.Join(repoRoot, "main.go"), filepath.Join(repoRoot, "README.md")}, nil
@@ -148,6 +163,7 @@ func TestBuilderBuild_RunsDetectScanDriverPatchMergeAndPersist(t *testing.T) {
 			"enrich-deps": patcher,
 		},
 		GraphBuilder: igraph.Build,
+		Cluster:      clusterer.Run,
 		Persist: func(g *types.Graph, out string) error {
 			persisted = g
 			persistedPath = filepath.Join(out, "graph.json")
@@ -189,6 +205,9 @@ func TestBuilderBuild_RunsDetectScanDriverPatchMergeAndPersist(t *testing.T) {
 	if persistedPath != filepath.Join(outDir, "graph.json") {
 		t.Fatalf("persisted path = %q, want %q", persistedPath, filepath.Join(outDir, "graph.json"))
 	}
+	if clusterer.called != 1 {
+		t.Fatalf("clusterer called = %d, want 1", clusterer.called)
+	}
 	if result.GraphPath != filepath.Join(outDir, "graph.json") {
 		t.Fatalf("result graph path = %q", result.GraphPath)
 	}
@@ -197,6 +216,9 @@ func TestBuilderBuild_RunsDetectScanDriverPatchMergeAndPersist(t *testing.T) {
 	}
 	if len(result.Graph.Nodes) != 2 {
 		t.Fatalf("graph nodes = %d, want 2", len(result.Graph.Nodes))
+	}
+	if result.Graph.Nodes[0].Community == 0 && result.Graph.Nodes[1].Community == 0 {
+		t.Fatal("expected clustering to annotate graph nodes before persistence")
 	}
 	if len(result.Graph.Edges) != 1 {
 		t.Fatalf("graph edges = %d, want 1", len(result.Graph.Edges))
@@ -479,6 +501,32 @@ func TestBuilderBuild_WarnsAndContinuesWhenDriverExecutionFails(t *testing.T) {
 	}
 	if driver.called != 1 {
 		t.Fatalf("driver called = %d, want 1", driver.called)
+	}
+}
+
+func TestBuilderBuild_WarnsAndContinuesWhenClusteringFails(t *testing.T) {
+	repoRoot := t.TempDir()
+	clusterer := &fakeClusterer{err: igraph.ErrGraspologicMissing}
+	builder := NewBuilder(Config{
+		Detect:       func(string) ([]string, error) { return []string{filepath.Join(repoRoot, "main.go")}, nil },
+		Scanner:      &fakeScanner{nodes: []types.Node{{ID: "svc", Label: "svc", NodeType: "function"}}},
+		GraphBuilder: igraph.Build,
+		Cluster:      clusterer.Run,
+		Persist:      func(*types.Graph, string) error { return nil },
+	})
+
+	result, err := builder.Build(context.Background(), types.BuildRequest{RepoRoot: repoRoot})
+	if err != nil {
+		t.Fatalf("Build() error = %v, want warning-only degrade", err)
+	}
+	if clusterer.called != 1 {
+		t.Fatalf("clusterer called = %d, want 1", clusterer.called)
+	}
+	if len(result.Warnings) != 1 {
+		t.Fatalf("warnings len = %d, want 1", len(result.Warnings))
+	}
+	if got := result.Warnings[0]; !strings.Contains(got, "Community detection unavailable") || !strings.Contains(got, "graspologic") {
+		t.Fatalf("warning = %q", got)
 	}
 }
 

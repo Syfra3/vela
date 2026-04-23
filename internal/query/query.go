@@ -869,12 +869,16 @@ func (e *Engine) Stats() GraphStats {
 	if len(e.graph.Communities) > 0 {
 		stats.CommunityCount = len(e.graph.Communities)
 	} else {
+		hasNonZero := false
 		for _, node := range e.graph.Nodes {
 			if node.Community != 0 {
+				hasNonZero = true
 				communities[node.Community] = struct{}{}
 			}
 		}
-		stats.CommunityCount = len(communities)
+		if hasNonZero {
+			stats.CommunityCount = len(communities)
+		}
 	}
 
 	for _, node := range e.graph.Nodes {

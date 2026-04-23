@@ -3,12 +3,16 @@ package graph
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
+
+var ErrGraspologicMissing = errors.New("graspologic is not installed")
 
 // leidenInput is the payload sent to the Python subprocess via stdin.
 type leidenInput struct {
@@ -62,7 +66,7 @@ func RunLeiden(g *Graph) (map[string]int, error) {
 	}
 
 	// Locate Python interpreter
-	python, err := findPython()
+	python, err := findPython(scriptPath)
 	if err != nil {
 		return nil, fmt.Errorf("python not found: %w (install python3 to enable clustering)", err)
 	}
@@ -75,7 +79,14 @@ func RunLeiden(g *Graph) (map[string]int, error) {
 	cmd.Stderr = &stderr
 
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("leiden subprocess failed: %w\nstderr: %s", err, stderr.String())
+		stderrText := strings.TrimSpace(stderr.String())
+		if strings.Contains(stderrText, "graspologic is not installed") {
+			return nil, fmt.Errorf("%w: %s", ErrGraspologicMissing, stderrText)
+		}
+		if stderrText != "" {
+			return nil, fmt.Errorf("leiden subprocess failed: %w\nstderr: %s", err, stderrText)
+		}
+		return nil, fmt.Errorf("leiden subprocess failed: %w", err)
 	}
 
 	var partition map[string]int
@@ -142,12 +153,46 @@ func findScript(name string) (string, error) {
 	return "", fmt.Errorf("scripts/%s not found near binary or repo root", name)
 }
 
-// findPython returns the path to a Python 3 interpreter.
-func findPython() (string, error) {
+// findPython returns the path to a Python 3 interpreter, preferring a repo-local
+// virtualenv when present so clustering dependencies can be installed without
+// mutating the system Python environment.
+func findPython(scriptPath string) (string, error) {
+	for _, candidate := range localPythonCandidates(scriptPath) {
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate, nil
+		}
+	}
 	for _, candidate := range []string{"python3", "python"} {
 		if p, err := exec.LookPath(candidate); err == nil {
 			return p, nil
 		}
 	}
 	return "", fmt.Errorf("no python3 or python interpreter in PATH")
+}
+
+func localPythonCandidates(scriptPath string) []string {
+	dirs := make([]string, 0, 4)
+	if scriptPath != "" {
+		dirs = append(dirs, filepath.Dir(filepath.Dir(scriptPath)))
+	}
+	if cwd, err := os.Getwd(); err == nil {
+		dirs = append(dirs, cwd)
+	}
+
+	candidates := make([]string, 0, len(dirs)*2)
+	seen := make(map[string]struct{}, len(dirs))
+	for _, dir := range dirs {
+		if dir == "" {
+			continue
+		}
+		if _, ok := seen[dir]; ok {
+			continue
+		}
+		seen[dir] = struct{}{}
+		candidates = append(candidates,
+			filepath.Join(dir, ".venv", "bin", "python3"),
+			filepath.Join(dir, "venv", "bin", "python3"),
+		)
+	}
+	return candidates
 }

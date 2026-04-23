@@ -62,6 +62,7 @@ type Config struct {
 	Registry     *scip.Registry
 	Patchers     map[string]Patcher
 	GraphBuilder func([]types.Node, []types.Edge) (*igraph.Graph, error)
+	Cluster      func(*igraph.Graph) (map[string]int, error)
 	Persist      func(*types.Graph, string) error
 	OutDir       string
 	Observer     Observer
@@ -73,6 +74,7 @@ type Builder struct {
 	registry     *scip.Registry
 	patchers     map[string]Patcher
 	graphBuilder func([]types.Node, []types.Edge) (*igraph.Graph, error)
+	cluster      func(*igraph.Graph) (map[string]int, error)
 	persist      func(*types.Graph, string) error
 	outDir       string
 	observer     Observer
@@ -108,6 +110,7 @@ func NewBuilder(cfg Config) *Builder {
 		registry:     cfg.Registry,
 		patchers:     cfg.Patchers,
 		graphBuilder: cfg.GraphBuilder,
+		cluster:      cfg.Cluster,
 		persist:      cfg.Persist,
 		outDir:       cfg.OutDir,
 		observer:     cfg.Observer,
@@ -175,6 +178,14 @@ func (b *Builder) Build(ctx context.Context, req types.BuildRequest) (Result, er
 	if err != nil {
 		return Result{}, fmt.Errorf("merge stage: %w", err)
 	}
+	if b.cluster != nil {
+		partition, clusterErr := b.cluster(graph)
+		if clusterErr != nil {
+			warnings = append(warnings, clusteringWarning(clusterErr))
+		} else {
+			graph.ApplyCommunities(partition)
+		}
+	}
 
 	tg := graph.ToTypes()
 	b.emit(types.BuildStagePersist, 0, "starting persist stage")
@@ -199,6 +210,14 @@ func (b *Builder) Build(ctx context.Context, req types.BuildRequest) (Result, er
 			{Stage: types.BuildStagePersist, Count: 1},
 		},
 	}, nil
+}
+
+func clusteringWarning(err error) string {
+	message := strings.TrimSpace(err.Error())
+	if errors.Is(err, igraph.ErrGraspologicMissing) {
+		return "Community detection unavailable: " + message
+	}
+	return "Community detection failed: " + message
 }
 
 func loadCachedResult(req types.BuildRequest, outDir string) (Result, bool, error) {

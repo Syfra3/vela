@@ -194,9 +194,18 @@ Add to `~/.config/opencode/mcp_settings.json`:
 - Progress tracking & worker pools
 
 **Python Layer (10%)**:
-- Leiden community detection (graspologic)
+- Community detection (Leiden via `graspologic` when available, NetworkX modularity fallback otherwise)
 - Specialized extractors (if needed)
 - Runs as subprocess, called only when necessary
+
+Install the clustering dependency explicitly if you want community detection to run:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-clustering.txt
+```
+
+If you specifically want the Leiden backend, install `graspologic` into that same virtualenv when it supports your Python version.
 
 ### Pluggable LLM Interface
 
