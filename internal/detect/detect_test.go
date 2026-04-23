@@ -280,6 +280,34 @@ func TestWalk_VelignoreProject(t *testing.T) {
 	mustNotContain(t, paths, "generated/schema.go")
 }
 
+func TestWalk_RepoVelignoreCanExcludeEmbeddedFixtureRepos(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, ".velignore"), []byte("corpora/workdirs/\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "cmd", "vela"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(root, "corpora", "workdirs", "fixture"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeEmpty(filepath.Join(root, "cmd", "vela", "main.go")); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeEmpty(filepath.Join(root, "corpora", "workdirs", "fixture", "main.go")); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := detect.Files(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths := relPaths(result.Files)
+
+	mustContain(t, paths, "cmd/vela/main.go")
+	mustNotContain(t, paths, "corpora/workdirs/fixture/main.go")
+}
+
 func TestWalk_NestedMonorepo(t *testing.T) {
 	result, err := detect.Files(fixtureDir("nested"))
 	if err != nil {

@@ -5,10 +5,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type MissingBinaryError struct {
@@ -159,6 +161,9 @@ func (d *CommandDriver) Bootstrap(ctx context.Context, req Request) error {
 	if strings.TrimSpace(req.RepoRoot) == "" {
 		return errors.New("scip request repo root is required")
 	}
+	if fresh, _ := hasFreshArtifact(req); fresh {
+		return nil
+	}
 	if _, err := d.lookPath(d.command); err == nil {
 		return nil
 	} else if !isMissingBinary(err) {
@@ -184,6 +189,9 @@ func (d *CommandDriver) Index(ctx context.Context, req Request) (Result, error) 
 	}
 	if d == nil {
 		return Result{}, fmt.Errorf("scip driver is nil")
+	}
+	if fresh, _ := hasFreshArtifact(req); fresh {
+		return Result{Driver: d.name, Language: d.language, Artifact: req.OutputPath}, nil
 	}
 	if err := os.MkdirAll(filepath.Dir(req.OutputPath), 0o755); err != nil {
 		return Result{}, fmt.Errorf("create scip output dir: %w", err)
@@ -246,4 +254,83 @@ func summarizeCommandOutput(output string) string {
 		}
 	}
 	return ""
+}
+
+func hasFreshArtifact(req Request) (bool, error) {
+	req = req.Normalize()
+	if err := req.Validate(); err != nil {
+		return false, err
+	}
+	artifactInfo, err := os.Stat(req.OutputPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	if artifactInfo.IsDir() || artifactInfo.Size() == 0 {
+		return false, nil
+	}
+	latestRepoChange, err := latestRelevantRepoModTime(req.RepoRoot, req.Language)
+	if err != nil {
+		return false, err
+	}
+	if latestRepoChange.IsZero() {
+		return true, nil
+	}
+	return !latestRepoChange.After(artifactInfo.ModTime()), nil
+}
+
+func latestRelevantRepoModTime(repoRoot, language string) (time.Time, error) {
+	var latest time.Time
+	err := filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if shouldSkipRepoDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !isRelevantRepoFile(path, language) {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.ModTime().After(latest) {
+			latest = info.ModTime()
+		}
+		return nil
+	})
+	if err != nil {
+		return time.Time{}, err
+	}
+	return latest, nil
+}
+
+func shouldSkipRepoDir(name string) bool {
+	switch strings.TrimSpace(name) {
+	case ".git", ".vela", "node_modules", "dist", "build", "coverage", "__pycache__", ".next", ".turbo", ".venv", "venv":
+		return true
+	default:
+		return false
+	}
+}
+
+func isRelevantRepoFile(path, language string) bool {
+	base := filepath.Base(path)
+	ext := strings.ToLower(filepath.Ext(base))
+	switch normalizeLanguage(language) {
+	case "go":
+		return ext == ".go" || base == "go.mod" || base == "go.sum" || base == "go.work"
+	case "typescript":
+		return ext == ".ts" || ext == ".tsx" || ext == ".js" || ext == ".jsx" || ext == ".mts" || ext == ".cts" || ext == ".mjs" || ext == ".cjs" || base == "package.json" || base == "package-lock.json" || base == "pnpm-lock.yaml" || base == "yarn.lock" || strings.HasPrefix(base, "tsconfig")
+	case "python":
+		return ext == ".py" || base == "pyproject.toml" || base == "requirements.txt" || base == "setup.py" || base == "poetry.lock"
+	default:
+		return true
+	}
 }

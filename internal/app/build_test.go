@@ -51,7 +51,7 @@ func TestBuildServiceRun_EmitsEventsAndExportsVisualArtifacts(t *testing.T) {
 	result, err := svc.Run(context.Background(), BuildRequest{
 		RepoRoot: repoRoot,
 		OutDir:   outDir,
-		Obsidian: types.ObsidianConfig{VaultDir: vaultDir},
+		Obsidian: types.ObsidianConfig{AutoSync: true, VaultDir: vaultDir},
 		Observe: func(event BuildEvent) {
 			events = append(events, event)
 		},
@@ -99,7 +99,7 @@ func TestBuildServiceRun_ReportsExportFailuresWithoutHidingGraphBuild(t *testing
 		WriteObsidian: func(*types.Graph, string) error { return obsErr },
 	}
 
-	result, err := svc.Run(context.Background(), BuildRequest{RepoRoot: repoRoot, Obsidian: types.ObsidianConfig{VaultDir: vaultDir}})
+	result, err := svc.Run(context.Background(), BuildRequest{RepoRoot: repoRoot, Obsidian: types.ObsidianConfig{AutoSync: true, VaultDir: vaultDir}})
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
@@ -111,6 +111,37 @@ func TestBuildServiceRun_ReportsExportFailuresWithoutHidingGraphBuild(t *testing
 	}
 	if result.Warnings[1] != "Obsidian export failed: obsidian down" {
 		t.Fatalf("second warning = %q", result.Warnings[1])
+	}
+}
+
+func TestBuildServiceRun_SkipsObsidianExportWhenAutoSyncDisabled(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	called := false
+	svc := BuildService{
+		RunPipeline: func(context.Context, string, types.BuildRequest, pipeline.Observer) (pipeline.Result, error) {
+			return pipeline.Result{Graph: sampleGraph(), GraphPath: filepath.Join(repoRoot, ".vela", "graph.json")}, nil
+		},
+		WriteHTML: func(*types.Graph, string) error { return nil },
+		WriteObsidian: func(*types.Graph, string) error {
+			called = true
+			return nil
+		},
+	}
+
+	result, err := svc.Run(context.Background(), BuildRequest{RepoRoot: repoRoot, Obsidian: types.ObsidianConfig{AutoSync: false, VaultDir: t.TempDir()}})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if called {
+		t.Fatal("expected Obsidian export to be skipped when auto sync is disabled")
+	}
+	if result.ObsidianPath != "" {
+		t.Fatalf("ObsidianPath = %q, want empty when export is skipped", result.ObsidianPath)
+	}
+	if len(result.Warnings) != 0 {
+		t.Fatalf("warnings len = %d, want 0", len(result.Warnings))
 	}
 }
 

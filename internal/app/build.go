@@ -115,12 +115,14 @@ func (s BuildService) Run(ctx context.Context, req BuildRequest) (BuildResult, e
 				req.Observe(BuildEvent{Kind: BuildEventWarning, Message: buildResult.Warnings[len(buildResult.Warnings)-1]})
 			}
 		}
-		vaultDir := resolveVaultDir(req.Obsidian.VaultDir)
-		buildResult.ObsidianPath = filepath.Join(vaultDir, "obsidian")
-		if err := writeObsidian(result.Graph, vaultDir); err != nil {
-			buildResult.Warnings = append(buildResult.Warnings, fmt.Sprintf("Obsidian export failed: %v", err))
-			if req.Observe != nil {
-				req.Observe(BuildEvent{Kind: BuildEventWarning, Message: buildResult.Warnings[len(buildResult.Warnings)-1]})
+		if req.Obsidian.AutoSync {
+			vaultDir := resolveVaultDir(req.Obsidian.VaultDir)
+			buildResult.ObsidianPath = filepath.Join(vaultDir, "obsidian")
+			if err := writeObsidian(result.Graph, vaultDir); err != nil {
+				buildResult.Warnings = append(buildResult.Warnings, fmt.Sprintf("Obsidian export failed: %v", err))
+				if req.Observe != nil {
+					req.Observe(BuildEvent{Kind: BuildEventWarning, Message: buildResult.Warnings[len(buildResult.Warnings)-1]})
+				}
 			}
 		}
 	}

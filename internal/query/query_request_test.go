@@ -114,6 +114,148 @@ func TestRunRequest_FileQueriesPreferFileDependencyEdges(t *testing.T) {
 	}
 }
 
+func TestRunRequest_PathPrefersTargetPackageBarrelChain(t *testing.T) {
+	t.Parallel()
+
+	graph := map[string]any{
+		"nodes": []map[string]any{
+			{"id": "app:employee-selection", "label": "apps/mobile/src/modules/auth/presentation/screens/EmployeeSelection/hook.ts", "kind": "file", "file": "apps/mobile/src/modules/auth/presentation/screens/EmployeeSelection/hook.ts"},
+			{"id": "app:auth-context", "label": "apps/mobile/src/modules/auth/context/AuthContext.tsx", "kind": "file", "file": "apps/mobile/src/modules/auth/context/AuthContext.tsx"},
+			{"id": "app:enrollment-service", "label": "apps/mobile/src/modules/auth/domain/EnrollmentService.ts", "kind": "file", "file": "apps/mobile/src/modules/auth/domain/EnrollmentService.ts"},
+			{"id": "pkg:index", "label": "packages/api-client/src/index.ts", "kind": "file", "file": "packages/api-client/src/index.ts"},
+			{"id": "pkg:hooks", "label": "packages/api-client/src/hooks/index.ts", "kind": "file", "file": "packages/api-client/src/hooks/index.ts"},
+			{"id": "pkg:users-index", "label": "packages/api-client/src/hooks/users/index.ts", "kind": "file", "file": "packages/api-client/src/hooks/users/index.ts"},
+			{"id": "pkg:users", "label": "packages/api-client/src/hooks/users/use-users.ts", "kind": "file", "file": "packages/api-client/src/hooks/users/use-users.ts"},
+		},
+		"edges": []map[string]any{
+			{"from": "app:employee-selection", "to": "app:auth-context", "kind": "depends_on", "metadata": map[string]any{"projected_from": "static_import"}},
+			{"from": "app:auth-context", "to": "app:enrollment-service", "kind": "depends_on", "metadata": map[string]any{"projected_from": "static_import"}},
+			{"from": "app:enrollment-service", "to": "pkg:users", "kind": "depends_on", "metadata": map[string]any{"projected_from": "static_import"}},
+			{"from": "app:employee-selection", "to": "pkg:index", "kind": "depends_on", "metadata": map[string]any{"projected_from": "workspace_package"}},
+			{"from": "pkg:index", "to": "pkg:hooks", "kind": "depends_on", "metadata": map[string]any{"projected_from": "static_import"}},
+			{"from": "pkg:hooks", "to": "pkg:users-index", "kind": "depends_on", "metadata": map[string]any{"projected_from": "static_import"}},
+			{"from": "pkg:users-index", "to": "pkg:users", "kind": "depends_on", "metadata": map[string]any{"projected_from": "static_import"}},
+		},
+	}
+	data, err := json.MarshalIndent(graph, "", "  ")
+	if err != nil {
+		t.Fatalf("MarshalIndent() error = %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "graph.json")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	engine, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile() error = %v", err)
+	}
+
+	pathResult, err := engine.RunRequest(types.QueryRequest{Kind: types.QueryKindPath, Subject: "apps/mobile/src/modules/auth/presentation/screens/EmployeeSelection/hook.ts", Target: "packages/api-client/src/hooks/users/use-users.ts"})
+	if err != nil {
+		t.Fatalf("RunRequest(path) error = %v", err)
+	}
+	for _, want := range []string{
+		"packages/api-client/src/index.ts",
+		"packages/api-client/src/hooks/index.ts",
+		"packages/api-client/src/hooks/users/index.ts",
+	} {
+		if !strings.Contains(pathResult, want) {
+			t.Fatalf("expected %q in ranked path result, got %q", want, pathResult)
+		}
+	}
+	for _, unwanted := range []string{
+		"apps/mobile/src/modules/auth/context/AuthContext.tsx",
+		"apps/mobile/src/modules/auth/domain/EnrollmentService.ts",
+	} {
+		if strings.Contains(pathResult, unwanted) {
+			t.Fatalf("did not expect %q in ranked path result, got %q", unwanted, pathResult)
+		}
+	}
+}
+
+func TestRunRequest_PathPrefersExplanatoryIntermediateOverDirectJump(t *testing.T) {
+	t.Parallel()
+
+	graph := map[string]any{
+		"nodes": []map[string]any{
+			{"id": "main", "label": "cmd/vela/main.go", "kind": "file", "file": "cmd/vela/main.go"},
+			{"id": "config", "label": "internal/config/config.go", "kind": "file", "file": "internal/config/config.go"},
+			{"id": "types", "label": "pkg/types/types.go", "kind": "file", "file": "pkg/types/types.go"},
+		},
+		"edges": []map[string]any{
+			{"from": "main", "to": "types", "kind": "depends_on", "metadata": map[string]any{"projected_from": "static_import"}},
+			{"from": "main", "to": "config", "kind": "depends_on", "metadata": map[string]any{"projected_from": "static_import"}},
+			{"from": "config", "to": "types", "kind": "depends_on", "metadata": map[string]any{"projected_from": "static_import"}},
+		},
+	}
+	data, err := json.MarshalIndent(graph, "", "  ")
+	if err != nil {
+		t.Fatalf("MarshalIndent() error = %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "graph.json")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	engine, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile() error = %v", err)
+	}
+
+	pathResult, err := engine.RunRequest(types.QueryRequest{Kind: types.QueryKindPath, Subject: "cmd/vela/main.go", Target: "pkg/types/types.go"})
+	if err != nil {
+		t.Fatalf("RunRequest(path) error = %v", err)
+	}
+	if !strings.Contains(pathResult, "internal/config/config.go") {
+		t.Fatalf("expected config intermediary in ranked path result, got %q", pathResult)
+	}
+}
+
+func TestRunRequest_ReverseDependenciesPreferExternalPackageBarrelCallers(t *testing.T) {
+	t.Parallel()
+
+	graph := map[string]any{
+		"nodes": []map[string]any{
+			{"id": "pkg:index", "label": "packages/api-client/src/index.ts", "kind": "file", "file": "packages/api-client/src/index.ts"},
+			{"id": "pkg:hooks", "label": "packages/api-client/src/hooks/index.ts", "kind": "file", "file": "packages/api-client/src/hooks/index.ts"},
+			{"id": "app:employee-selection", "label": "apps/mobile/src/modules/auth/presentation/screens/EmployeeSelection/hook.ts", "kind": "file", "file": "apps/mobile/src/modules/auth/presentation/screens/EmployeeSelection/hook.ts"},
+			{"id": "app:auth-context", "label": "apps/mobile/src/modules/auth/presentation/context/AuthContext.tsx", "kind": "file", "file": "apps/mobile/src/modules/auth/presentation/context/AuthContext.tsx"},
+		},
+		"edges": []map[string]any{
+			{"from": "pkg:hooks", "to": "pkg:index", "kind": "depends_on", "metadata": map[string]any{"projected_from": "static_import"}},
+			{"from": "app:employee-selection", "to": "pkg:index", "kind": "depends_on", "metadata": map[string]any{"projected_from": "static_import"}},
+			{"from": "app:auth-context", "to": "pkg:index", "kind": "depends_on", "metadata": map[string]any{"projected_from": "static_import"}},
+		},
+	}
+	data, err := json.MarshalIndent(graph, "", "  ")
+	if err != nil {
+		t.Fatalf("MarshalIndent() error = %v", err)
+	}
+	path := filepath.Join(t.TempDir(), "graph.json")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	engine, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile() error = %v", err)
+	}
+
+	reverseResult, err := engine.RunRequest(types.QueryRequest{Kind: types.QueryKindReverseDependencies, Subject: "packages/api-client/src/index.ts", Limit: 5})
+	if err != nil {
+		t.Fatalf("RunRequest(reverse) error = %v", err)
+	}
+	for _, want := range []string{
+		"apps/mobile/src/modules/auth/presentation/screens/EmployeeSelection/hook.ts",
+		"apps/mobile/src/modules/auth/presentation/context/AuthContext.tsx",
+	} {
+		if !strings.Contains(reverseResult, want) {
+			t.Fatalf("expected %q in reverse dependency result, got %q", want, reverseResult)
+		}
+	}
+	if strings.Contains(reverseResult, "packages/api-client/src/hooks/index.ts") {
+		t.Fatalf("did not expect internal package barrel caller in result, got %q", reverseResult)
+	}
+}
+
 func loadRequestTestEngine(t *testing.T) *Engine {
 	t.Helper()
 	graph := map[string]any{

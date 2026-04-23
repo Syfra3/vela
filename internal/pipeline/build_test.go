@@ -3,10 +3,13 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Syfra3/vela/internal/export"
 	igraph "github.com/Syfra3/vela/internal/graph"
 	"github.com/Syfra3/vela/internal/scip"
 	"github.com/Syfra3/vela/pkg/types"
@@ -245,6 +248,105 @@ func TestBuilderBuild_BootstrapsDriversBeforeScan(t *testing.T) {
 	}
 	if got := strings.Join(order, ","); got != "bootstrap,scan,index" {
 		t.Fatalf("order = %q, want bootstrap,scan,index", got)
+	}
+}
+
+func TestBuilderBuild_ReusesFreshPersistedGraphForDefaultBuild(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	outDir := filepath.Join(repoRoot, ".vela")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(main.go) error = %v", err)
+	}
+	graph := &types.Graph{
+		Nodes: []types.Node{{ID: "file:main", Label: "main.go", NodeType: string(types.NodeTypeFile), SourceFile: "main.go"}},
+		Edges: []types.Edge{{Source: "file:main", Target: "file:main", Relation: string(types.FactKindContains)}},
+	}
+	if err := export.WriteJSONAtomic(graph, outDir); err != nil {
+		t.Fatalf("WriteJSONAtomic() error = %v", err)
+	}
+
+	origRepoChange := latestRelevantRepoChange
+	origExeChange := currentExecutableChange
+	t.Cleanup(func() {
+		latestRelevantRepoChange = origRepoChange
+		currentExecutableChange = origExeChange
+	})
+	latestRelevantRepoChange = func(string) (time.Time, error) { return time.Time{}, nil }
+	currentExecutableChange = func() (time.Time, error) { return time.Time{}, nil }
+
+	scanner := &fakeScanner{nodes: []types.Node{{ID: "should-not-run", Label: "should-not-run", NodeType: "function"}}}
+	builder := NewBuilder(Config{
+		Detect: func(string) ([]string, error) {
+			return []string{filepath.Join(repoRoot, "main.go")}, nil
+		},
+		Scanner:      scanner,
+		GraphBuilder: igraph.Build,
+		Persist:      func(*types.Graph, string) error { t.Fatal("persist should be skipped on cache hit"); return nil },
+		OutDir:       outDir,
+	})
+
+	result, err := builder.Build(context.Background(), types.BuildRequest{RepoRoot: repoRoot})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if scanner.gotRoot != "" {
+		t.Fatal("expected scanner to be skipped on fresh cache hit")
+	}
+	if result.GraphPath != filepath.Join(outDir, "graph.json") {
+		t.Fatalf("GraphPath = %q, want cached graph path", result.GraphPath)
+	}
+	if len(result.Graph.Nodes) != 1 {
+		t.Fatalf("cached graph nodes = %d, want 1", len(result.Graph.Nodes))
+	}
+	if len(result.StageReports) != 6 {
+		t.Fatalf("stage reports len = %d, want 6", len(result.StageReports))
+	}
+}
+
+func TestBuilderBuild_SkipsCacheWhenExecutableIsNewer(t *testing.T) {
+	t.Parallel()
+
+	repoRoot := t.TempDir()
+	outDir := filepath.Join(repoRoot, ".vela")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(main.go) error = %v", err)
+	}
+	if err := export.WriteJSONAtomic(&types.Graph{}, outDir); err != nil {
+		t.Fatalf("WriteJSONAtomic() error = %v", err)
+	}
+
+	origRepoChange := latestRelevantRepoChange
+	origExeChange := currentExecutableChange
+	t.Cleanup(func() {
+		latestRelevantRepoChange = origRepoChange
+		currentExecutableChange = origExeChange
+	})
+	latestRelevantRepoChange = func(string) (time.Time, error) { return time.Time{}, nil }
+	currentExecutableChange = func() (time.Time, error) { return time.Now().Add(time.Minute), nil }
+
+	scanner := &fakeScanner{nodes: []types.Node{{ID: "svc", Label: "svc", NodeType: "function"}}}
+	builder := NewBuilder(Config{
+		Detect:       func(string) ([]string, error) { return []string{filepath.Join(repoRoot, "main.go")}, nil },
+		Scanner:      scanner,
+		GraphBuilder: igraph.Build,
+		Persist:      func(*types.Graph, string) error { return nil },
+		OutDir:       outDir,
+	})
+
+	_, err := builder.Build(context.Background(), types.BuildRequest{RepoRoot: repoRoot})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if scanner.gotRoot != repoRoot {
+		t.Fatal("expected full rebuild when executable is newer than cached graph")
 	}
 }
 

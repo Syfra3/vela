@@ -192,8 +192,14 @@ func TestPath_NodeNotFound(t *testing.T) {
 	eng, _ := LoadFromFile(path)
 
 	result := eng.Path("NonExistent", "Database")
-	if !strings.Contains(result, "not found") {
-		t.Errorf("expected 'not found' message, got: %q", result)
+	if !strings.Contains(result, "no path found") {
+		t.Errorf("expected degraded no-path message, got: %q", result)
+	}
+	if !strings.Contains(result, "reason:") {
+		t.Errorf("expected degraded reason in message, got: %q", result)
+	}
+	if !strings.Contains(result, "provenance: degraded graph lookup") {
+		t.Errorf("expected degraded provenance in message, got: %q", result)
 	}
 }
 

@@ -40,6 +40,13 @@ func (e *Engine) RunRequest(req types.QueryRequest) (string, error) {
 
 type edgeDirection int
 
+type reachabilityCandidate struct {
+	id    string
+	edge  types.Edge
+	label string
+	score int
+}
+
 const (
 	outgoingEdges edgeDirection = iota
 	incomingEdges
@@ -102,13 +109,7 @@ func (e *Engine) collectReachability(subjectID string, limit int, direction edge
 }
 
 func (e *Engine) collectFileReachability(subjectID string, limit int, direction edgeDirection) []string {
-	type candidate struct {
-		id    string
-		edge  types.Edge
-		label string
-		score int
-	}
-	candidates := make([]candidate, 0)
+	candidates := make([]reachabilityCandidate, 0)
 	seen := map[string]bool{}
 	for _, edge := range e.graph.Edges {
 		if !isFileDependencyEdge(edge, e.nodeByID) {
@@ -119,7 +120,7 @@ func (e *Engine) collectFileReachability(subjectID string, limit int, direction 
 			continue
 		}
 		seen[nextID] = true
-		candidates = append(candidates, candidate{
+		candidates = append(candidates, reachabilityCandidate{
 			id:    nextID,
 			edge:  edge,
 			label: fmt.Sprintf("%s via %s", e.describeRef(nextID), edge.Relation),
@@ -130,7 +131,7 @@ func (e *Engine) collectFileReachability(subjectID string, limit int, direction 
 		return nil
 	}
 	filtered := candidates
-	static := make([]candidate, 0, len(candidates))
+	static := make([]reachabilityCandidate, 0, len(candidates))
 	for _, candidate := range candidates {
 		if isStaticFileDependency(candidate.edge) {
 			static = append(static, candidate)
@@ -139,7 +140,7 @@ func (e *Engine) collectFileReachability(subjectID string, limit int, direction 
 	if len(static) > 0 {
 		filtered = static
 	}
-	nonTest := make([]candidate, 0, len(filtered))
+	nonTest := make([]reachabilityCandidate, 0, len(filtered))
 	for _, candidate := range filtered {
 		path := strings.ToLower(strings.TrimSpace(e.nodeByID[candidate.id].SourceFile))
 		if strings.Contains(path, "_test.go") || strings.Contains(path, ".test.") || strings.Contains(path, ".spec.") || strings.Contains(path, "bench") {
@@ -149,6 +150,9 @@ func (e *Engine) collectFileReachability(subjectID string, limit int, direction 
 	}
 	if len(nonTest) >= 2 {
 		filtered = nonTest
+	}
+	if preferred := preferExternalBarrelCallers(subjectID, direction, filtered, e.nodeByID); len(preferred) >= 2 {
+		filtered = preferred
 	}
 	sort.SliceStable(filtered, func(i, j int) bool {
 		if filtered[i].score != filtered[j].score {
@@ -164,6 +168,47 @@ func (e *Engine) collectFileReachability(subjectID string, limit int, direction 
 		}
 	}
 	return results
+}
+
+func preferExternalBarrelCallers(subjectID string, direction edgeDirection, candidates []reachabilityCandidate, nodeByID map[string]types.Node) []reachabilityCandidate {
+	if direction != incomingEdges {
+		return nil
+	}
+	subject, ok := nodeByID[subjectID]
+	if !ok {
+		return nil
+	}
+	root := packageBarrelRoot(subject.SourceFile)
+	if root == "" {
+		return nil
+	}
+	preferred := make([]reachabilityCandidate, 0, len(candidates))
+	for _, candidate := range candidates {
+		caller, ok := nodeByID[candidate.id]
+		if !ok {
+			continue
+		}
+		if !strings.HasPrefix(strings.ToLower(strings.TrimSpace(caller.SourceFile)), root) {
+			preferred = append(preferred, candidate)
+		}
+	}
+	return preferred
+}
+
+func packageBarrelRoot(path string) string {
+	path = strings.ToLower(strings.TrimSpace(path))
+	if !strings.HasPrefix(path, "packages/") {
+		return ""
+	}
+	for _, suffix := range []string{"/src/index.ts", "/src/index.tsx", "/src/index.js", "/src/index.jsx"} {
+		if strings.HasSuffix(path, suffix) {
+			trimmed := strings.TrimSuffix(path, suffix)
+			if trimmed != "" {
+				return trimmed + "/"
+			}
+		}
+	}
+	return ""
 }
 
 func (e *Engine) collectImpact(subjectID string, limit int) []string {

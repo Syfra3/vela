@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakeRunner struct {
@@ -171,6 +172,125 @@ func TestTypeScriptDriverBootstrap_SkipsInstallWhenBinaryExists(t *testing.T) {
 	}
 	if runner.command != "" {
 		t.Fatalf("runner.command = %q, want no install command", runner.command)
+	}
+}
+
+func TestTypeScriptDriverBootstrap_SkipsInstallWhenFreshArtifactExists(t *testing.T) {
+	repoRoot := t.TempDir()
+	artifact := filepath.Join(repoRoot, ".vela", "scip", "typescript.scip")
+	if err := os.MkdirAll(filepath.Dir(artifact), 0o755); err != nil {
+		t.Fatalf("mkdir artifact dir: %v", err)
+	}
+	source := filepath.Join(repoRoot, "index.ts")
+	if err := os.WriteFile(source, []byte("export const value = 1\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	if err := os.WriteFile(artifact, []byte("cached"), 0o644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	now := time.Now()
+	older := now.Add(-2 * time.Minute)
+	newer := now.Add(-1 * time.Minute)
+	if err := os.Chtimes(source, older, older); err != nil {
+		t.Fatalf("chtimes source: %v", err)
+	}
+	if err := os.Chtimes(artifact, newer, newer); err != nil {
+		t.Fatalf("chtimes artifact: %v", err)
+	}
+
+	runner := &fakeRunner{}
+	driver := NewTypeScriptDriver(runner).(*CommandDriver)
+	driver.lookPath = func(name string) (string, error) {
+		return "", &exec.Error{Name: name, Err: exec.ErrNotFound}
+	}
+
+	err := driver.Bootstrap(context.Background(), Request{RepoRoot: repoRoot, Language: "typescript"})
+	if err != nil {
+		t.Fatalf("Bootstrap() error = %v", err)
+	}
+	if runner.command != "" {
+		t.Fatalf("runner.command = %q, want bootstrap skip on fresh artifact", runner.command)
+	}
+}
+
+func TestGoDriverIndex_SkipsRunnerWhenFreshArtifactExists(t *testing.T) {
+	repoRoot := t.TempDir()
+	artifact := filepath.Join(repoRoot, ".vela", "scip", "go.scip")
+	if err := os.MkdirAll(filepath.Dir(artifact), 0o755); err != nil {
+		t.Fatalf("mkdir artifact dir: %v", err)
+	}
+	source := filepath.Join(repoRoot, "main.go")
+	if err := os.WriteFile(source, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, "go.mod"), []byte("module example.com/test\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	if err := os.WriteFile(artifact, []byte("cached"), 0o644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	now := time.Now()
+	older := now.Add(-2 * time.Minute)
+	newer := now.Add(-1 * time.Minute)
+	if err := os.Chtimes(source, older, older); err != nil {
+		t.Fatalf("chtimes source: %v", err)
+	}
+	if err := os.Chtimes(filepath.Join(repoRoot, "go.mod"), older, older); err != nil {
+		t.Fatalf("chtimes go.mod: %v", err)
+	}
+	if err := os.Chtimes(artifact, newer, newer); err != nil {
+		t.Fatalf("chtimes artifact: %v", err)
+	}
+
+	runner := &fakeRunner{}
+	result, err := NewGoDriver(runner).Index(context.Background(), Request{RepoRoot: repoRoot, Language: "go"})
+	if err != nil {
+		t.Fatalf("Index() error = %v", err)
+	}
+	if runner.command != "" {
+		t.Fatalf("runner.command = %q, want index skip on fresh artifact", runner.command)
+	}
+	if result.Artifact != artifact {
+		t.Fatalf("result.Artifact = %q, want %q", result.Artifact, artifact)
+	}
+}
+
+func TestGoDriverIndex_RerunsWhenArtifactIsStale(t *testing.T) {
+	repoRoot := t.TempDir()
+	artifact := filepath.Join(repoRoot, ".vela", "scip", "go.scip")
+	if err := os.MkdirAll(filepath.Dir(artifact), 0o755); err != nil {
+		t.Fatalf("mkdir artifact dir: %v", err)
+	}
+	source := filepath.Join(repoRoot, "main.go")
+	if err := os.WriteFile(source, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, "go.mod"), []byte("module example.com/test\n\ngo 1.26\n"), 0o644); err != nil {
+		t.Fatalf("write go.mod: %v", err)
+	}
+	if err := os.WriteFile(artifact, []byte("cached"), 0o644); err != nil {
+		t.Fatalf("write artifact: %v", err)
+	}
+	now := time.Now()
+	older := now.Add(-2 * time.Minute)
+	newer := now.Add(-1 * time.Minute)
+	if err := os.Chtimes(artifact, older, older); err != nil {
+		t.Fatalf("chtimes artifact: %v", err)
+	}
+	if err := os.Chtimes(source, newer, newer); err != nil {
+		t.Fatalf("chtimes source: %v", err)
+	}
+	if err := os.Chtimes(filepath.Join(repoRoot, "go.mod"), newer, newer); err != nil {
+		t.Fatalf("chtimes go.mod: %v", err)
+	}
+
+	runner := &fakeRunner{}
+	_, err := NewGoDriver(runner).Index(context.Background(), Request{RepoRoot: repoRoot, Language: "go"})
+	if err != nil {
+		t.Fatalf("Index() error = %v", err)
+	}
+	if runner.command != "scip-go" {
+		t.Fatalf("runner.command = %q, want scip-go when artifact is stale", runner.command)
 	}
 }
 

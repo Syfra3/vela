@@ -45,6 +45,10 @@ Thumbs.db
 .vela/
 vela-out/
 
+# Embedded benchmark fixture repos duplicate full source trees and inflate
+# prepare/index cost without improving answers for the active workspace.
+corpora/workdirs/
+
 # Logs
 *.log
 logs/

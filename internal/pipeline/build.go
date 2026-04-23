@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Syfra3/vela/internal/detect"
 	"github.com/Syfra3/vela/internal/export"
@@ -18,6 +21,9 @@ import (
 var ErrUnknownPatcher = errors.New("unknown pipeline patcher")
 
 var codeExtensions = []string{".go", ".py", ".ts", ".tsx", ".js", ".jsx"}
+
+var latestRelevantRepoChange = latestRelevantRepoModTime
+var currentExecutableChange = executableModTime
 
 type Scanner interface {
 	Scan(root string, files []string, src *types.Source) ([]types.Node, []types.Edge, error)
@@ -116,6 +122,16 @@ func (b *Builder) Build(ctx context.Context, req types.BuildRequest) (Result, er
 	if b == nil {
 		return Result{}, errors.New("pipeline builder is nil")
 	}
+	outDir := b.outDir
+	if strings.TrimSpace(outDir) == "" {
+		outDir = filepath.Join(req.RepoRoot, ".vela")
+	}
+	if cached, ok, err := loadCachedResult(req, outDir); err != nil {
+		return Result{}, fmt.Errorf("cache check: %w", err)
+	} else if ok {
+		b.emit(types.BuildStagePersist, len(cached.Graph.Edges), "reused cached graph")
+		return cached, nil
+	}
 
 	source := extract.DetectProject(req.RepoRoot)
 	b.emit(types.BuildStageDetect, 0, "starting detect stage")
@@ -161,10 +177,6 @@ func (b *Builder) Build(ctx context.Context, req types.BuildRequest) (Result, er
 	}
 
 	tg := graph.ToTypes()
-	outDir := b.outDir
-	if strings.TrimSpace(outDir) == "" {
-		outDir = filepath.Join(req.RepoRoot, ".vela")
-	}
 	b.emit(types.BuildStagePersist, 0, "starting persist stage")
 	if err := b.persist(tg, outDir); err != nil {
 		return Result{}, fmt.Errorf("persist stage: %w", err)
@@ -187,6 +199,129 @@ func (b *Builder) Build(ctx context.Context, req types.BuildRequest) (Result, er
 			{Stage: types.BuildStagePersist, Count: 1},
 		},
 	}, nil
+}
+
+func loadCachedResult(req types.BuildRequest, outDir string) (Result, bool, error) {
+	if len(req.Languages) > 0 || len(req.Drivers) > 0 || len(req.Patchers) > 0 {
+		return Result{}, false, nil
+	}
+	graphPath := filepath.Join(outDir, "graph.json")
+	info, err := os.Stat(graphPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Result{}, false, nil
+		}
+		return Result{}, false, err
+	}
+	if info.IsDir() || info.Size() == 0 {
+		return Result{}, false, nil
+	}
+	latestRepoChange, err := latestRelevantRepoChange(req.RepoRoot)
+	if err != nil {
+		return Result{}, false, err
+	}
+	if !latestRepoChange.IsZero() && latestRepoChange.After(info.ModTime()) {
+		return Result{}, false, nil
+	}
+	exeChange, err := currentExecutableChange()
+	if err != nil {
+		return Result{}, false, err
+	}
+	if !exeChange.IsZero() && exeChange.After(info.ModTime()) {
+		return Result{}, false, nil
+	}
+	g, err := export.LoadJSON(graphPath)
+	if err != nil {
+		return Result{}, false, nil
+	}
+	fileCount := 0
+	for _, node := range g.Nodes {
+		if node.NodeType == string(types.NodeTypeFile) {
+			fileCount++
+		}
+	}
+	return Result{
+		Graph:         g,
+		GraphPath:     graphPath,
+		DetectedFiles: make([]string, 0, fileCount),
+		StageReports: []StageReport{
+			{Stage: types.BuildStageDetect, Count: fileCount},
+			{Stage: types.BuildStageScan, Count: len(g.Nodes)},
+			{Stage: types.BuildStageDrivers, Count: 0},
+			{Stage: types.BuildStagePatch, Count: 0},
+			{Stage: types.BuildStageMerge, Count: len(g.Edges)},
+			{Stage: types.BuildStagePersist, Count: 1},
+		},
+	}, true, nil
+}
+
+func latestRelevantRepoModTime(repoRoot string) (time.Time, error) {
+	var latest time.Time
+	err := filepath.WalkDir(repoRoot, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if shouldSkipRepoDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !isRelevantRepoFile(path) {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		if info.ModTime().After(latest) {
+			latest = info.ModTime()
+		}
+		return nil
+	})
+	if err != nil {
+		return time.Time{}, err
+	}
+	return latest, nil
+}
+
+func executableModTime() (time.Time, error) {
+	path, err := os.Executable()
+	if err != nil {
+		return time.Time{}, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return info.ModTime(), nil
+}
+
+func shouldSkipRepoDir(name string) bool {
+	switch strings.TrimSpace(name) {
+	case ".git", ".vela", "node_modules", "dist", "build", "coverage", "__pycache__", ".next", ".turbo", ".venv", "venv":
+		return true
+	default:
+		return false
+	}
+}
+
+func isRelevantRepoFile(path string) bool {
+	base := filepath.Base(path)
+	trimmed := strings.TrimSpace(base)
+	if trimmed == "" {
+		return false
+	}
+	ext := strings.ToLower(filepath.Ext(trimmed))
+	if ext == ".go" || ext == ".py" || ext == ".ts" || ext == ".tsx" || ext == ".js" || ext == ".jsx" || ext == ".mts" || ext == ".cts" || ext == ".mjs" || ext == ".cjs" {
+		return true
+	}
+	switch trimmed {
+	case "go.mod", "go.sum", "go.work", "package.json", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "pyproject.toml", "requirements.txt", "setup.py", "poetry.lock":
+		return true
+	default:
+		return strings.HasPrefix(trimmed, "tsconfig")
+	}
 }
 
 func (b *Builder) emit(stage types.BuildStage, count int, message string) {
