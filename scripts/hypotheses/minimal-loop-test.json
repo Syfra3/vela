@@ -1,0 +1,34 @@
+[
+  {
+    "id": "minimal-reverse-lookup-noop",
+    "title": "No-op reverse lookup probe",
+    "family": "reverse-lookup",
+    "inspired_by": "Minimal loop validation: apply an unused file and verify the focused gate rejects non-improvements.",
+    "risk": "Should not change benchmark behavior; if it passes, the loop is likely too noise-sensitive.",
+    "apply": "git apply scripts/hypotheses/minimal-reverse-lookup-noop.patch",
+    "revert": "git apply -R scripts/hypotheses/minimal-reverse-lookup-noop.patch",
+    "focused_gate": {
+      "compare": "all-improve",
+      "metrics": [
+        "family.reverse-lookup.mean_f1"
+      ]
+    }
+  },
+  {
+    "id": "minimal-path-quality-noop",
+    "title": "No-op path quality probe",
+    "family": "path-quality",
+    "inspired_by": "Minimal loop validation: exercise apply/revert and path-quality gating without touching query logic.",
+    "risk": "Should not change benchmark behavior; if it passes, the loop is likely too noise-sensitive.",
+    "apply": "git apply scripts/hypotheses/minimal-path-quality-noop.patch",
+    "revert": "git apply -R scripts/hypotheses/minimal-path-quality-noop.patch",
+    "focused_gate": {
+      "compare": "all-improve",
+      "metrics": [
+        "summary.path_node_precision",
+        "summary.path_node_recall",
+        "family.path-tracing.path_node_recall"
+      ]
+    }
+  }
+]

@@ -1,7 +1,6 @@
 package extract
 
 import (
-	"log"
 	"path/filepath"
 	"strings"
 
@@ -18,13 +17,6 @@ var codeExtensions = map[string]bool{
 	".jsx": true,
 }
 
-// docExtensions are file extensions handled by LLM-based extraction.
-var docExtensions = map[string]bool{
-	".md":  true,
-	".txt": true,
-	".pdf": true,
-}
-
 // ExtractAll dispatches each file to the appropriate extractor and returns the
 // merged set of nodes and edges.
 //
@@ -38,18 +30,14 @@ var docExtensions = map[string]bool{
 func ExtractAll(
 	root string,
 	files []string,
-	provider types.LLMProvider,
+	_ types.LLMProvider,
 	src *types.Source,
-	maxChunkTokens ...int,
+	_ ...int,
 ) ([]types.Node, []types.Edge, error) {
-	chunkTokens := 8000
-	if len(maxChunkTokens) > 0 && maxChunkTokens[0] > 0 {
-		chunkTokens = maxChunkTokens[0]
-	}
-
 	if src == nil {
 		src = DetectProject(root)
 	}
+	repoID := SourceIdentity(src)
 
 	// Project root node — one per extraction run. Stamp with repo-layer
 	// project evidence so downstream consumers can attribute routing and
@@ -66,6 +54,29 @@ func ExtractAll(
 	for _, path := range files {
 		ext := filepath.Ext(path)
 		rel := RelPath(root, path)
+		evType, evConfidence := evidenceForExt(ext)
+
+		// Emit file nodes even when a file has no extracted symbols. Barrel/index
+		// files still matter for file-level dependency graphs and reverse lookups.
+		if !emittedFiles[rel] {
+			emittedFiles[rel] = true
+			fileNode := types.Node{
+				ID:         fileNodeID(repoID, rel),
+				Label:      rel,
+				NodeType:   string(types.NodeTypeFile),
+				SourceFile: rel,
+				Source:     src,
+			}
+			stampRepoNode(&fileNode, EvidenceTypeFilesystem, types.ConfidenceDeclared, rel)
+			allNodes = append(allNodes, fileNode)
+			containsEdge := types.Edge{
+				Source:   projectNode.ID,
+				Target:   fileNode.ID,
+				Relation: "contains",
+			}
+			stampRepoEdge(&containsEdge, EvidenceTypeFilesystem, types.ConfidenceDeclared, rel)
+			allEdges = append(allEdges, containsEdge)
+		}
 
 		var rawNodes []types.Node
 		var rawEdges []types.Edge
@@ -80,65 +91,29 @@ func ExtractAll(
 			}
 			rawNodes, rawEdges = n, e
 
-		case docExtensions[ext]:
-			if provider == nil {
-				log.Printf("[debug] skipping doc %s (no LLM provider configured)", rel)
-				continue
-			}
-			var err error
-			if ext == ".pdf" {
-				rawNodes, rawEdges, err = ExtractPDF(path, rel, provider, chunkTokens)
-			} else {
-				rawNodes, rawEdges, err = ExtractDoc(path, rel, provider, chunkTokens)
-			}
-			if err != nil {
-				log.Printf("[debug] skipping doc %s: %v", rel, err)
-				continue
-			}
-
 		default:
-			log.Printf("[debug] skipping unsupported extension: %s", rel)
 			continue
+		}
+
+		for _, fileEdge := range extractFileEdges(path, root, repoID, rel) {
+			stampRepoEdge(&fileEdge, evType, evConfidence, rel)
+			allEdges = append(allEdges, fileEdge)
 		}
 
 		if len(rawNodes) == 0 {
 			continue
 		}
 
-		evType, evConfidence := evidenceForExt(ext)
-
-		// Emit file node once per file.
-		if !emittedFiles[rel] {
-			emittedFiles[rel] = true
-			fileNode := types.Node{
-				ID:         fileNodeID(src.Name, rel),
-				Label:      rel,
-				NodeType:   string(types.NodeTypeFile),
-				SourceFile: rel,
-				Source:     src,
-			}
-			stampRepoNode(&fileNode, EvidenceTypeFilesystem, types.ConfidenceDeclared, rel)
-			allNodes = append(allNodes, fileNode)
-			// project → file
-			containsEdge := types.Edge{
-				Source:   projectNode.ID,
-				Target:   fileNode.ID,
-				Relation: "contains",
-			}
-			stampRepoEdge(&containsEdge, EvidenceTypeFilesystem, types.ConfidenceDeclared, rel)
-			allEdges = append(allEdges, containsEdge)
-		}
-
 		// Prefix all node IDs and stamp Source + evidence metadata.
 		prefixed := make([]types.Node, 0, len(rawNodes))
 		for _, n := range rawNodes {
-			n.ID = prefixID(src.Name, n.ID)
+			n.ID = prefixID(repoID, n.ID)
 			n.Source = src
 			stampRepoNode(&n, evType, evConfidence, rel)
 			prefixed = append(prefixed, n)
 			// file → symbol
 			fileContains := types.Edge{
-				Source:     fileNodeID(src.Name, rel),
+				Source:     fileNodeID(repoID, rel),
 				Target:     n.ID,
 				Relation:   "contains",
 				SourceFile: rel,
@@ -152,7 +127,7 @@ func ExtractAll(
 		// so Build() can resolve them — cross-file and cross-project calls resolve
 		// by label in the label index.
 		for _, e := range rawEdges {
-			e.Source = prefixID(src.Name, e.Source)
+			e.Source = prefixID(repoID, e.Source)
 			// Target stays as bare callee label — Build() resolves via labelIndex.
 			stampRepoEdge(&e, evType, evConfidence, rel)
 			allEdges = append(allEdges, e)

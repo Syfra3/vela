@@ -32,11 +32,15 @@ Thumbs.db
 vela-out/
 *.graph.json
 *.graph.html
+.vela/GRAPH_REPORT.md
+.vela/manifest.json
+.vela/retrieval.db
 *.graphml
 
 # Cache
 .cache/
 vela-cache/
+corpora/workdirs/
 
 # Python (for clustering wrapper)
 __pycache__/

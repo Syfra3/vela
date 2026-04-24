@@ -17,23 +17,9 @@ const configFile = "config.yaml"
 func defaults() *types.Config {
 	home, _ := os.UserHomeDir()
 	return &types.Config{
-		LLM: types.LLMConfig{
-			Provider:       "local",
-			Model:          "llama3",
-			Endpoint:       "http://localhost:11434",
-			Timeout:        60 * time.Second,
-			MaxChunkTokens: 8000,
-		},
-		Embedding: types.EmbeddingConfig{
-			Provider:      "ollama",
-			Model:         "nomic-embed-text",
-			Endpoint:      "http://localhost:11434",
-			Timeout:       60 * time.Second,
-			VectorBackend: "sqlite-cosine",
-		},
 		Extraction: types.ExtractionConfig{
 			CodeLanguages: []string{"go", "python", "typescript", "rust", "java"},
-			IncludeDocs:   true,
+			IncludeDocs:   false,
 			IncludeImages: false,
 			ChunkSize:     8000,
 			CacheDir:      filepath.Join(home, ".vela", "cache"),
@@ -42,33 +28,6 @@ func defaults() *types.Config {
 			Theme:        "dark",
 			ShowProgress: true,
 			EnableColors: true,
-		},
-		Watch: types.WatchConfig{
-			Enabled: false,
-			Sources: []types.WatchSourceConfig{
-				{
-					Name:   "ancora",
-					Type:   "syfra",
-					Socket: filepath.Join(home, ".syfra", "ancora.sock"),
-				},
-			},
-			Reconciler: types.ReconcilerConfig{
-				DebounceMs:   100,
-				MaxBatchSize: 50,
-			},
-			Extractor: types.ExtractorConfig{
-				Enabled:   true,
-				Workers:   2,
-				WriteBack: true,
-				Provider:  "local",
-				Model:     "llama3",
-			},
-		},
-		Daemon: types.DaemonConfig{
-			PIDFile:    filepath.Join(home, ".vela", "watch.pid"),
-			LogFile:    filepath.Join(home, ".vela", "watch.log"),
-			LogLevel:   "info",
-			StatusFile: filepath.Join(home, ".vela", "watch-status.json"),
 		},
 		Obsidian: types.ObsidianConfig{
 			AutoSync: false,

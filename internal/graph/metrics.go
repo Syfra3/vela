@@ -226,26 +226,29 @@ func LoadHealthMetrics(path string, topN int) (HealthMetrics, error) {
 	for _, n := range raw.Nodes {
 		commSize[n.Community]++
 	}
-	m.Communities = len(commSize)
-	for _, sz := range commSize {
-		if sz > m.LargestCommunitySize {
-			m.LargestCommunitySize = sz
+	if !(len(commSize) == 1 && commSize[0] > 0) {
+		m.Communities = len(commSize)
+		for _, sz := range commSize {
+			if sz > m.LargestCommunitySize {
+				m.LargestCommunitySize = sz
+			}
+			if sz == 1 {
+				m.SingletonCommunities++
+			}
 		}
-		if sz == 1 {
-			m.SingletonCommunities++
+
+		// Newman modularity Q = Σ_c [ L_c/m − (D_c/2m)² ].
+		resolved := m.Edges - m.BrokenEdges
+		if resolved > 0 {
+			twoM := 2.0 * float64(resolved)
+			var q float64
+			for _, agg := range comm {
+				lc := float64(agg.internalEdges)
+				dc := float64(agg.degreeSum)
+				q += (lc / float64(resolved)) - math.Pow(dc/twoM, 2)
+			}
+			m.Modularity = q
 		}
-	}
-	// Newman modularity Q = Σ_c [ L_c/m − (D_c/2m)² ].
-	resolved := m.Edges - m.BrokenEdges
-	if resolved > 0 {
-		twoM := 2.0 * float64(resolved)
-		var q float64
-		for _, agg := range comm {
-			lc := float64(agg.internalEdges)
-			dc := float64(agg.degreeSum)
-			q += (lc / float64(resolved)) - math.Pow(dc/twoM, 2)
-		}
-		m.Modularity = q
 	}
 
 	// Top-N by out-degree.

@@ -1,29 +1,19 @@
 package tui
 
 import (
-	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
-
-	"github.com/Syfra3/vela/internal/daemon"
 )
 
 func TestUninstallAllRemovesManagedData(t *testing.T) {
-	originalHome := os.Getenv("HOME")
-	t.Cleanup(func() {
-		_ = os.Setenv("HOME", originalHome)
-	})
-
 	home := t.TempDir()
-	if err := os.Setenv("HOME", home); err != nil {
-		t.Fatalf("set HOME: %v", err)
-	}
+	t.Setenv("HOME", home)
 
 	velaDir := filepath.Join(home, ".vela")
-	// Default vault dir — the whole directory should be removed, not just the obsidian subdir.
 	defaultVaultDir := filepath.Join(home, "Documents", "vela")
 	obsidianDir := filepath.Join(defaultVaultDir, "obsidian")
 	for _, dir := range []string{velaDir, obsidianDir} {
@@ -38,9 +28,6 @@ func TestUninstallAllRemovesManagedData(t *testing.T) {
 		t.Fatalf("write note: %v", err)
 	}
 
-	restore := stubUninstallDeps()
-	defer restore()
-
 	result, err := uninstallAll()
 	if err != nil {
 		t.Fatalf("uninstallAll() error = %v", err)
@@ -48,27 +35,16 @@ func TestUninstallAllRemovesManagedData(t *testing.T) {
 	if len(result.Warnings) != 0 {
 		t.Fatalf("expected no warnings, got %v", result.Warnings)
 	}
-
 	for _, path := range []string{velaDir, defaultVaultDir} {
 		if _, err := os.Stat(path); !os.IsNotExist(err) {
 			t.Fatalf("expected %s to be removed, stat err = %v", path, err)
 		}
 	}
-	if len(result.Removed) != 2 {
-		t.Fatalf("Removed = %v, want 2 entries", result.Removed)
-	}
 }
 
 func TestUninstallAllOnlyRemovesObsidianSubdirForCustomVault(t *testing.T) {
-	originalHome := os.Getenv("HOME")
-	t.Cleanup(func() {
-		_ = os.Setenv("HOME", originalHome)
-	})
-
 	home := t.TempDir()
-	if err := os.Setenv("HOME", home); err != nil {
-		t.Fatalf("set HOME: %v", err)
-	}
+	t.Setenv("HOME", home)
 
 	velaDir := filepath.Join(home, ".vela")
 	customVault := filepath.Join(home, "vault")
@@ -87,9 +63,6 @@ func TestUninstallAllOnlyRemovesObsidianSubdirForCustomVault(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	restore := stubUninstallDeps()
-	defer restore()
-
 	if _, err := uninstallAll(); err != nil {
 		t.Fatalf("uninstallAll() error = %v", err)
 	}
@@ -104,31 +77,15 @@ func TestUninstallAllOnlyRemovesObsidianSubdirForCustomVault(t *testing.T) {
 	}
 }
 
-func stubUninstallDeps() func() {
-	originalStop := uninstallStopDaemon
-	originalSvc := uninstallRemoveSvc
-	originalMCP := uninstallRemoveMCP
-	originalTargets := uninstallTargetsFunc
-
-	uninstallStopDaemon = func() error { return daemon.ErrNotRunning }
-	uninstallRemoveSvc = func() error { return nil }
-	uninstallRemoveMCP = func() error { return nil }
-	uninstallTargetsFunc = uninstallTargets
-
-	return func() {
-		uninstallStopDaemon = originalStop
-		uninstallRemoveSvc = originalSvc
-		uninstallRemoveMCP = originalMCP
-		uninstallTargetsFunc = originalTargets
-	}
-}
-
 func TestUninstallModelEnterStartsRemoval(t *testing.T) {
 	originalTargets := uninstallTargetsFunc
+	originalRepos := uninstallTrackedReposFunc
 	t.Cleanup(func() {
 		uninstallTargetsFunc = originalTargets
+		uninstallTrackedReposFunc = originalRepos
 	})
 	uninstallTargetsFunc = func() ([]string, error) { return []string{"/tmp/.vela"}, nil }
+	uninstallTrackedReposFunc = func() ([]string, error) { return nil, nil }
 
 	model := NewUninstallModel()
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -140,28 +97,29 @@ func TestUninstallModelEnterStartsRemoval(t *testing.T) {
 	}
 }
 
-func TestUninstallAllReturnsWarningsForIntegrationFailures(t *testing.T) {
-	originalTargets := uninstallTargetsFunc
-	originalStop := uninstallStopDaemon
-	originalSvc := uninstallRemoveSvc
-	originalMCP := uninstallRemoveMCP
-	t.Cleanup(func() {
-		uninstallTargetsFunc = originalTargets
-		uninstallStopDaemon = originalStop
-		uninstallRemoveSvc = originalSvc
-		uninstallRemoveMCP = originalMCP
-	})
+func TestUninstallAllRemovesTrackedRepoLocalData(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
 
-	uninstallTargetsFunc = func() ([]string, error) { return []string{}, nil }
-	uninstallStopDaemon = func() error { return errors.New("stop failed") }
-	uninstallRemoveSvc = func() error { return errors.New("service failed") }
-	uninstallRemoveMCP = func() error { return errors.New("mcp failed") }
+	repo := filepath.Join(home, "repo")
+	if err := os.MkdirAll(filepath.Join(repo, ".vela"), 0o755); err != nil {
+		t.Fatalf("mkdir repo data: %v", err)
+	}
+	registryJSON := []byte("{\n  \"version\": 1,\n  \"entries\": [\n    {\n      \"repo_root\": \"" + strings.ReplaceAll(repo, "\\", "\\\\") + "\",\n      \"name\": \"repo\"\n    }\n  ]\n}\n")
+	if err := os.MkdirAll(filepath.Join(home, ".vela"), 0o755); err != nil {
+		t.Fatalf("mkdir registry dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".vela", "registry.json"), registryJSON, 0o644); err != nil {
+		t.Fatalf("write registry: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".vela", "graph.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write local graph: %v", err)
+	}
 
-	result, err := uninstallAll()
-	if err != nil {
+	if _, err := uninstallAll(); err != nil {
 		t.Fatalf("uninstallAll() error = %v", err)
 	}
-	if len(result.Warnings) != 3 {
-		t.Fatalf("Warnings = %v, want 3", result.Warnings)
+	if _, err := os.Stat(filepath.Join(repo, ".vela")); !os.IsNotExist(err) {
+		t.Fatalf("expected tracked repo local data removed, stat err = %v", err)
 	}
 }

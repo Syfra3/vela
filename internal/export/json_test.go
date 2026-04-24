@@ -1,32 +1,16 @@
 package export
 
 import (
-	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/Syfra3/vela/internal/retrieval"
 	"github.com/Syfra3/vela/pkg/types"
-	_ "modernc.org/sqlite"
 )
 
-func withStubEmbeddings(t *testing.T) {
-	t.Helper()
-	restore := retrieval.SetEmbedTextsForTesting(func(texts []string) ([][]float32, error) {
-		out := make([][]float32, 0, len(texts))
-		for range texts {
-			out = append(out, []float32{1, 0})
-		}
-		return out, nil
-	})
-	t.Cleanup(restore)
-}
-
 func TestWriteJSON(t *testing.T) {
-	withStubEmbeddings(t)
 	g := &types.Graph{
 		Nodes: []types.Node{
 			{
@@ -37,10 +21,12 @@ func TestWriteJSON(t *testing.T) {
 				Description: "primary entrypoint",
 				Metadata:    map[string]interface{}{"path": "/tmp/project", "remote": "https://github.com/Syfra3/vela.git"},
 				Source: &types.Source{
-					Type:   types.SourceTypeCodebase,
-					Name:   "vela",
-					Path:   "/tmp/project",
-					Remote: "https://github.com/Syfra3/vela.git",
+					Type:         types.SourceTypeCodebase,
+					ID:           "github.com/Syfra3/vela",
+					Name:         "vela",
+					Organization: "Syfra3",
+					Path:         "/tmp/project",
+					Remote:       "https://github.com/Syfra3/vela.git",
 				},
 			},
 			{ID: "b", Label: "B", NodeType: "struct", SourceFile: "main.go"},
@@ -83,6 +69,12 @@ func TestWriteJSON(t *testing.T) {
 	if parsed.Nodes[0].SourceRemote != "https://github.com/Syfra3/vela.git" {
 		t.Fatalf("node source_remote = %q", parsed.Nodes[0].SourceRemote)
 	}
+	if parsed.Nodes[0].SourceID != "github.com/Syfra3/vela" {
+		t.Fatalf("node source_id = %q", parsed.Nodes[0].SourceID)
+	}
+	if parsed.Nodes[0].SourceOrg != "Syfra3" {
+		t.Fatalf("node source_organization = %q", parsed.Nodes[0].SourceOrg)
+	}
 	if parsed.Nodes[0].Description != "primary entrypoint" {
 		t.Fatalf("node description = %q", parsed.Nodes[0].Description)
 	}
@@ -96,23 +88,12 @@ func TestWriteJSON(t *testing.T) {
 		t.Fatalf("edge metadata evidence_type = %q, want %q", got, "ast")
 	}
 
-	db, err := sql.Open("sqlite", filepath.Join(outDir, "retrieval.db"))
-	if err != nil {
-		t.Fatalf("open retrieval db: %v", err)
-	}
-	defer db.Close()
-
-	var nodeCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM nodes`).Scan(&nodeCount); err != nil {
-		t.Fatalf("count nodes: %v", err)
-	}
-	if nodeCount != 2 {
-		t.Fatalf("retrieval node count = %d, want 2", nodeCount)
+	if _, err := os.Stat(filepath.Join(outDir, "retrieval.db")); !os.IsNotExist(err) {
+		t.Fatalf("expected retrieval.db to be removed from reduced export surface, err=%v", err)
 	}
 }
 
 func TestWriteJSON_CreatesOutDir(t *testing.T) {
-	withStubEmbeddings(t)
 	base := t.TempDir()
 	outDir := filepath.Join(base, "nested", "output")
 
@@ -133,7 +114,6 @@ func TestWriteJSON_CreatesOutDir(t *testing.T) {
 }
 
 func TestLoadJSON_RoundTripsExportFormat(t *testing.T) {
-	withStubEmbeddings(t)
 	outDir := t.TempDir()
 	original := &types.Graph{
 		Nodes: []types.Node{
@@ -145,10 +125,12 @@ func TestLoadJSON_RoundTripsExportFormat(t *testing.T) {
 				Community:   7,
 				Metadata:    map[string]interface{}{"role": "root"},
 				Source: &types.Source{
-					Type:   types.SourceTypeCodebase,
-					Name:   "vela",
-					Path:   "/work/vela",
-					Remote: "https://github.com/Syfra3/vela.git",
+					Type:         types.SourceTypeCodebase,
+					ID:           "github.com/Syfra3/vela",
+					Name:         "vela",
+					Organization: "Syfra3",
+					Path:         "/work/vela",
+					Remote:       "https://github.com/Syfra3/vela.git",
 				},
 			},
 			{
@@ -196,6 +178,12 @@ func TestLoadJSON_RoundTripsExportFormat(t *testing.T) {
 	if loaded.Nodes[0].Source == nil || loaded.Nodes[0].Source.Path != "/work/vela" {
 		t.Fatalf("loaded source path = %#v", loaded.Nodes[0].Source)
 	}
+	if loaded.Nodes[0].Source.ID != "github.com/Syfra3/vela" {
+		t.Fatalf("loaded source ID = %q", loaded.Nodes[0].Source.ID)
+	}
+	if loaded.Nodes[0].Source.Organization != "Syfra3" {
+		t.Fatalf("loaded source organization = %q", loaded.Nodes[0].Source.Organization)
+	}
 	if len(loaded.Edges) != 1 {
 		t.Fatalf("loaded edge count = %d, want 1", len(loaded.Edges))
 	}
@@ -208,7 +196,7 @@ func TestLoadJSON_RoundTripsExportFormat(t *testing.T) {
 }
 
 func TestWriteJSON_DeduplicatesNodesBeforeRetrievalSync(t *testing.T) {
-	withStubEmbeddings(t)
+	t.Skip("legacy retrieval sync removed in reduced export surface")
 	outDir := t.TempDir()
 	g := &types.Graph{
 		Nodes: []types.Node{

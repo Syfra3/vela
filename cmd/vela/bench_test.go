@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"strings"
@@ -61,5 +62,41 @@ func TestWriteBenchSnapshotAndResolveLatest(t *testing.T) {
 	}
 	if filepath.Ext(latest) != ".json" {
 		t.Fatalf("snapshot extension = %q, want .json", filepath.Ext(latest))
+	}
+}
+
+func TestPrintBenchReportIncludesProjectSection(t *testing.T) {
+	stdout := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe() error = %v", err)
+	}
+	os.Stdout = w
+	t.Cleanup(func() { os.Stdout = stdout })
+
+	printBenchReport(igraph.StatusSnapshot{
+		Metrics: igraph.HealthMetrics{Path: "/tmp/global/.vela/graph.json", Nodes: 10, Edges: 20},
+		Projects: []igraph.ProjectStatus{{
+			Name:          "vela",
+			Path:          "/work/vela",
+			Remote:        "git@github.com:Syfra3/vela.git",
+			Nodes:         10,
+			Files:         3,
+			Symbols:       6,
+			OutgoingEdges: 20,
+		}},
+	}, "")
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	var out bytes.Buffer
+	if _, err := out.ReadFrom(r); err != nil {
+		t.Fatalf("ReadFrom() error = %v", err)
+	}
+	for _, want := range []string{"PROJECTS", "vela", "nodes:10", "git@github.com:Syfra3/vela.git"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("expected %q in report output, got %q", want, out.String())
+		}
 	}
 }

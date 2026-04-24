@@ -29,7 +29,7 @@ func RenderProgress(p types.ExtractionProgress, width int) string {
 	remaining := p.EstimatedRemainingSeconds()
 
 	return fmt.Sprintf(
-		"%s %3d%%\n  File:      %s\n  Progress:  %d / %d chunks\n  Elapsed:   %s\n  ETA:       %s",
+		"%s %3d%%\n  Current:   %s\n  Progress:  %d / %d chunks\n  Elapsed:   %s\n  ETA:       %s",
 		bar,
 		pct,
 		truncate(p.CurrentFile, width-14),
@@ -48,13 +48,13 @@ func RenderFileSummary(total, code, docs, other int) string {
 	)
 }
 
-// RenderProviderStatus renders the current LLM provider info
+// RenderProviderStatus renders the current pipeline backend info.
 func RenderProviderStatus(provider string, isHealthy bool) string {
-	status := "offline"
+	status := "standby"
 	if isHealthy {
 		status = "ready"
 	}
-	return fmt.Sprintf("  LLM Provider: %s  [%s]", provider, status)
+	return fmt.Sprintf("  Build Backend: %s  [%s]", provider, status)
 }
 
 func formatDuration(seconds int) string {
@@ -80,4 +80,21 @@ func truncate(s string, max int) string {
 		return s
 	}
 	return "..." + s[len(s)-max+3:]
+}
+
+func RenderBuildSummary(result BuildRunResult) string {
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("graph: %s\n", result.GraphPath))
+	b.WriteString(fmt.Sprintf("html: %s\n", result.HTMLPath))
+	b.WriteString(fmt.Sprintf("report: %s\n", result.ReportPath))
+	b.WriteString(fmt.Sprintf("obsidian: %s\n", result.ObsidianPath))
+	b.WriteString(fmt.Sprintf("files: %d\n", result.Files))
+	b.WriteString(fmt.Sprintf("facts: %d\n", result.Facts))
+	if len(result.Stages) > 0 {
+		b.WriteString("stages:\n")
+		for _, stage := range result.Stages {
+			b.WriteString(fmt.Sprintf("  - %s: %d\n", stage.Name, stage.Count))
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
 }

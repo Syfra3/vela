@@ -1,0 +1,74 @@
+{
+  "project": "vela",
+  "loopFile": "scripts/eval-loop.json",
+  "activeSubject": "vela",
+  "campaignCycle": 1,
+  "status": "idle",
+  "currentPhaseId": "phase-1-reverse-lookup",
+  "currentIteration": 1,
+  "maxIterationsPerPhase": 4,
+  "humanDecisionRequired": false,
+  "humanDecisionReason": "",
+  "lastRun": {
+    "phaseId": "",
+    "reportPath": "",
+    "manifestPath": "",
+    "timestamp": ""
+  },
+  "approvedBaselines": {
+    "overall": {
+      "reportPath": ""
+    },
+    "phases": {
+      "phase-1-reverse-lookup": {
+        "approved": false,
+        "approvedAt": "",
+        "reportPath": ""
+      },
+      "phase-2-path-quality": {
+        "approved": false,
+        "approvedAt": "",
+        "reportPath": ""
+      }
+    }
+  },
+  "phaseBestResults": {
+    "phase-1-reverse-lookup": {
+      "reportPath": "",
+      "manifestPath": "",
+      "iteration": 0,
+      "updatedAt": "",
+      "goalsMetCount": 0,
+      "goalsTotal": 3,
+      "score": 0,
+      "metrics": {}
+    },
+    "phase-2-path-quality": {
+      "reportPath": "",
+      "manifestPath": "",
+      "iteration": 0,
+      "updatedAt": "",
+      "goalsMetCount": 0,
+      "goalsTotal": 4,
+      "score": 0,
+      "metrics": {}
+    }
+  },
+  "phaseProgress": {
+    "phase-1-reverse-lookup": {
+      "nextIteration": 1,
+      "exhausted": false,
+      "exhaustedAt": "",
+      "finalOutcome": "",
+      "finalReportPath": ""
+    },
+    "phase-2-path-quality": {
+      "nextIteration": 1,
+      "exhausted": false,
+      "exhaustedAt": "",
+      "finalOutcome": "",
+      "finalReportPath": ""
+    }
+  },
+  "history": []
+}

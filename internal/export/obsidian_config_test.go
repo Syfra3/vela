@@ -27,7 +27,7 @@ func TestWriteObsidianConfig_ColorGroups(t *testing.T) {
 			{
 				ID: "project:vela", Label: "vela",
 				NodeType: string(types.NodeTypeProject),
-				Source:   &types.Source{Type: types.SourceTypeCodebase, Name: "vela"},
+				Source:   &types.Source{Type: types.SourceTypeCodebase, ID: "github.com/Syfra3/vela", Name: "vela", Organization: "Syfra3"},
 			},
 			{
 				ID: "ancora:obs:1", Label: "obs1",
@@ -91,6 +91,9 @@ func TestWriteObsidianConfig_ColorGroups(t *testing.T) {
 	}
 	if !found {
 		t.Error("no color group for project 'vela'")
+	}
+	if !queries["path:vela/_index"] {
+		t.Error("missing path:vela/_index color group")
 	}
 
 	// All RGB values non-zero, alpha == 1.

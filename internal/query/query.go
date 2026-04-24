@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -276,6 +277,16 @@ func preferredLayer(edge types.Edge) types.Layer {
 	return ""
 }
 
+func nodeLayer(node types.Node) types.Layer {
+	if key := types.CanonicalKeyForNode(node); !key.IsZero() && key.Layer != "" {
+		return key.Layer
+	}
+	if node.Source != nil {
+		return types.LayerOf(node.Source.Type)
+	}
+	return ""
+}
+
 // Path finds the shortest directed path from nodeA to nodeB.
 // Returns a human-readable string.
 func (e *Engine) Path(fromLabel, toLabel string) string {
@@ -283,10 +294,19 @@ func (e *Engine) Path(fromLabel, toLabel string) string {
 	toInt, toOK := e.resolveToInt(toLabel)
 
 	if !fromOK {
-		return fmt.Sprintf("node %q not found in graph", fromLabel)
+		return degradedNoPathMessage(fromLabel, toLabel, fmt.Sprintf("source node %q is missing from the current graph", fromLabel))
 	}
 	if !toOK {
-		return fmt.Sprintf("node %q not found in graph", toLabel)
+		return degradedNoPathMessage(fromLabel, toLabel, fmt.Sprintf("target node %q is missing from the current graph", toLabel))
+	}
+	if fromID, ok := e.intToID[fromInt]; ok {
+		if toID, ok := e.intToID[toInt]; ok {
+			fromNode, fromNodeOK := e.nodeByID[fromID]
+			toNode, toNodeOK := e.nodeByID[toID]
+			if fromNodeOK && toNodeOK && isFileNode(fromNode) && isFileNode(toNode) {
+				return e.fileDependencyPath(fromID, toID, fromLabel, toLabel)
+			}
+		}
 	}
 
 	shortest := path.DijkstraFrom(simple.Node(fromInt), e.directed)
@@ -307,6 +327,211 @@ func (e *Engine) Path(fromLabel, toLabel string) string {
 		}
 	}
 	return strings.Join(labels, " → ")
+}
+
+func degradedNoPathMessage(fromLabel, toLabel, reason string) string {
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return fmt.Sprintf("no path found from %q to %q", fromLabel, toLabel)
+	}
+	return fmt.Sprintf("no path found from %q to %q\nreason: %s\nprovenance: degraded graph lookup", fromLabel, toLabel, reason)
+}
+
+func (e *Engine) fileDependencyPath(fromID, toID, fromLabel, toLabel string) string {
+	pathIDs, ok := e.rankFileDependencyPath(fromID, toID)
+	if !ok {
+		return fmt.Sprintf("no path found from %q to %q", fromLabel, toLabel)
+	}
+	labels := make([]string, 0, len(pathIDs))
+	for _, nodeID := range pathIDs {
+		labels = append(labels, e.describeRef(nodeID))
+	}
+	return strings.Join(labels, " → ")
+}
+
+func (e *Engine) rankFileDependencyPath(fromID, toID string) ([]string, bool) {
+	adjacency := make(map[string][]string)
+	for _, edge := range e.graph.Edges {
+		if !isFileDependencyEdge(edge, e.nodeByID) || edge.Source == edge.Target {
+			continue
+		}
+		adjacency[edge.Source] = append(adjacency[edge.Source], edge.Target)
+	}
+	for source := range adjacency {
+		sort.Strings(adjacency[source])
+	}
+
+	shortest, ok := shortestFileDependencyPath(adjacency, fromID, toID)
+	if !ok {
+		return nil, false
+	}
+	maxDepth := len(shortest) + 3
+	if maxDepth < len(shortest) {
+		maxDepth = len(shortest)
+	}
+	if maxDepth > 8 {
+		maxDepth = 8
+	}
+
+	best := shortest
+	bestScore := e.rankFileDependencyPathScore(best)
+	pathBuf := make([]string, 0, maxDepth)
+	visited := map[string]bool{}
+
+	var dfs func(string)
+	dfs = func(current string) {
+		if len(pathBuf) >= maxDepth {
+			return
+		}
+		visited[current] = true
+		pathBuf = append(pathBuf, current)
+		if current == toID {
+			candidate := append([]string(nil), pathBuf...)
+			score := e.rankFileDependencyPathScore(candidate)
+			if score > bestScore || (score == bestScore && preferRankedFilePath(candidate, best)) {
+				best = candidate
+				bestScore = score
+			}
+		} else {
+			for _, next := range adjacency[current] {
+				if visited[next] {
+					continue
+				}
+				dfs(next)
+			}
+		}
+		pathBuf = pathBuf[:len(pathBuf)-1]
+		delete(visited, current)
+	}
+
+	dfs(fromID)
+	return best, true
+}
+
+func shortestFileDependencyPath(adjacency map[string][]string, fromID, toID string) ([]string, bool) {
+	prev := map[string]string{}
+	queue := []string{fromID}
+	visited := map[string]bool{fromID: true}
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
+		if current == toID {
+			break
+		}
+		for _, next := range adjacency[current] {
+			if visited[next] {
+				continue
+			}
+			visited[next] = true
+			prev[next] = current
+			queue = append(queue, next)
+		}
+	}
+	if !visited[toID] {
+		return nil, false
+	}
+	pathIDs := []string{toID}
+	for current := toID; current != fromID; {
+		current = prev[current]
+		pathIDs = append([]string{current}, pathIDs...)
+	}
+	return pathIDs, true
+}
+
+func preferRankedFilePath(candidate, current []string) bool {
+	if len(candidate) != len(current) {
+		return len(candidate) < len(current)
+	}
+	return strings.Join(candidate, "\x00") < strings.Join(current, "\x00")
+}
+
+func (e *Engine) rankFileDependencyPathScore(pathIDs []string) int {
+	if len(pathIDs) < 2 {
+		return 0
+	}
+	source, sourceOK := e.nodeByID[pathIDs[0]]
+	target, targetOK := e.nodeByID[pathIDs[len(pathIDs)-1]]
+	if !sourceOK || !targetOK {
+		return -len(pathIDs)
+	}
+	sourcePath := normalizeRankedFilePath(source.SourceFile)
+	targetPath := normalizeRankedFilePath(target.SourceFile)
+	sourceRoot := rankedFilePathRoot(sourcePath)
+	targetRoot := rankedFilePathRoot(targetPath)
+	score := -len(pathIDs)
+	if len(pathIDs) > 2 {
+		score += 10
+	}
+	targetRootOnly := len(pathIDs) > 2
+	for _, nodeID := range pathIDs[1 : len(pathIDs)-1] {
+		node, ok := e.nodeByID[nodeID]
+		if !ok {
+			continue
+		}
+		path := normalizeRankedFilePath(node.SourceFile)
+		base := filepath.Base(path)
+		if targetRoot != "" && strings.HasPrefix(path, targetRoot) {
+			score += 40
+		} else {
+			targetRootOnly = false
+		}
+		if strings.HasPrefix(base, "index.") {
+			score += 30
+		}
+		switch base {
+		case "config.go":
+			score += 25
+		case "types.go":
+			score += 10
+		}
+		if sourceRoot != "" && targetRoot != "" && sourceRoot != targetRoot && strings.HasPrefix(path, sourceRoot) {
+			score -= 20
+		}
+		if strings.Contains(path, "/domain/") {
+			score -= 15
+		}
+		if strings.Contains(path, "/context/") && !strings.Contains(path, "/presentation/context/") && !strings.Contains(path, "/shared/contexts/") {
+			score -= 10
+		}
+	}
+	if targetRootOnly {
+		score += 20
+	}
+	return score
+}
+
+func normalizeRankedFilePath(path string) string {
+	return strings.ToLower(strings.TrimSpace(path))
+}
+
+func rankedFilePathRoot(path string) string {
+	path = normalizeRankedFilePath(path)
+	if path == "" {
+		return ""
+	}
+	if strings.HasPrefix(path, "packages/") {
+		parts := strings.Split(path, "/")
+		if len(parts) >= 3 {
+			return strings.Join(parts[:3], "/") + "/"
+		}
+	}
+	if strings.HasPrefix(path, "internal/") {
+		parts := strings.Split(path, "/")
+		if len(parts) >= 2 {
+			return strings.Join(parts[:2], "/") + "/"
+		}
+	}
+	if strings.HasPrefix(path, "cmd/") {
+		parts := strings.Split(path, "/")
+		if len(parts) >= 2 {
+			return strings.Join(parts[:2], "/") + "/"
+		}
+	}
+	lastSlash := strings.LastIndex(path, "/")
+	if lastSlash == -1 {
+		return ""
+	}
+	return path[:lastSlash+1]
 }
 
 // Explain returns all edges where the given node is source or target.
@@ -522,12 +747,17 @@ func (e *Engine) Query(input string) string {
 			return "usage: route <query>"
 		}
 		return e.Route(strings.Join(parts[1:], " "))
+	case "lookup":
+		if len(parts) < 2 {
+			return "usage: lookup <term>"
+		}
+		return e.RenderLookup(strings.Join(parts[1:], " "), 5)
 	case "nodes":
 		return fmt.Sprintf("Total nodes: %d", len(e.graph.Nodes))
 	case "edges":
 		return fmt.Sprintf("Total edges: %d", len(e.graph.Edges))
 	case "help":
-		return "Commands:\n  path <from> <to>  — shortest dependency path\n  explain <node>    — all edges involving a node\n  bindings <node>   — memory reference binder state\n  route <query>     — workspace repo routing decision\n  nodes / edges     — graph stats\n  quit              — exit"
+		return "Commands:\n  path <from> <to>  — shortest dependency path\n  explain <node>    — all edges involving a node\n  bindings <node>   — memory reference binder state\n  route <query>     — workspace repo routing decision\n  lookup <term>     — candidate nodes for follow-up graph queries\n  nodes / edges     — graph stats\n  quit              — exit"
 	default:
 		return fmt.Sprintf("unknown command %q — type 'help' for available commands", cmd)
 	}
@@ -644,12 +874,16 @@ func (e *Engine) Stats() GraphStats {
 	if len(e.graph.Communities) > 0 {
 		stats.CommunityCount = len(e.graph.Communities)
 	} else {
+		hasNonZero := false
 		for _, node := range e.graph.Nodes {
 			if node.Community != 0 {
+				hasNonZero = true
 				communities[node.Community] = struct{}{}
 			}
 		}
-		stats.CommunityCount = len(communities)
+		if hasNonZero {
+			stats.CommunityCount = len(communities)
+		}
 	}
 
 	for _, node := range e.graph.Nodes {

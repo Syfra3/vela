@@ -8,8 +8,9 @@ Reads a JSON object from stdin:
 Writes a JSON object to stdout:
   {"id1": 0, "id2": 0, "id3": 1, ...}   (node ID → community ID, 0-indexed)
 
-Requires: graspologic (pip install graspologic)
-Falls back to a simple connected-components partition if graspologic is missing.
+Requires either:
+  - graspologic (preferred Leiden backend)
+  - networkx (fallback modularity backend)
 """
 
 import json
@@ -18,8 +19,12 @@ import sys
 
 def leiden_partition(nodes, edges):
     """Run Leiden community detection via graspologic."""
+    try:
+        from graspologic.partition import leiden
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("graspologic is not installed") from exc
+
     import numpy as np
-    from graspologic.partition import leiden
 
     n = len(nodes)
     if n == 0:
@@ -40,36 +45,43 @@ def leiden_partition(nodes, edges):
     return {node: int(labels[i]) for i, node in enumerate(nodes)}
 
 
-def fallback_components(nodes, edges):
-    """Simple union-find connected components — used when graspologic is absent."""
-    parent = {n: n for n in nodes}
+def networkx_partition(nodes, edges):
+    """Run modularity-based community detection via NetworkX."""
+    try:
+        import networkx as nx
+    except ModuleNotFoundError as exc:
+        raise RuntimeError(
+            "networkx is not installed; install it with: .venv/bin/pip install -r requirements-clustering.txt"
+        ) from exc
 
-    def find(x):
-        while parent[x] != x:
-            parent[x] = parent[parent[x]]
-            x = parent[x]
-        return x
+    if not nodes:
+        return {}
 
-    def union(a, b):
-        ra, rb = find(a), find(b)
-        if ra != rb:
-            parent[ra] = rb
+    graph = nx.Graph()
+    graph.add_nodes_from(nodes)
+    node_set = set(nodes)
+    graph.add_edges_from(
+        (edge.get("from", ""), edge.get("to", ""))
+        for edge in edges
+        if edge.get("from", "") in node_set and edge.get("to", "") in node_set
+    )
 
-    for e in edges:
-        f, t = e.get("from", ""), e.get("to", "")
-        if f in parent and t in parent:
-            union(f, t)
+    if graph.number_of_edges() == 0:
+        return {node: i for i, node in enumerate(nodes)}
 
-    # Map component root → integer community ID
-    roots = {}
-    result = {}
+    try:
+        communities = nx.community.louvain_communities(graph, seed=0)
+    except AttributeError:
+        communities = nx.community.greedy_modularity_communities(graph)
+
+    partition = {}
+    for idx, community in enumerate(communities):
+        for node in community:
+            partition[node] = idx
     for node in nodes:
-        root = find(node)
-        if root not in roots:
-            roots[root] = len(roots)
-        result[node] = roots[root]
-    return result
-
+        if node not in partition:
+            partition[node] = len(partition)
+    return partition
 
 def main():
     data = json.load(sys.stdin)
@@ -78,9 +90,15 @@ def main():
 
     try:
         partition = leiden_partition(nodes, edges)
-    except Exception:
-        # graspologic not available or failed — use fallback
-        partition = fallback_components(nodes, edges)
+    except Exception as exc:
+        if "graspologic is not installed" not in str(exc):
+            print(str(exc), file=sys.stderr)
+            sys.exit(1)
+        try:
+            partition = networkx_partition(nodes, edges)
+        except Exception as fallback_exc:
+            print(f"{exc}; {fallback_exc}", file=sys.stderr)
+            sys.exit(1)
 
     json.dump(partition, sys.stdout)
 

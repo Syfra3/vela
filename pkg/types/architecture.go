@@ -1,6 +1,10 @@
 package types
 
-import "strings"
+import (
+	"errors"
+	"sort"
+	"strings"
+)
 
 // This file defines the shared, architecture-facing types that the rest of
 // Vela's layered retrieval system builds on. The topology modeled here is:
@@ -363,4 +367,170 @@ func LayerOf(s SourceType) Layer {
 		return LayerMemory
 	}
 	return ""
+}
+
+// FactKind classifies the canonical graph-truth relationship carried through the
+// scanner -> semantic -> patch -> merge pipeline.
+type FactKind string
+
+const (
+	FactKindContains   FactKind = "contains"
+	FactKindDefines    FactKind = "defines"
+	FactKindImports    FactKind = "imports"
+	FactKindCalls      FactKind = "calls"
+	FactKindReferences FactKind = "references"
+	FactKindImplements FactKind = "implements"
+	FactKindDependsOn  FactKind = "depends_on"
+)
+
+// Provenance records where a canonical fact came from and how trustworthy it is.
+// Unlike the legacy memory-oriented contracts, this is strictly code-truth
+// oriented: scanner, semantic drivers, patchers, and merge artifacts.
+type Provenance struct {
+	Stage       string     `json:"stage,omitempty"`
+	Driver      string     `json:"driver,omitempty"`
+	Source      string     `json:"source,omitempty"`
+	Confidence  Confidence `json:"confidence,omitempty"`
+	Artifact    string     `json:"artifact,omitempty"`
+	Explanation string     `json:"explanation,omitempty"`
+}
+
+// Fact is the canonical unit merged into the code-truth graph.
+type Fact struct {
+	Repo       string                 `json:"repo,omitempty"`
+	Language   string                 `json:"language,omitempty"`
+	Kind       FactKind               `json:"kind"`
+	From       string                 `json:"from"`
+	To         string                 `json:"to,omitempty"`
+	Attributes map[string]interface{} `json:"attributes,omitempty"`
+	Provenance []Provenance           `json:"provenance,omitempty"`
+}
+
+// StableKey returns the deterministic identity used when deduplicating facts
+// across scanner, semantic, and patch sources.
+func (f Fact) StableKey() string {
+	parts := []string{
+		strings.TrimSpace(f.Repo),
+		strings.ToLower(strings.TrimSpace(f.Language)),
+		string(f.Kind),
+		strings.TrimSpace(f.From),
+		strings.TrimSpace(f.To),
+	}
+	return strings.Join(parts, "|")
+}
+
+// BuildStage identifies a step in the replacement extraction pipeline.
+type BuildStage string
+
+const (
+	BuildStageDetect  BuildStage = "detect"
+	BuildStageScan    BuildStage = "scan"
+	BuildStageDrivers BuildStage = "drivers"
+	BuildStagePatch   BuildStage = "patch"
+	BuildStageMerge   BuildStage = "merge"
+	BuildStagePersist BuildStage = "persist"
+)
+
+// BuildRequest defines the pipeline plan for producing a canonical graph-truth
+// build. It intentionally models only code-oriented pipeline hooks.
+type BuildRequest struct {
+	RepoRoot  string       `json:"repo_root"`
+	Languages []string     `json:"languages,omitempty"`
+	Drivers   []string     `json:"drivers,omitempty"`
+	Patchers  []string     `json:"patchers,omitempty"`
+	Stages    []BuildStage `json:"stages,omitempty"`
+}
+
+// Normalize fills stable defaults and deduplicates pipeline hooks.
+func (r BuildRequest) Normalize() BuildRequest {
+	if len(r.Stages) == 0 {
+		r.Stages = []BuildStage{
+			BuildStageDetect,
+			BuildStageScan,
+			BuildStageDrivers,
+			BuildStagePatch,
+			BuildStageMerge,
+			BuildStagePersist,
+		}
+	}
+	r.Drivers = normalizeStrings(r.Drivers)
+	r.Patchers = normalizeStrings(r.Patchers)
+	r.Languages = normalizeStrings(r.Languages)
+	return r
+}
+
+// QueryKind identifies the supported graph-truth query families.
+type QueryKind string
+
+const (
+	QueryKindDependencies        QueryKind = "dependencies"
+	QueryKindReverseDependencies QueryKind = "reverse_dependencies"
+	QueryKindPath                QueryKind = "path"
+	QueryKindImpact              QueryKind = "impact"
+	QueryKindExplain             QueryKind = "explain"
+)
+
+const DefaultQueryLimit = 20
+
+// QueryRequest is the canonical input contract for graph-truth queries.
+type QueryRequest struct {
+	Kind              QueryKind `json:"kind"`
+	Subject           string    `json:"subject,omitempty"`
+	Target            string    `json:"target,omitempty"`
+	Limit             int       `json:"limit,omitempty"`
+	IncludeProvenance bool      `json:"include_provenance,omitempty"`
+}
+
+// Normalize fills defaults that should be consistent across CLI, MCP, and TUI
+// callers once the product is cut over to graph-truth-only queries.
+func (r QueryRequest) Normalize() QueryRequest {
+	if r.Limit <= 0 {
+		r.Limit = DefaultQueryLimit
+	}
+	if !r.IncludeProvenance {
+		r.IncludeProvenance = true
+	}
+	return r
+}
+
+// Validate enforces the minimal shape for each query family.
+func (r QueryRequest) Validate() error {
+	if r.Kind == "" {
+		return errors.New("query kind is required")
+	}
+	if strings.TrimSpace(r.Subject) == "" {
+		return errors.New("query subject is required")
+	}
+	switch r.Kind {
+	case QueryKindDependencies, QueryKindReverseDependencies, QueryKindImpact, QueryKindExplain:
+		return nil
+	case QueryKindPath:
+		if strings.TrimSpace(r.Target) == "" {
+			return errors.New("query target is required for path queries")
+		}
+		return nil
+	default:
+		return errors.New("unsupported query kind")
+	}
+}
+
+func normalizeStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	normalized := make([]string, 0, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		normalized = append(normalized, trimmed)
+	}
+	sort.Strings(normalized)
+	return normalized
 }

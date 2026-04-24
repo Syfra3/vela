@@ -24,19 +24,27 @@ var memorySource = &types.Source{
 	Name: "ancora",
 }
 
-// TestWriteObsidian_ProjectNodes verifies codebase project + file + symbol nodes
-// land under Projects/<name>/ with correct frontmatter.
+// TestWriteObsidian_ProjectNodes verifies org-backed codebase nodes land inside
+// an org-scoped vault with repo metadata and tags.
 func TestWriteObsidian_ProjectNodes(t *testing.T) {
+	projectSource := &types.Source{
+		Type:         types.SourceTypeCodebase,
+		ID:           "github.com/org/testproject",
+		Name:         "testproject",
+		Organization: "org",
+		Path:         "/tmp/testproject",
+	}
 	g := &types.Graph{
 		Nodes: []types.Node{
 			{
 				ID:       "project:testproject",
-				Label:    "testproject",
+				Label:    "father",
 				NodeType: string(types.NodeTypeProject),
-				Source:   codebaseSource,
+				Source:   projectSource,
 				Metadata: map[string]interface{}{
-					"path":   "/tmp/testproject",
-					"remote": "https://github.com/org/testproject.git",
+					"path":         "/tmp/testproject",
+					"remote":       "https://github.com/org/testproject.git",
+					"organization": "org",
 				},
 			},
 			{
@@ -44,14 +52,14 @@ func TestWriteObsidian_ProjectNodes(t *testing.T) {
 				Label:      "internal/auth/middleware.go",
 				NodeType:   string(types.NodeTypeFile),
 				SourceFile: "internal/auth/middleware.go",
-				Source:     codebaseSource,
+				Source:     projectSource,
 			},
 			{
 				ID:         "testproject:internal/auth/middleware.go:validateToken",
 				Label:      "validateToken",
 				NodeType:   "function",
 				SourceFile: "internal/auth/middleware.go",
-				Source:     codebaseSource,
+				Source:     projectSource,
 			},
 		},
 		Edges: []types.Edge{
@@ -69,26 +77,43 @@ func TestWriteObsidian_ProjectNodes(t *testing.T) {
 	vaultDir := filepath.Join(outDir, "obsidian")
 
 	// Project root note
-	projIndex := filepath.Join(vaultDir, "Projects", "testproject", "_index.md")
+	projIndex := filepath.Join(vaultDir, "Organizations", "org", "testproject", "_index.md")
 	if _, err := os.Stat(projIndex); err != nil {
-		t.Errorf("Projects/testproject/_index.md not created: %v", err)
+		t.Errorf("Organizations/org/testproject/_index.md not created: %v", err)
 	}
 	data, _ := os.ReadFile(projIndex)
-	if !strings.Contains(string(data), `kind: "project"`) {
+	content := string(data)
+	if !strings.Contains(content, `kind: "project"`) {
 		t.Errorf("project root note missing kind frontmatter:\n%s", data)
 	}
-	if !strings.Contains(string(data), "remote") {
+	if !strings.Contains(content, `organization: "org"`) {
+		t.Errorf("project root note missing organization frontmatter:\n%s", data)
+	}
+	if !strings.Contains(content, `repo: "testproject"`) {
+		t.Errorf("project root note missing repo frontmatter:\n%s", data)
+	}
+	if !strings.Contains(content, `"kind/project"`) || !strings.Contains(content, `"repo/testproject"`) {
+		t.Errorf("project root note missing filter tags:\n%s", data)
+	}
+	if !strings.Contains(content, "remote") {
 		t.Errorf("project root note missing remote frontmatter:\n%s", data)
+	}
+	if !strings.Contains(content, "# testproject") {
+		t.Errorf("project root note should render repo title instead of generic label:\n%s", data)
 	}
 
 	// File note
-	fileNote := filepath.Join(vaultDir, "Projects", "testproject", "internal_auth_middleware.go.md")
+	fileNote := filepath.Join(vaultDir, "Organizations", "org", "testproject", "internal_auth_middleware.go.md")
 	if _, err := os.Stat(fileNote); err != nil {
-		t.Errorf("Projects/testproject/internal_auth_middleware.go.md not created: %v", err)
+		t.Errorf("Organizations/org/testproject/internal_auth_middleware.go.md not created: %v", err)
+	}
+	fileData, _ := os.ReadFile(fileNote)
+	if !strings.Contains(string(fileData), `repo: "testproject"`) || !strings.Contains(string(fileData), `"kind/file"`) {
+		t.Errorf("file note missing repo metadata/tags:\n%s", fileData)
 	}
 
 	// Symbol note — under flattened file subdirectory
-	symNote := filepath.Join(vaultDir, "Projects", "testproject",
+	symNote := filepath.Join(vaultDir, "Organizations", "org", "testproject",
 		"internal_auth_middleware.go", "validateToken.md")
 	if _, err := os.Stat(symNote); err != nil {
 		t.Errorf("symbol note not created at expected path: %v", err)
@@ -96,6 +121,9 @@ func TestWriteObsidian_ProjectNodes(t *testing.T) {
 	symData, _ := os.ReadFile(symNote)
 	if !strings.Contains(string(symData), `kind: "function"`) {
 		t.Errorf("symbol note missing kind frontmatter:\n%s", symData)
+	}
+	if !strings.Contains(string(symData), `"repo/testproject"`) {
+		t.Errorf("symbol note missing repo tag:\n%s", symData)
 	}
 }
 
@@ -160,7 +188,7 @@ func TestWriteObsidian_MemoryNodes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Memories/_index/workspace-glim.md not created: %v", err)
 	}
-	if !strings.Contains(string(data), "[[Fixed auth bug]]") {
+	if !strings.Contains(string(data), "[[Memories/glim/work/Fixed auth bug]]") {
 		t.Errorf("workspace index note missing obs wikilink:\n%s", data)
 	}
 
@@ -176,13 +204,102 @@ func TestWriteObsidian_MemoryNodes(t *testing.T) {
 		`workspace: "glim"`,
 		`visibility: "work"`,
 		`topic_key: "auth/token-expiry"`,
-		"[[workspace-glim]]",
-		"[[visibility-work]]",
+		"[[Memories/_index/workspace-glim]]",
+		"[[Memories/_index/visibility-work]]",
 	}
 	for _, want := range checks {
 		if !strings.Contains(content, want) {
 			t.Errorf("obs note missing %q:\n%s", want, content)
 		}
+	}
+}
+
+func TestWriteObsidian_ResolvesMixedGraphLinksToExportTargets(t *testing.T) {
+	projectSource := &types.Source{
+		Type:         types.SourceTypeCodebase,
+		ID:           "github.com/org/testproject",
+		Name:         "testproject",
+		Organization: "org",
+		Path:         "/tmp/testproject",
+	}
+	obsSource := &types.Source{Type: types.SourceTypeMemory, Name: "ancora"}
+	projectID := "project:github.com/org/testproject"
+	fileID := "github.com/org/testproject:file:internal/auth/middleware.go"
+	secondFileID := "github.com/org/testproject:file:pkg/types/types.go"
+	symbolID := "github.com/org/testproject:function:validateToken"
+	obsID := "ancora:obs:1"
+	g := &types.Graph{
+		Nodes: []types.Node{
+			{ID: projectID, Label: "testproject", NodeType: string(types.NodeTypeProject), Source: projectSource},
+			{ID: fileID, Label: "internal/auth/middleware.go", NodeType: string(types.NodeTypeFile), SourceFile: "internal/auth/middleware.go", Source: projectSource},
+			{ID: secondFileID, Label: "pkg/types/types.go", NodeType: string(types.NodeTypeFile), SourceFile: "pkg/types/types.go", Source: projectSource},
+			{ID: symbolID, Label: "validateToken", NodeType: "function", SourceFile: "internal/auth/middleware.go", Source: projectSource},
+			{ID: "ancora:workspace:team/platform", Label: "team/platform", NodeType: string(types.NodeTypeWorkspace), Source: obsSource},
+			{ID: "ancora:visibility:work", Label: "work", NodeType: string(types.NodeTypeVisibility), Source: obsSource},
+			{ID: "ancora:organization:Syfra/Platform", Label: "Syfra/Platform", NodeType: string(types.NodeTypeOrganization), Source: obsSource},
+			{ID: obsID, Label: "Fix / auth links", NodeType: string(types.NodeTypeObservation), Source: obsSource, Metadata: map[string]interface{}{"workspace": "team/platform", "visibility": "work", "organization": "Syfra/Platform"}},
+		},
+		Edges: []types.Edge{
+			{Source: projectID, Target: "internal/auth/middleware.go", Relation: "contains"},
+			{Source: projectID, Target: secondFileID, Relation: "contains"},
+			{Source: fileID, Target: "validateToken", Relation: "contains"},
+			{Source: obsID, Target: projectID, Relation: "references"},
+		},
+		Communities: map[int][]string{},
+		ExtractedAt: time.Now(),
+	}
+
+	outDir := t.TempDir()
+	if err := WriteObsidian(g, outDir); err != nil {
+		t.Fatalf("WriteObsidian error: %v", err)
+	}
+
+	vaultDir := filepath.Join(outDir, "obsidian")
+	projectNote := filepath.Join(vaultDir, "Organizations", "org", "testproject", "_index.md")
+	projectData, err := os.ReadFile(projectNote)
+	if err != nil {
+		t.Fatalf("project note read error: %v", err)
+	}
+	if !strings.Contains(string(projectData), "[[testproject/internal_auth_middleware.go]]") {
+		t.Fatalf("project note missing resolved file link:\n%s", projectData)
+	}
+	if !strings.Contains(string(projectData), "[[testproject/pkg_types_types.go]]") {
+		t.Fatalf("project note missing preserved ID-based file link:\n%s", projectData)
+	}
+
+	fileNote := filepath.Join(vaultDir, "Organizations", "org", "testproject", "internal_auth_middleware.go.md")
+	fileData, err := os.ReadFile(fileNote)
+	if err != nil {
+		t.Fatalf("file note read error: %v", err)
+	}
+	if !strings.Contains(string(fileData), "[[testproject/internal_auth_middleware.go/validateToken]]") {
+		t.Fatalf("file note missing resolved symbol link:\n%s", fileData)
+	}
+	if !strings.Contains(string(fileData), "**Project:** [[_index]]") {
+		t.Fatalf("file note missing sanitized project breadcrumb:\n%s", fileData)
+	}
+
+	obsNote := filepath.Join(vaultDir, "Memories", "team_platform", "work", "Fix _ auth links.md")
+	obsData, err := os.ReadFile(obsNote)
+	if err != nil {
+		t.Fatalf("obs note read error: %v", err)
+	}
+	for _, want := range []string{
+		"[[Memories/_index/workspace-team_platform]]",
+		"[[Memories/_index/visibility-work]]",
+		"[[Memories/_index/organization-Syfra_Platform]]",
+	} {
+		if !strings.Contains(string(obsData), want) {
+			t.Fatalf("obs note missing resolved target %q:\n%s", want, obsData)
+		}
+	}
+
+	indexData, err := os.ReadFile(filepath.Join(vaultDir, "Memories", "_index", "workspace-team_platform.md"))
+	if err != nil {
+		t.Fatalf("workspace index read error: %v", err)
+	}
+	if !strings.Contains(string(indexData), "[[Memories/team_platform/work/Fix _ auth links]]") {
+		t.Fatalf("workspace index note missing resolved observation link:\n%s", indexData)
 	}
 }
 
@@ -233,6 +350,135 @@ func TestWriteObsidian_WritesGraphConfig(t *testing.T) {
 	}
 	if !found {
 		t.Error("no color group for project 'vela' found in colorGroups")
+	}
+}
+
+func TestWriteObsidianConfig_UsesSanitizedWorkspacePaths(t *testing.T) {
+	g := &types.Graph{
+		Nodes: []types.Node{{
+			ID:       "ancora:obs:1",
+			Label:    "Obs",
+			NodeType: string(types.NodeTypeObservation),
+			Source:   memorySource,
+			Metadata: map[string]interface{}{"workspace": "team/platform", "visibility": "work"},
+		}},
+		Edges:       []types.Edge{},
+		Communities: map[int][]string{},
+		ExtractedAt: time.Now(),
+	}
+
+	outDir := t.TempDir()
+	if err := WriteObsidian(g, outDir); err != nil {
+		t.Fatalf("WriteObsidian error: %v", err)
+	}
+
+	configPath := filepath.Join(outDir, "obsidian", ".obsidian", "graph.json")
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatalf("graph.json read error: %v", err)
+	}
+	if !strings.Contains(string(data), `"path:Memories/team_platform/work"`) {
+		t.Fatalf("graph.json missing sanitized workspace path:\n%s", data)
+	}
+}
+
+func TestWriteObsidian_SeparatesSameNamedReposBySourceID(t *testing.T) {
+	g := &types.Graph{
+		Nodes: []types.Node{
+			{
+				ID:       "project:github.com/org-a/vela",
+				Label:    "vela",
+				NodeType: string(types.NodeTypeProject),
+				Source:   &types.Source{Type: types.SourceTypeCodebase, ID: "github.com/org-a/vela", Name: "vela", Organization: "org-a"},
+			},
+			{
+				ID:       "project:github.com/org-b/vela",
+				Label:    "vela",
+				NodeType: string(types.NodeTypeProject),
+				Source:   &types.Source{Type: types.SourceTypeCodebase, ID: "github.com/org-b/vela", Name: "vela", Organization: "org-b"},
+			},
+		},
+		Edges:       []types.Edge{},
+		Communities: map[int][]string{},
+		ExtractedAt: time.Now(),
+	}
+
+	outDir := t.TempDir()
+	if err := WriteObsidian(g, outDir); err != nil {
+		t.Fatalf("WriteObsidian() error = %v", err)
+	}
+
+	for _, path := range []string{
+		filepath.Join(outDir, "obsidian", "Organizations", "org-a", "vela", "_index.md"),
+		filepath.Join(outDir, "obsidian", "Organizations", "org-b", "vela", "_index.md"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected %s to exist: %v", path, err)
+		}
+	}
+}
+
+func TestWriteObsidian_SplitsOrganizationVaults(t *testing.T) {
+	g := &types.Graph{
+		Nodes: []types.Node{
+			{
+				ID:       "project:github.com/org-a/vela",
+				Label:    "vela",
+				NodeType: string(types.NodeTypeProject),
+				Source:   &types.Source{Type: types.SourceTypeCodebase, ID: "github.com/org-a/vela", Name: "vela", Organization: "org-a"},
+			},
+			{
+				ID:       "project:github.com/org-b/docs",
+				Label:    "docs",
+				NodeType: string(types.NodeTypeProject),
+				Source:   &types.Source{Type: types.SourceTypeCodebase, ID: "github.com/org-b/docs", Name: "docs", Organization: "org-b"},
+			},
+		},
+		Edges:       []types.Edge{},
+		Communities: map[int][]string{},
+		ExtractedAt: time.Now(),
+	}
+
+	outDir := t.TempDir()
+	if err := WriteObsidian(g, outDir); err != nil {
+		t.Fatalf("WriteObsidian() error = %v", err)
+	}
+
+	for _, path := range []string{
+		filepath.Join(outDir, "obsidian", "Organizations", "org-a", ".obsidian", "graph.json"),
+		filepath.Join(outDir, "obsidian", "Organizations", "org-b", ".obsidian", "graph.json"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected %s to exist: %v", path, err)
+		}
+	}
+
+	if _, err := os.Stat(filepath.Join(outDir, "obsidian", ".obsidian", "graph.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected no combined root vault config for org-only export, got err=%v", err)
+	}
+}
+
+func TestWriteObsidian_FallsBackToProjectSegmentsWithoutOrganization(t *testing.T) {
+	g := &types.Graph{
+		Nodes: []types.Node{{
+			ID:       "project:team-a/vela",
+			Label:    "vela",
+			NodeType: string(types.NodeTypeProject),
+			Source:   &types.Source{Type: types.SourceTypeCodebase, ID: "team-a/vela", Name: "vela"},
+		}},
+		Edges:       []types.Edge{},
+		Communities: map[int][]string{},
+		ExtractedAt: time.Now(),
+	}
+
+	outDir := t.TempDir()
+	if err := WriteObsidian(g, outDir); err != nil {
+		t.Fatalf("WriteObsidian() error = %v", err)
+	}
+
+	path := filepath.Join(outDir, "obsidian", "Projects", "team-a", "vela", "_index.md")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("expected %s to exist: %v", path, err)
 	}
 }
 

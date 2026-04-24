@@ -192,8 +192,14 @@ func TestPath_NodeNotFound(t *testing.T) {
 	eng, _ := LoadFromFile(path)
 
 	result := eng.Path("NonExistent", "Database")
-	if !strings.Contains(result, "not found") {
-		t.Errorf("expected 'not found' message, got: %q", result)
+	if !strings.Contains(result, "no path found") {
+		t.Errorf("expected degraded no-path message, got: %q", result)
+	}
+	if !strings.Contains(result, "reason:") {
+		t.Errorf("expected degraded reason in message, got: %q", result)
+	}
+	if !strings.Contains(result, "provenance: degraded graph lookup") {
+		t.Errorf("expected degraded provenance in message, got: %q", result)
 	}
 }
 
@@ -239,6 +245,7 @@ func TestQuery_Dispatcher(t *testing.T) {
 		{"explain AuthService", "AuthService"},
 		{"bindings Config note", "ambiguous"},
 		{"route auth", "score="},
+		{"lookup auth", "Candidates for \"auth\""},
 		{"unknown cmd", "unknown command"},
 	}
 
@@ -261,6 +268,36 @@ func TestFindNode_FuzzyLabel(t *testing.T) {
 	}
 	if node.Label != "AuthService" {
 		t.Fatalf("expected AuthService, got %q", node.Label)
+	}
+}
+
+func TestLookupReturnsRankedCandidates(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestGraph(t, dir)
+	eng, _ := LoadFromFile(path)
+
+	results := eng.Lookup("auth", 3)
+	if len(results) == 0 {
+		t.Fatal("expected lookup candidates")
+	}
+	if results[0].Node.Label != "AuthService" {
+		t.Fatalf("top candidate = %q, want AuthService", results[0].Node.Label)
+	}
+	if results[0].Score <= 0 {
+		t.Fatalf("top candidate score = %d, want > 0", results[0].Score)
+	}
+}
+
+func TestRenderLookupSuggestsNextSteps(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestGraph(t, dir)
+	eng, _ := LoadFromFile(path)
+
+	result := eng.RenderLookup("auth", 3)
+	for _, want := range []string{"Candidates for \"auth\":", "1. AuthService", "Next steps:", "vela search \"explain AuthService\""} {
+		if !strings.Contains(result, want) {
+			t.Fatalf("expected %q in result, got %q", want, result)
+		}
 	}
 }
 

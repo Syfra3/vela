@@ -1,521 +1,506 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
-	"github.com/charmbracelet/bubbles/progress"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
+	"github.com/Syfra3/vela/internal/app"
 	"github.com/Syfra3/vela/internal/config"
+	"github.com/Syfra3/vela/internal/registry"
+	"github.com/Syfra3/vela/pkg/types"
 )
 
-// extractStep tracks which sub-screen is active inside the Extract screen.
-type extractStep int
-
-const (
-	stepSource     extractStep = iota // choose source: path or ancora
-	stepBrowse                        // filesystem navigator
-	stepMode                          // Update vs Regenerate (only when graph.json exists)
-	stepExtracting                    // extraction running
-)
-
-// ExtractSource selects where to read data from.
-type ExtractSource int
-
-const (
-	SourcePath   ExtractSource = iota // browse filesystem
-	SourceAncora                      // ancora SQLite snapshot
-)
-
-// ExtractionMode controls whether the cache is honoured.
-type ExtractionMode int
-
-const (
-	ModeUpdate     ExtractionMode = iota // incremental — respect cache
-	ModeRegenerate                       // full — ignore cache
-)
-
-// browseEntry is one row in the directory listing.
-type browseEntry struct {
-	name  string
-	isDir bool
+type BuildRunRequest struct {
+	RepoRoot string
+	Observe  func(app.BuildEvent)
+	Mode     string
 }
 
-// ExtractModel is the TUI model for extraction configuration.
+type BuildStageSummary struct {
+	Name  string
+	Count int
+}
+
+type BuildRunResult struct {
+	GraphPath    string
+	HTMLPath     string
+	ReportPath   string
+	ObsidianPath string
+	Files        int
+	Facts        int
+	Stages       []BuildStageSummary
+	Warnings     []string
+}
+
+type buildFinishedMsg struct {
+	result BuildRunResult
+	err    error
+}
+
+type buildEventMsg struct{ event app.BuildEvent }
+
+type extractTickMsg struct{}
+
+type dirEntry struct {
+	Name  string
+	Path  string
+	IsDir bool
+}
+
+type extractPhase int
+
+const (
+	extractPhaseBrowse extractPhase = iota
+	extractPhaseConfirm
+	extractPhaseRunning
+	extractPhaseResult
+)
+
+var readDirEntries = func(root string) ([]dirEntry, error) {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]dirEntry, 0, len(entries))
+	for _, entry := range entries {
+		result = append(result, dirEntry{Name: entry.Name(), Path: filepath.Join(root, entry.Name()), IsDir: entry.IsDir()})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].IsDir != result[j].IsDir {
+			return result[i].IsDir
+		}
+		return strings.ToLower(result[i].Name) < strings.ToLower(result[j].Name)
+	})
+	return result, nil
+}
+
+var runTUIBuild = func(req BuildRunRequest) (BuildRunResult, error) {
+	cfg, err := config.Load()
+	if err != nil {
+		return BuildRunResult{}, err
+	}
+	result, err := app.BuildService{}.Run(context.Background(), app.BuildRequest{RepoRoot: req.RepoRoot, Obsidian: cfg.Obsidian, Observe: req.Observe})
+	if err != nil {
+		return BuildRunResult{}, err
+	}
+	stages := make([]BuildStageSummary, 0, len(result.StageReports))
+	for _, stage := range result.StageReports {
+		stages = append(stages, BuildStageSummary{Name: string(stage.Stage), Count: stage.Count})
+	}
+	out := BuildRunResult{
+		GraphPath:    result.GraphPath,
+		HTMLPath:     result.HTMLPath,
+		ReportPath:   result.ReportPath,
+		ObsidianPath: result.ObsidianPath,
+		Files:        result.Files,
+		Facts:        result.Facts,
+		Stages:       stages,
+		Warnings:     append([]string(nil), result.Warnings...),
+	}
+	upsertErr := error(nil)
+	if len(result.Repos) > 0 {
+		for _, repo := range result.Repos {
+			if err := registry.UpsertTrackedRepo(repo.RepoRoot, repo.GraphPath, repo.ReportPath); err != nil {
+				upsertErr = err
+				break
+			}
+		}
+	} else {
+		upsertErr = registry.UpsertTrackedRepo(req.RepoRoot, result.GraphPath, result.ReportPath)
+	}
+	if upsertErr != nil {
+		out.Warnings = append(out.Warnings, fmt.Sprintf("registry update failed: %v", upsertErr))
+	}
+	return out, nil
+}
+
 type ExtractModel struct {
-	step   extractStep
-	source ExtractSource
-
-	// Source selection cursor
-	sourceCursor int
-
-	// Browse state
-	browseDir     string
-	browseEntries []browseEntry
-	browseCursor  int
-	browseOffset  int // scroll offset for long listings
-	browseErr     error
-
-	// Final selected directory (path source)
-	selectedDir string
-
-	// Mode selection
-	modeCursor int
-	mode       ExtractionMode
-
-	quitting   bool
-	starting   bool
-	extracting bool
+	currentDir string
+	mode       string
+	entries    []dirEntry
+	cursor     int
+	selected   string
+	phase      extractPhase
+	running    bool
+	result     BuildRunResult
 	err        error
-
-	// Progress tracking
-	progress       progress.Model
-	currentFile    string
-	processedFiles int
-	totalFiles     int
+	quitting   bool
+	events     []app.BuildEvent
+	startedAt  time.Time
+	totalFiles int
+	stage      types.BuildStage
+	stageCount int
+	eventCh    <-chan app.BuildEvent
+	doneCh     <-chan buildFinishedMsg
 }
-
-const browsePageSize = 12 // rows visible in the listing
 
 func NewExtractModel() ExtractModel {
-	cwd, _ := os.Getwd()
-	prog := progress.New(progress.WithDefaultGradient())
-	m := ExtractModel{
-		step:         stepSource,
-		sourceCursor: 0,
-		browseDir:    cwd,
-		selectedDir:  cwd,
-		modeCursor:   0,
-		mode:         ModeUpdate,
-		progress:     prog,
+	wd, err := os.Getwd()
+	if err != nil {
+		wd = "."
 	}
-	m.loadBrowseEntries()
+	return NewExtractModelWithRoot(wd)
+}
+
+func NewExtractModelWithRoot(root string) ExtractModel {
+	m := ExtractModel{currentDir: root, phase: extractPhaseBrowse, mode: "build"}
+	m.reloadEntries()
 	return m
 }
 
-// ── Public accessors ──────────────────────────────────────────────────────────
+func NewUpdateModel() ExtractModel {
+	wd, err := os.Getwd()
+	if err != nil {
+		wd = "."
+	}
+	m := ExtractModel{currentDir: wd, phase: extractPhaseBrowse, mode: "update"}
+	m.reloadEntries()
+	return m
+}
 
-func (m ExtractModel) Init() tea.Cmd         { return nil }
-func (m ExtractModel) Quitting() bool        { return m.quitting }
-func (m ExtractModel) Starting() bool        { return m.starting }
-func (m ExtractModel) Directory() string     { return m.selectedDir }
-func (m ExtractModel) Mode() ExtractionMode  { return m.mode }
-func (m ExtractModel) Source() ExtractSource { return m.source }
+func NewUpdateModelWithRoot(root string) ExtractModel {
+	m := ExtractModel{currentDir: root, phase: extractPhaseBrowse, mode: "update"}
+	m.reloadEntries()
+	return m
+}
 
-// ── Update ────────────────────────────────────────────────────────────────────
+func (m ExtractModel) Init() tea.Cmd  { return nil }
+func (m ExtractModel) Quitting() bool { return m.quitting }
+
+func (m ExtractModel) StatusMessage() string {
+	if m.err != nil {
+		return m.actionLabelLower() + " failed: " + m.err.Error()
+	}
+	if m.result.GraphPath != "" {
+		return m.actionLabelLower() + " complete: " + m.result.GraphPath
+	}
+	return ""
+}
 
 func (m ExtractModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case buildEventMsg:
+		m.events = append(m.events, msg.event)
+		m.applyBuildEvent(msg.event)
+		if m.running && m.eventCh != nil {
+			return m, waitForBuildEvent(m.eventCh)
+		}
+		return m, nil
+	case extractTickMsg:
+		if m.running {
+			return m, tickExtractStatus()
+		}
+		return m, nil
+	case buildFinishedMsg:
+		m.running = false
+		m.err = msg.err
+		m.result = msg.result
+		m.phase = extractPhaseResult
+		return m, nil
 	case tea.KeyMsg:
-		if m.extracting {
-			if msg.String() == "ctrl+c" || msg.String() == "esc" {
-				m.quitting = true
-			}
+		switch msg.String() {
+		case "ctrl+c":
+			m.quitting = true
 			return m, nil
 		}
-		switch m.step {
-		case stepSource:
-			return m.updateSource(msg)
-		case stepBrowse:
-			return m.updateBrowse(msg)
-		case stepMode:
-			return m.updateMode(msg)
-		}
 	}
-	return m, nil
+
+	switch m.phase {
+	case extractPhaseBrowse:
+		return m.updateBrowse(msg)
+	case extractPhaseConfirm:
+		return m.updateConfirm(msg)
+	case extractPhaseRunning:
+		return m.updateRunning(msg)
+	case extractPhaseResult:
+		return m.updateResult(msg)
+	default:
+		return m, nil
+	}
 }
 
-func (m ExtractModel) updateSource(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c", "esc":
+func (m ExtractModel) updateBrowse(msg tea.Msg) (tea.Model, tea.Cmd) {
+	key, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	switch key.String() {
+	case "esc", "q":
 		m.quitting = true
-
 	case "up", "k":
-		if m.sourceCursor > 0 {
-			m.sourceCursor--
+		if m.cursor > 0 {
+			m.cursor--
 		}
 	case "down", "j":
-		if m.sourceCursor < 1 {
-			m.sourceCursor++
+		if m.cursor < len(m.entries)-1 {
+			m.cursor++
 		}
+	case "backspace", "h", "left":
+		parent := filepath.Dir(m.currentDir)
+		if parent != m.currentDir {
+			m.currentDir = parent
+			m.cursor = 0
+			m.reloadEntries()
+		}
+	case "enter", "l", "right":
+		if len(m.entries) == 0 {
+			return m, nil
+		}
+		entry := m.entries[m.cursor]
+		if !entry.IsDir {
+			return m, nil
+		}
+		m.currentDir = entry.Path
+		m.cursor = 0
+		m.reloadEntries()
+	case "s", " ":
+		m.selected = m.currentDir
+		m.phase = extractPhaseConfirm
+	}
+	return m, nil
+}
 
-	case "enter", " ":
-		if m.sourceCursor == int(SourcePath) {
-			m.source = SourcePath
-			m.step = stepBrowse
-		} else {
-			m.source = SourceAncora
-			// Ancora: skip browse, go straight to mode (or start immediately)
-			if graphExists("") {
-				m.step = stepMode
-			} else {
-				m.mode = ModeRegenerate
-				m.starting = true
-			}
+func (m ExtractModel) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
+	key, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	switch key.String() {
+	case "esc", "backspace":
+		m.phase = extractPhaseBrowse
+		return m, nil
+	case "enter":
+		m.running = true
+		m.phase = extractPhaseRunning
+		m.err = nil
+		m.events = nil
+		m.startedAt = time.Now()
+		m.totalFiles = 0
+		m.stage = ""
+		m.stageCount = 0
+		events := make(chan app.BuildEvent, 32)
+		done := make(chan buildFinishedMsg, 1)
+		m.eventCh = events
+		m.doneCh = done
+		startBuild(runTUIBuild, m.mode, m.selected, events, done)
+		return m, tea.Batch(waitForBuildEvent(m.eventCh), waitForBuildDone(m.doneCh), tickExtractStatus())
+	}
+	return m, nil
+}
+
+func tickExtractStatus() tea.Cmd {
+	return tea.Tick(250*time.Millisecond, func(time.Time) tea.Msg {
+		return extractTickMsg{}
+	})
+}
+
+func (m ExtractModel) updateRunning(msg tea.Msg) (tea.Model, tea.Cmd) {
+	key, ok := msg.(tea.KeyMsg)
+	if ok {
+		switch key.String() {
+		case "esc", "q":
+			m.quitting = true
+			return m, nil
 		}
 	}
 	return m, nil
 }
 
-func (m ExtractModel) updateBrowse(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c":
+func (m ExtractModel) updateResult(msg tea.Msg) (tea.Model, tea.Cmd) {
+	key, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	switch key.String() {
+	case "esc", "q":
 		m.quitting = true
-
-	case "esc":
-		// Back to source selection
-		m.step = stepSource
-
-	case "up", "k":
-		if m.browseCursor > 0 {
-			m.browseCursor--
-			if m.browseCursor < m.browseOffset {
-				m.browseOffset = m.browseCursor
-			}
-		}
-
-	case "down", "j":
-		if m.browseCursor < len(m.browseEntries)-1 {
-			m.browseCursor++
-			if m.browseCursor >= m.browseOffset+browsePageSize {
-				m.browseOffset = m.browseCursor - browsePageSize + 1
-			}
-		}
-
-	case "enter", " ":
-		if len(m.browseEntries) == 0 {
-			break
-		}
-		entry := m.browseEntries[m.browseCursor]
-		if entry.isDir {
-			// Descend into dir
-			newDir := filepath.Join(m.browseDir, entry.name)
-			if entry.name == ".." {
-				newDir = filepath.Dir(m.browseDir)
-			}
-			m.browseDir = newDir
-			m.browseCursor = 0
-			m.browseOffset = 0
-			m.loadBrowseEntries()
-		} else {
-			// File selected — use parent directory
-			m.selectedDir = m.browseDir
-			m.confirmBrowseSelection()
-		}
-
-	case "tab", "right", "l":
-		// Descend if on a dir, confirm if at a leaf
-		if len(m.browseEntries) == 0 {
-			break
-		}
-		entry := m.browseEntries[m.browseCursor]
-		if entry.isDir && entry.name != ".." {
-			m.browseDir = filepath.Join(m.browseDir, entry.name)
-			m.browseCursor = 0
-			m.browseOffset = 0
-			m.loadBrowseEntries()
-		}
-
-	case "backspace", "left", "h":
-		// Go up one level
-		parent := filepath.Dir(m.browseDir)
-		if parent != m.browseDir {
-			m.browseDir = parent
-			m.browseCursor = 0
-			m.browseOffset = 0
-			m.loadBrowseEntries()
-		}
-
-	case "s", "S":
-		// Select current directory without descending
-		m.selectedDir = m.browseDir
-		m.confirmBrowseSelection()
+	case "b":
+		m.phase = extractPhaseBrowse
+		m.err = nil
+		m.result = BuildRunResult{}
 	}
 	return m, nil
 }
 
-// confirmBrowseSelection transitions after a directory is chosen.
-func (m *ExtractModel) confirmBrowseSelection() {
-	if graphExists("") {
-		m.step = stepMode
-	} else {
-		m.mode = ModeRegenerate
-		m.starting = true
+func startBuild(runner func(BuildRunRequest) (BuildRunResult, error), mode string, selected string, events chan app.BuildEvent, done chan buildFinishedMsg) {
+	go func() {
+		result, err := runner(BuildRunRequest{RepoRoot: selected, Mode: mode, Observe: func(event app.BuildEvent) { events <- event }})
+		close(events)
+		done <- buildFinishedMsg{result: result, err: err}
+		close(done)
+	}()
+}
+
+func waitForBuildEvent(ch <-chan app.BuildEvent) tea.Cmd {
+	return func() tea.Msg {
+		event, ok := <-ch
+		if !ok {
+			return nil
+		}
+		return buildEventMsg{event: event}
 	}
 }
 
-// loadBrowseEntries reads the current browseDir and populates browseEntries.
-func (m *ExtractModel) loadBrowseEntries() {
-	m.browseErr = nil
-	entries, err := os.ReadDir(m.browseDir)
-	if err != nil {
-		m.browseErr = err
-		m.browseEntries = nil
-		return
-	}
-
-	var result []browseEntry
-	// Always offer ".." unless at filesystem root
-	if filepath.Dir(m.browseDir) != m.browseDir {
-		result = append(result, browseEntry{name: "..", isDir: true})
-	}
-
-	// Directories first, then files — both sorted alphabetically.
-	var dirs, files []browseEntry
-	for _, e := range entries {
-		name := e.Name()
-		if strings.HasPrefix(name, ".") {
-			continue // skip hidden
+func waitForBuildDone(ch <-chan buildFinishedMsg) tea.Cmd {
+	return func() tea.Msg {
+		msg, ok := <-ch
+		if !ok {
+			return nil
 		}
-		if e.IsDir() {
-			dirs = append(dirs, browseEntry{name: name, isDir: true})
-		} else {
-			files = append(files, browseEntry{name: name, isDir: false})
-		}
-	}
-	sort.Slice(dirs, func(i, j int) bool { return dirs[i].name < dirs[j].name })
-	sort.Slice(files, func(i, j int) bool { return files[i].name < files[j].name })
-
-	result = append(result, dirs...)
-	result = append(result, files...)
-	m.browseEntries = result
-
-	// Keep cursor in bounds after reload.
-	if m.browseCursor >= len(m.browseEntries) {
-		m.browseCursor = len(m.browseEntries) - 1
-	}
-	if m.browseCursor < 0 {
-		m.browseCursor = 0
+		return msg
 	}
 }
 
-func (m ExtractModel) updateMode(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "ctrl+c", "esc":
-		// Back to browse (or source if ancora)
-		if m.source == SourceAncora {
-			m.step = stepSource
-		} else {
-			m.step = stepBrowse
-		}
-
-	case "up", "k":
-		if m.modeCursor > 0 {
-			m.modeCursor--
-		}
-	case "down", "j":
-		if m.modeCursor < 1 {
-			m.modeCursor++
-		}
-
-	case "enter", " ":
-		if m.modeCursor == 0 {
-			m.mode = ModeUpdate
-		} else {
-			m.mode = ModeRegenerate
-		}
-		m.starting = true
+func (m *ExtractModel) reloadEntries() {
+	entries, err := readDirEntries(m.currentDir)
+	m.entries = entries
+	m.err = err
+	if m.cursor >= len(m.entries) {
+		m.cursor = 0
 	}
-	return m, nil
 }
-
-// ── View ──────────────────────────────────────────────────────────────────────
 
 func (m ExtractModel) View() string { return m.ViewContent() }
 
+var buildStageOrder = []types.BuildStage{
+	types.BuildStageDetect,
+	types.BuildStageScan,
+	types.BuildStageDrivers,
+	types.BuildStagePatch,
+	types.BuildStageMerge,
+	types.BuildStagePersist,
+}
+
+func buildStageIndex(stage types.BuildStage) int {
+	for i, candidate := range buildStageOrder {
+		if stage == candidate {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+func (m *ExtractModel) applyBuildEvent(event app.BuildEvent) {
+	if event.Kind != app.BuildEventStage {
+		return
+	}
+	m.stage = event.Stage
+	m.stageCount = event.Count
+	if event.Stage == types.BuildStageDetect {
+		m.totalFiles = event.Count
+	}
+}
+
+func (m ExtractModel) renderRunningProgress() string {
+	progress := types.ExtractionProgress{
+		TotalFiles:      m.totalFiles,
+		ProcessedFiles:  buildStageIndex(m.stage),
+		TotalChunks:     len(buildStageOrder),
+		ProcessedChunks: buildStageIndex(m.stage),
+		CurrentFile:     string(m.stage),
+		StartTime:       m.startedAt,
+	}
+	if progress.StartTime.IsZero() {
+		progress.StartTime = time.Now()
+	}
+
+	var b strings.Builder
+	b.WriteString(RenderProgress(progress, 64))
+	b.WriteString("\n\n")
+	if m.totalFiles > 0 {
+		b.WriteString(fmt.Sprintf("Files discovered: %d\n", m.totalFiles))
+	}
+	if m.stage != "" {
+		b.WriteString(fmt.Sprintf("Current stage: %s", m.stage))
+		if m.stageCount > 0 {
+			b.WriteString(fmt.Sprintf(" (%d)", m.stageCount))
+		}
+		b.WriteString("\n")
+	}
+	if !m.startedAt.IsZero() {
+		spinner := []string{"|", "/", "-", "\\"}
+		frame := int(time.Since(m.startedAt)/(250*time.Millisecond)) % len(spinner)
+		b.WriteString(fmt.Sprintf("Activity: %s working...\n", spinner[frame]))
+	}
+	if len(m.events) > 0 {
+		b.WriteString("\nRecent events:\n")
+		start := 0
+		if len(m.events) > 4 {
+			start = len(m.events) - 4
+		}
+		for _, event := range m.events[start:] {
+			if event.Message == "" {
+				continue
+			}
+			b.WriteString(fmt.Sprintf("- %s\n", event.Message))
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 func (m ExtractModel) ViewContent() string {
 	var b strings.Builder
-
-	textStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("252"))
-	errorStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	accentStyle := lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
-	mutedStyle := lipgloss.NewStyle().Foreground(colorSubtext)
-	selectedStyle := lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
-	normalStyle := lipgloss.NewStyle().Foreground(colorText)
-	dimStyle := lipgloss.NewStyle().Foreground(colorMuted)
-
-	switch m.step {
-
-	// ── Source selection ─────────────────────────────────────────────────
-	case stepSource:
-		b.WriteString(textStyle.Render("Choose extraction source:"))
+	switch m.phase {
+	case extractPhaseBrowse:
+		b.WriteString("Browse folders\n")
+		b.WriteString("Current folder\n")
+		b.WriteString(stylePrompt.Render(m.currentDir))
 		b.WriteString("\n\n")
-
-		sources := []struct {
-			label string
-			desc  string
-		}{
-			{"From path", "Browse filesystem and extract a codebase or documents"},
-			{"From Ancora", "Snapshot your memory — observations, decisions, lessons learned"},
-		}
-		for i, s := range sources {
+		for i, entry := range m.entries {
 			cursor := "  "
-			ls := normalStyle
-			if i == m.sourceCursor {
-				cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▸ ")
-				ls = selectedStyle
+			if i == m.cursor {
+				cursor = "▸ "
 			}
-			b.WriteString(fmt.Sprintf("%s%s\n", cursor, ls.Render(s.label)))
-			b.WriteString(fmt.Sprintf("    %s\n\n", mutedStyle.Render(s.desc)))
+			name := entry.Name
+			if entry.IsDir {
+				name += "/"
+			}
+			b.WriteString(cursor + name + "\n")
 		}
-
-	// ── Filesystem browser ───────────────────────────────────────────────
-	case stepBrowse:
-		// Current path bar
-		b.WriteString(accentStyle.Render("Directory: "))
-		b.WriteString(textStyle.Render(m.browseDir))
-		b.WriteString("\n\n")
-
-		if m.browseErr != nil {
-			b.WriteString(errorStyle.Render(fmt.Sprintf("Error reading dir: %v", m.browseErr)))
+		b.WriteString("\nenter open folder • s select current folder • backspace parent\n")
+	case extractPhaseConfirm:
+		b.WriteString("Confirm " + m.actionLabelLower() + "\n\n")
+		b.WriteString("Selected folder:\n")
+		b.WriteString(stylePrompt.Render(m.selected))
+		b.WriteString("\n\nThis keeps the new backend but restores the classic guided flow.\n")
+	case extractPhaseRunning:
+		b.WriteString("Running " + m.actionLabelLower() + "\n\n")
+		b.WriteString(m.renderRunningProgress())
+	case extractPhaseResult:
+		if m.err != nil {
+			b.WriteString(errorStyle.Render("Error: " + m.err.Error()))
 			b.WriteString("\n")
-			break
+			return b.String()
 		}
-
-		if len(m.browseEntries) == 0 {
-			b.WriteString(mutedStyle.Render("(empty directory)"))
-			b.WriteString("\n")
-			break
-		}
-
-		// Visible window
-		end := m.browseOffset + browsePageSize
-		if end > len(m.browseEntries) {
-			end = len(m.browseEntries)
-		}
-		visible := m.browseEntries[m.browseOffset:end]
-
-		for i, entry := range visible {
-			absIdx := m.browseOffset + i
-			cursor := "  "
-			nameStyle := normalStyle
-			icon := "  "
-
-			if entry.isDir {
-				icon = "📁"
-				nameStyle = accentStyle
+		b.WriteString(m.actionLabel() + " summary\n\n")
+		b.WriteString(RenderBuildSummary(m.result))
+		if len(m.result.Warnings) > 0 {
+			b.WriteString("\n\nWarnings:\n")
+			for _, warning := range m.result.Warnings {
+				b.WriteString("- " + warning + "\n")
 			}
-			if entry.name == ".." {
-				icon = "↑ "
-				nameStyle = mutedStyle
-			}
-			if absIdx == m.browseCursor {
-				cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▸ ")
-				if !entry.isDir {
-					nameStyle = selectedStyle
-				}
-			}
-			b.WriteString(fmt.Sprintf("%s%s %s\n", cursor, icon, nameStyle.Render(entry.name)))
 		}
-
-		// Scroll hint
-		if len(m.browseEntries) > browsePageSize {
-			shown := fmt.Sprintf("%d–%d of %d", m.browseOffset+1, end, len(m.browseEntries))
-			b.WriteString("\n")
-			b.WriteString(dimStyle.Render(shown))
-			b.WriteString("\n")
-		}
-
-		b.WriteString("\n")
-		b.WriteString(dimStyle.Render("[s] select this dir  [Enter/→] descend  [←/backspace] up  [esc] back"))
-		b.WriteString("\n")
-
-	// ── Mode selection ───────────────────────────────────────────────────
-	case stepMode:
-		srcLabel := m.selectedDir
-		if m.source == SourceAncora {
-			srcLabel = "Ancora memory (~/.ancora/ancora.db)"
-		}
-		b.WriteString(accentStyle.Render("Previous extraction found."))
-		b.WriteString("\n")
-		b.WriteString(mutedStyle.Render(fmt.Sprintf("Source: %s", srcLabel)))
-		b.WriteString("\n\n")
-		b.WriteString(textStyle.Render("Choose extraction mode:"))
-		b.WriteString("\n\n")
-
-		modeOptions := []struct {
-			label string
-			desc  string
-		}{
-			{"Update", "Incremental — only re-extract changed observations (fast)"},
-			{"Regenerate", "Full re-extraction — rebuild from scratch"},
-		}
-		for i, opt := range modeOptions {
-			cursor := "  "
-			ls := normalStyle
-			if i == m.modeCursor {
-				cursor = lipgloss.NewStyle().Foreground(colorAccent).Render("▸ ")
-				ls = selectedStyle
-			}
-			b.WriteString(fmt.Sprintf("%s%s\n", cursor, ls.Render(opt.label)))
-			b.WriteString(fmt.Sprintf("    %s\n\n", mutedStyle.Render(opt.desc)))
-		}
-
-	// ── Extracting ───────────────────────────────────────────────────────
-	case stepExtracting:
-		srcLabel := m.selectedDir
-		if m.source == SourceAncora {
-			srcLabel = "Ancora memory"
-		}
-		b.WriteString(textStyle.Render(fmt.Sprintf("Extracting knowledge graph from %s...", srcLabel)))
-		b.WriteString("\n\n")
-
-		if m.totalFiles > 0 {
-			percent := float64(m.processedFiles) / float64(m.totalFiles)
-			b.WriteString(m.progress.ViewAs(percent))
-			b.WriteString("\n\n")
-			b.WriteString(textStyle.Render(fmt.Sprintf(
-				"Progress: %d/%d  (%.0f%%)",
-				m.processedFiles, m.totalFiles, percent*100,
-			)))
-			b.WriteString("\n")
-			if m.currentFile != "" {
-				b.WriteString(mutedStyle.Render(fmt.Sprintf("Current: %s", m.currentFile)))
-			}
-		} else {
-			b.WriteString(textStyle.Render("Discovering observations..."))
-		}
-		b.WriteString("\n\n")
 	}
-
-	if m.err != nil {
-		b.WriteString(errorStyle.Render(fmt.Sprintf("Error: %v", m.err)))
-		b.WriteString("\n\n")
-	}
-
 	return b.String()
 }
 
-// FooterHelp returns context-appropriate footer text for the current step.
-func (m ExtractModel) FooterHelp() string {
-	switch m.step {
-	case stepSource:
-		return "↑↓ select • Enter confirm • esc back to menu"
-	case stepBrowse:
-		return "↑↓ navigate • s select dir • → descend • ← up • esc back"
-	case stepMode:
-		return "↑↓ select mode • Enter confirm • esc back"
-	default:
-		return "esc cancel"
+func (m ExtractModel) actionLabel() string {
+	if m.mode == "update" {
+		return "Update"
 	}
+	return "Build"
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-// graphExists returns true when the global graph.json is present and non-empty.
-func graphExists(_ string) bool {
-	p, err := config.FindGraphFile(".")
-	if err != nil {
-		return false
+func (m ExtractModel) actionLabelLower() string {
+	if m.mode == "update" {
+		return "update"
 	}
-	info, err := os.Stat(p)
-	if err != nil {
-		return false
-	}
-	return info.Size() > 0
+	return "build"
 }

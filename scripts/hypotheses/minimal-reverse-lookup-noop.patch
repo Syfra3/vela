@@ -1,0 +1,10 @@
+diff --git a/cmd/vela/loop_probe_reverse_lookup.go b/cmd/vela/loop_probe_reverse_lookup.go
+new file mode 100644
+index 0000000..b4eed89
+--- /dev/null
++++ b/cmd/vela/loop_probe_reverse_lookup.go
+@@ -0,0 +1,4 @@
++package main
++
++// loopProbeReverseLookup exists only to exercise benchmark-loop apply/revert.
++

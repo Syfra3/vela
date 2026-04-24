@@ -76,6 +76,10 @@ var (
 			Padding(0, 1)
 )
 
+func classicHeader() string {
+	return "_    __    __\n| |  / /__ / /__ _\n| | / / -_) / _ `/\n|_|/_/\\__/_/\\_,_/"
+}
+
 // nodeKindColor returns a lipgloss color for a given node kind/type.
 func nodeKindColor(kind string) lipgloss.Color {
 	switch kind {

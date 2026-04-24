@@ -48,7 +48,8 @@ type Graph struct {
 }
 
 // ---------------------------------------------------------------------------
-// Knowledge node types (Ancora integration — spec §7)
+// Legacy graph node types kept for compatibility during the replacement
+// migration. New code-truth pipeline contracts live in architecture.go.
 // ---------------------------------------------------------------------------
 
 // NodeType is a discriminated string for all node varieties in the graph.
@@ -115,8 +116,12 @@ const (
 type Source struct {
 	// Type discriminates the source category.
 	Type SourceType `json:"type"`
+	// ID is the stable repo/source identity used for node namespacing.
+	ID string `json:"id,omitempty"`
 	// Name is the project/repo name (e.g., "vela", "glim", "ancora").
 	Name string `json:"name"`
+	// Organization is the git remote owner/org when available.
+	Organization string `json:"organization,omitempty"`
 	// Path is the local filesystem path (codebase only).
 	Path string `json:"path,omitempty"`
 	// Remote is the git remote URL if detected (codebase only).
@@ -191,7 +196,8 @@ func (o *ObservationNode) ToNode() Node {
 }
 
 // ---------------------------------------------------------------------------
-// Watch / Daemon configuration (spec §8)
+// Legacy watch / daemon / LLM-era config kept temporarily so existing callers
+// still compile during the graph-truth-first migration.
 // ---------------------------------------------------------------------------
 
 // WatchSourceConfig configures a single event source for the daemon.
@@ -316,12 +322,12 @@ type GraphConfig struct {
 
 // Config is the global configuration for Vela
 type Config struct {
-	LLM        LLMConfig        `yaml:"llm"`
-	Embedding  EmbeddingConfig  `yaml:"embedding"`
+	LLM        LLMConfig        `yaml:"-"`
+	Embedding  EmbeddingConfig  `yaml:"-"`
 	Extraction ExtractionConfig `yaml:"extraction"`
 	UI         UIConfig         `yaml:"ui"`
-	Watch      WatchConfig      `yaml:"watch"`
-	Daemon     DaemonConfig     `yaml:"daemon"`
+	Watch      WatchConfig      `yaml:"-"`
+	Daemon     DaemonConfig     `yaml:"-"`
 	Obsidian   ObsidianConfig   `yaml:"obsidian"`
 	Graph      GraphConfig      `yaml:"graph"`
 }

@@ -1,0 +1,80 @@
+{
+  "project": "vela",
+  "name": "vela-benchmark-eval-loop",
+  "version": 1,
+  "description": "Stateful benchmark improvement campaign for the real vela binary using the existing inner benchmark runner.",
+  "resultsBase": "/home/geen/Documents/personal/dep-eval/results/vela-phase-loops",
+  "phaseOrder": [
+    "phase-1-reverse-lookup",
+    "phase-2-path-quality"
+  ],
+  "phases": [
+    {
+      "id": "phase-1-reverse-lookup",
+      "title": "Reverse Lookup Hardening",
+      "hypothesesFile": "/home/geen/Documents/personal/vela/scripts/hypotheses/minimal-loop-test.json",
+      "maxHypotheses": 1,
+      "goalMetrics": {
+        "balanced_gate_pass": true,
+        "reverse_lookup_improved_vs_baseline": true,
+        "query.weighted_score": 0.7585
+      },
+      "preservedMetricFloors": {
+        "full_vela.build_success": true,
+        "full_vela.build_time_ms": 2000,
+        "full_vela.file_coverage_ratio": 0.9898,
+        "full_vela.symbol_coverage_ratio": 1,
+        "full_vela.unresolved_reference_rate": 0,
+        "full_vela.layer1_weighted_score": 0.4992,
+        "full_stock.layer1_weighted_score": 0.35,
+        "full_stock.layer2_weighted_score": 0.868,
+        "query.weighted_score": 0.7585
+      },
+      "iterationPolicy": {
+        "maxIterations": 4,
+        "earlyExitOnGoal": true,
+        "stopOnIterationCap": true,
+        "preserveBestResultWithinPhase": true,
+        "bestResultComparison": "prefer_more_goal_metrics_met_then_higher_aggregate_goal_progress",
+        "requireNoRegressionAgainstPassedPhaseFloors": true,
+        "onPassedPhaseFloorRegression": "stop_and_request_human_decision"
+      }
+    },
+    {
+      "id": "phase-2-path-quality",
+      "title": "Path Quality Hardening",
+      "hypothesesFile": "/home/geen/Documents/personal/vela/scripts/hypotheses/minimal-loop-test.json",
+      "maxHypotheses": 2,
+      "goalMetrics": {
+        "balanced_gate_pass": true,
+        "path_quality_improved_vs_baseline": true,
+        "query.path_node_precision": 0.5667,
+        "query.path_node_recall": 0.5378
+      },
+      "preservedMetricFloors": {
+        "full_vela.build_success": true,
+        "full_vela.build_time_ms": 2000,
+        "full_vela.file_coverage_ratio": 0.9898,
+        "full_vela.symbol_coverage_ratio": 1,
+        "full_vela.unresolved_reference_rate": 0,
+        "full_vela.layer1_weighted_score": 0.4992,
+        "full_stock.layer1_weighted_score": 0.35,
+        "full_stock.layer2_weighted_score": 0.868,
+        "query.weighted_score": 0.7585,
+        "reverse_lookup_improved_vs_baseline": true
+      },
+      "inheritsFloorsFrom": [
+        "phase-1-reverse-lookup"
+      ],
+      "iterationPolicy": {
+        "maxIterations": 4,
+        "earlyExitOnGoal": true,
+        "stopOnIterationCap": true,
+        "preserveBestResultWithinPhase": true,
+        "bestResultComparison": "prefer_more_goal_metrics_met_then_higher_aggregate_goal_progress",
+        "requireNoRegressionAgainstPassedPhaseFloors": true,
+        "onPassedPhaseFloorRegression": "stop_and_request_human_decision"
+      }
+    }
+  ]
+}

@@ -1,15 +1,14 @@
 package graph
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/Syfra3/vela/pkg/types"
 )
 
 // TestRunLeiden exercises the full subprocess path.
-// It succeeds even if graspologic is absent — the script falls back to
-// connected-components partitioning, which is always available via Python stdlib.
-func TestRunLeiden_SubprocessOrFallback(t *testing.T) {
+func TestRunLeiden_Subprocess(t *testing.T) {
 	nodes := makeTestNodes("a", "b", "c", "d")
 	edges := []types.Edge{
 		{Source: "a", Target: "b", Relation: "calls", Confidence: "EXTRACTED"},
@@ -24,6 +23,9 @@ func TestRunLeiden_SubprocessOrFallback(t *testing.T) {
 
 	partition, err := RunLeiden(g)
 	if err != nil {
+		if errors.Is(err, ErrGraspologicMissing) {
+			t.Skipf("graspologic unavailable: %v", err)
+		}
 		// Python not available in this environment — skip rather than fail
 		t.Skipf("leiden subprocess unavailable: %v", err)
 	}

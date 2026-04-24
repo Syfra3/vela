@@ -144,6 +144,93 @@ vela path AuthService Database
 vela explain AuthService
 ```
 
+### How To Use `vela search`
+
+`vela search` is a structural graph query command over `graph.json`. It is not a free-text, grep-style, or bag-of-words search tool.
+
+Use it when you already know the exact node label, file path, type, interface, DTO, or module you want to inspect.
+
+If you do not know the exact node yet, use `vela lookup <term>` first.
+
+```bash
+/home/geen/Documents/personal/vela/bin/vela lookup --graph "/home/geen/Documents/glim/glim-wallet-wrapper-microservice/.vela/graph.json" "transaction"
+```
+
+Valid query forms:
+
+- `who uses X`
+- `what uses X`
+- `where is X used?`
+- `what does X depend on`
+- `dependencies of X`
+- `impact of X`
+- `what breaks if X changes?`
+- `path A -> B`
+- `path from A to B`
+- `how does A reach B?`
+- `explain X`
+
+Examples:
+
+```bash
+/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-wallet-wrapper-microservice/.vela/graph.json" "explain Transaction"
+/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-wallet-wrapper-microservice/.vela/graph.json" "who uses Transaction"
+/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-wallet-wrapper-microservice/.vela/graph.json" "what does Transaction depend on"
+/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-common-api/.vela/graph.json" "impact of MovementStatusDto"
+/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-wallet-wrapper-microservice/.vela/graph.json" "path TransactionController -> TransactionMapper"
+```
+
+Bad examples:
+
+```bash
+/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-wallet/.vela/graph.json" "movement status mobile app dto contract"
+/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-common-api/.vela/graph.json" "billing"
+/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-wallet/.vela/graph.json" "print the movement extract"
+```
+
+Those fail because `search` only accepts structural query forms. Broad feature requests need discovery first.
+
+### Feature Planning Workflow
+
+For product prompts like "add movement status to the mobile app" or "change the card contract", do not call `vela search` with the whole feature description.
+
+Use this workflow instead:
+
+1. Discover the concrete repos, files, DTOs, types, mappers, controllers, or screens involved.
+2. If the exact node is still unclear, run `vela lookup <term>` to get candidates.
+3. Pick the most specific real node labels available in each graph.
+4. Run `vela search` on those exact nodes.
+5. Build the plan from producer, contract, consumer, and rollout risk.
+
+Example workflow for a Glim feature:
+
+1. Find candidate nodes such as `Transaction`, `TransactionMapper`, `MovementStatusDto`, or `MovementListScreen`.
+2. Then run structural queries like:
+
+```bash
+/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-wallet-wrapper-microservice/.vela/graph.json" "explain Transaction"
+/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-wallet-wrapper-microservice/.vela/graph.json" "who uses Transaction"
+/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-common-api/.vela/graph.json" "impact of MovementStatusDto"
+/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-wallet/.vela/graph.json" "who uses MovementListScreen"
+```
+
+This tells you:
+
+- where the data shape lives
+- who maps it
+- who consumes it
+- what is affected by a contract change
+
+### Agent Rule Of Thumb
+
+Agents should treat `vela search` as a graph-truth relationship tool.
+
+- Do not pass bag-of-words or full feature prompts into `vela search`.
+- Do not guess generic node names like `movement` or `transaction` unless the exact node is already known.
+- For broad planning questions, discover exact node candidates first, then query the graph with those exact labels.
+
+See `docs/VELA_LOOKUP_AND_AMBIGUITY_SPEC.md` for the proposed `vela lookup` discovery command and safe ambiguity handling rules.
+
 ### Example MCP config
 
 If you want to register Vela directly as its own MCP server:
@@ -194,9 +281,18 @@ Add to `~/.config/opencode/mcp_settings.json`:
 - Progress tracking & worker pools
 
 **Python Layer (10%)**:
-- Leiden community detection (graspologic)
+- Community detection (Leiden via `graspologic` when available, NetworkX modularity fallback otherwise)
 - Specialized extractors (if needed)
 - Runs as subprocess, called only when necessary
+
+Install the clustering dependency explicitly if you want community detection to run:
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-clustering.txt
+```
+
+If you specifically want the Leiden backend, install `graspologic` into that same virtualenv when it supports your Python version.
 
 ### Pluggable LLM Interface
 

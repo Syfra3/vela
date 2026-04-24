@@ -1,0 +1,281 @@
+{
+  "version": "v1",
+  "generated_at": "2026-04-24T00:00:00Z",
+  "scope": {
+    "organization": "acme",
+    "workspace": "payments"
+  },
+  "metadata": {
+    "description": "Example Organization Map artifact showing repo, service, and resource topology.",
+    "artifact_kind": "organization_map"
+  },
+  "views": [
+    {
+      "name": "Workspace View",
+      "description": "Repo and service boundaries inside the payments workspace.",
+      "default_node_types": [
+        "workspace",
+        "repository",
+        "service"
+      ],
+      "default_edge_types": [
+        "contains",
+        "owns",
+        "calls"
+      ],
+      "hide_low_confidence": true
+    },
+    {
+      "name": "Resource View",
+      "description": "Runtime dependencies for payment services.",
+      "default_node_types": [
+        "service",
+        "resource"
+      ],
+      "default_edge_types": [
+        "deploys_to",
+        "uses",
+        "publishes_to",
+        "consumes_from",
+        "exposes"
+      ],
+      "hide_low_confidence": true
+    },
+    {
+      "name": "Bridge Relations",
+      "description": "Cross-layer links between repos, services, and resources.",
+      "default_node_types": [
+        "repository",
+        "service",
+        "resource"
+      ],
+      "default_edge_types": [
+        "bridges",
+        "owns",
+        "uses",
+        "deploys_to"
+      ],
+      "hide_low_confidence": true
+    }
+  ],
+  "nodes": [
+    {
+      "id": "organization:acme",
+      "type": "organization",
+      "name": "acme",
+      "provenance": "manual_override",
+      "confidence": "high",
+      "source_ref": "org-map.yaml",
+      "observed_at": "2026-04-24T00:00:00Z"
+    },
+    {
+      "id": "workspace:payments",
+      "type": "workspace",
+      "name": "payments",
+      "description": "Payment processing workspace.",
+      "provenance": "declared",
+      "confidence": "high",
+      "source_ref": "org-map.yaml",
+      "observed_at": "2026-04-24T00:00:00Z"
+    },
+    {
+      "id": "repository:payments-api",
+      "type": "repository",
+      "name": "payments-api",
+      "provenance": "repo_metadata",
+      "confidence": "high",
+      "source_ref": "payments-api/.vela/metadata.json",
+      "observed_at": "2026-04-24T00:00:00Z"
+    },
+    {
+      "id": "repository:payments-worker",
+      "type": "repository",
+      "name": "payments-worker",
+      "provenance": "repo_metadata",
+      "confidence": "high",
+      "source_ref": "payments-worker/.vela/metadata.json",
+      "observed_at": "2026-04-24T00:00:00Z"
+    },
+    {
+      "id": "service:payments-api",
+      "type": "service",
+      "name": "payments-api",
+      "description": "Public payment API service.",
+      "provenance": "declared",
+      "confidence": "high",
+      "source_ref": "docs/ARCHITECTURE.md#payments-api",
+      "observed_at": "2026-04-24T00:00:00Z"
+    },
+    {
+      "id": "service:payments-worker",
+      "type": "service",
+      "name": "payments-worker",
+      "description": "Async payment event processor.",
+      "provenance": "declared",
+      "confidence": "high",
+      "source_ref": "docs/ARCHITECTURE.md#payments-worker",
+      "observed_at": "2026-04-24T00:00:00Z"
+    },
+    {
+      "id": "resource:payments-postgres",
+      "type": "resource",
+      "name": "payments-postgres",
+      "resource_kind": "database",
+      "provenance": "iac",
+      "confidence": "high",
+      "source_ref": "infra/terraform/postgres.tf",
+      "observed_at": "2026-04-24T00:00:00Z"
+    },
+    {
+      "id": "resource:payment-events",
+      "type": "resource",
+      "name": "payment-events",
+      "resource_kind": "topic",
+      "provenance": "iac",
+      "confidence": "high",
+      "source_ref": "infra/terraform/topics.tf",
+      "observed_at": "2026-04-24T00:00:00Z"
+    },
+    {
+      "id": "resource:payments-cluster",
+      "type": "resource",
+      "name": "payments-cluster",
+      "resource_kind": "kubernetes_cluster",
+      "provenance": "iac",
+      "confidence": "high",
+      "source_ref": "infra/k8s/cluster.yaml",
+      "observed_at": "2026-04-24T00:00:00Z"
+    },
+    {
+      "id": "document:payments-architecture",
+      "type": "document",
+      "name": "payments-architecture",
+      "provenance": "declared",
+      "confidence": "high",
+      "source_ref": "docs/ARCHITECTURE.md",
+      "observed_at": "2026-04-24T00:00:00Z"
+    }
+  ],
+  "edges": [
+    {
+      "id": "edge:organization-acme-contains-workspace-payments",
+      "type": "contains",
+      "from": "organization:acme",
+      "to": "workspace:payments",
+      "provenance": "manual_override",
+      "confidence": "high",
+      "source_ref": "org-map.yaml",
+      "observed_at": "2026-04-24T00:00:00Z"
+    },
+    {
+      "id": "edge:workspace-payments-contains-repository-payments-api",
+      "type": "contains",
+      "from": "workspace:payments",
+      "to": "repository:payments-api",
+      "provenance": "declared",
+      "confidence": "high",
+      "source_ref": "org-map.yaml",
+      "observed_at": "2026-04-24T00:00:00Z"
+    },
+    {
+      "id": "edge:workspace-payments-contains-repository-payments-worker",
+      "type": "contains",
+      "from": "workspace:payments",
+      "to": "repository:payments-worker",
+      "provenance": "declared",
+      "confidence": "high",
+      "source_ref": "org-map.yaml",
+      "observed_at": "2026-04-24T00:00:00Z"
+    },
+    {
+      "id": "edge:repository-payments-api-owns-service-payments-api",
+      "type": "owns",
+      "from": "repository:payments-api",
+      "to": "service:payments-api",
+      "provenance": "repo_metadata",
+      "confidence": "high",
+      "source_ref": "payments-api/.vela/metadata.json",
+      "observed_at": "2026-04-24T00:00:00Z"
+    },
+    {
+      "id": "edge:repository-payments-worker-owns-service-payments-worker",
+      "type": "owns",
+      "from": "repository:payments-worker",
+      "to": "service:payments-worker",
+      "provenance": "repo_metadata",
+      "confidence": "high",
+      "source_ref": "payments-worker/.vela/metadata.json",
+      "observed_at": "2026-04-24T00:00:00Z"
+    },
+    {
+      "id": "edge:service-payments-api-calls-service-payments-worker",
+      "type": "calls",
+      "from": "service:payments-api",
+      "to": "service:payments-worker",
+      "provenance": "declared",
+      "confidence": "high",
+      "source_ref": "docs/ARCHITECTURE.md#service-interactions",
+      "observed_at": "2026-04-24T00:00:00Z"
+    },
+    {
+      "id": "edge:service-payments-api-uses-resource-payments-postgres",
+      "type": "uses",
+      "from": "service:payments-api",
+      "to": "resource:payments-postgres",
+      "provenance": "iac",
+      "confidence": "high",
+      "source_ref": "infra/terraform/postgres.tf",
+      "observed_at": "2026-04-24T00:00:00Z"
+    },
+    {
+      "id": "edge:service-payments-worker-consumes-from-resource-payment-events",
+      "type": "consumes_from",
+      "from": "service:payments-worker",
+      "to": "resource:payment-events",
+      "provenance": "iac",
+      "confidence": "high",
+      "source_ref": "infra/terraform/topics.tf",
+      "observed_at": "2026-04-24T00:00:00Z"
+    },
+    {
+      "id": "edge:service-payments-api-publishes-to-resource-payment-events",
+      "type": "publishes_to",
+      "from": "service:payments-api",
+      "to": "resource:payment-events",
+      "provenance": "declared",
+      "confidence": "high",
+      "source_ref": "docs/ARCHITECTURE.md#event-flow",
+      "observed_at": "2026-04-24T00:00:00Z"
+    },
+    {
+      "id": "edge:service-payments-api-deploys-to-resource-payments-cluster",
+      "type": "deploys_to",
+      "from": "service:payments-api",
+      "to": "resource:payments-cluster",
+      "provenance": "iac",
+      "confidence": "high",
+      "source_ref": "infra/k8s/cluster.yaml",
+      "observed_at": "2026-04-24T00:00:00Z"
+    },
+    {
+      "id": "edge:repository-payments-api-bridges-service-payments-api",
+      "type": "bridges",
+      "from": "repository:payments-api",
+      "to": "service:payments-api",
+      "provenance": "manual_override",
+      "confidence": "high",
+      "source_ref": "org-map.yaml",
+      "observed_at": "2026-04-24T00:00:00Z"
+    },
+    {
+      "id": "edge:document-payments-architecture-documents-workspace-payments",
+      "type": "documents",
+      "from": "document:payments-architecture",
+      "to": "workspace:payments",
+      "provenance": "declared",
+      "confidence": "high",
+      "source_ref": "docs/ARCHITECTURE.md",
+      "observed_at": "2026-04-24T00:00:00Z"
+    }
+  ]
+}
