@@ -59,6 +59,7 @@ from the persisted graph output.`,
 	root.AddCommand(hooksCmd())
 	root.AddCommand(extractAliasCmd())
 	root.AddCommand(benchCmd())
+	root.AddCommand(lookupCmd())
 	root.AddCommand(searchCmd())
 	root.AddCommand(graphQueryCmd())
 	root.AddCommand(serveCmd())

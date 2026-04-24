@@ -213,7 +213,7 @@ func searchCmd() *cobra.Command {
 			}
 			result, err := engine.RunRequest(req)
 			if err != nil {
-				return err
+				return annotateNodeLookupError(err, req.Subject)
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), result)
 			return nil
@@ -221,6 +221,28 @@ func searchCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: ~/.vela/graph.json)")
 	cmd.Flags().IntVar(&limit, "limit", types.DefaultQueryLimit, "Maximum related nodes to return")
+	return cmd
+}
+
+func lookupCmd() *cobra.Command {
+	var graphFile string
+	var limit int
+
+	cmd := &cobra.Command{
+		Use:   "lookup <term>",
+		Short: "Find candidate nodes before running structural graph queries",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			engine, err := loadEngine(graphFile)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), engine.RenderLookup(args[0], limit))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: ~/.vela/graph.json)")
+	cmd.Flags().IntVar(&limit, "limit", 5, "Maximum candidate nodes to return")
 	return cmd
 }
 
@@ -312,7 +334,7 @@ func newQueryKindCmd(kind types.QueryKind, needsTarget bool) *cobra.Command {
 			}
 			result, err := engine.RunRequest(req)
 			if err != nil {
-				return err
+				return annotateNodeLookupError(err, req.Subject)
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), result)
 			return nil
@@ -321,6 +343,17 @@ func newQueryKindCmd(kind types.QueryKind, needsTarget bool) *cobra.Command {
 	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: ~/.vela/graph.json)")
 	cmd.Flags().IntVar(&limit, "limit", types.DefaultQueryLimit, "Maximum related nodes to return")
 	return cmd
+}
+
+func annotateNodeLookupError(err error, subject string) error {
+	if err == nil {
+		return nil
+	}
+	message := err.Error()
+	if strings.Contains(message, "not found") && strings.Contains(message, "node ") && strings.TrimSpace(subject) != "" {
+		return fmt.Errorf("%s\nhint: try `vela lookup %q` to find candidate nodes", message, subject)
+	}
+	return err
 }
 
 func newQueryOnlyMCPServer(engine *query.Engine) any {

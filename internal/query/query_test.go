@@ -245,6 +245,7 @@ func TestQuery_Dispatcher(t *testing.T) {
 		{"explain AuthService", "AuthService"},
 		{"bindings Config note", "ambiguous"},
 		{"route auth", "score="},
+		{"lookup auth", "Candidates for \"auth\""},
 		{"unknown cmd", "unknown command"},
 	}
 
@@ -267,6 +268,36 @@ func TestFindNode_FuzzyLabel(t *testing.T) {
 	}
 	if node.Label != "AuthService" {
 		t.Fatalf("expected AuthService, got %q", node.Label)
+	}
+}
+
+func TestLookupReturnsRankedCandidates(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestGraph(t, dir)
+	eng, _ := LoadFromFile(path)
+
+	results := eng.Lookup("auth", 3)
+	if len(results) == 0 {
+		t.Fatal("expected lookup candidates")
+	}
+	if results[0].Node.Label != "AuthService" {
+		t.Fatalf("top candidate = %q, want AuthService", results[0].Node.Label)
+	}
+	if results[0].Score <= 0 {
+		t.Fatalf("top candidate score = %d, want > 0", results[0].Score)
+	}
+}
+
+func TestRenderLookupSuggestsNextSteps(t *testing.T) {
+	dir := t.TempDir()
+	path := writeTestGraph(t, dir)
+	eng, _ := LoadFromFile(path)
+
+	result := eng.RenderLookup("auth", 3)
+	for _, want := range []string{"Candidates for \"auth\":", "1. AuthService", "Next steps:", "vela search \"explain AuthService\""} {
+		if !strings.Contains(result, want) {
+			t.Fatalf("expected %q in result, got %q", want, result)
+		}
 	}
 }
 

@@ -747,12 +747,17 @@ func (e *Engine) Query(input string) string {
 			return "usage: route <query>"
 		}
 		return e.Route(strings.Join(parts[1:], " "))
+	case "lookup":
+		if len(parts) < 2 {
+			return "usage: lookup <term>"
+		}
+		return e.RenderLookup(strings.Join(parts[1:], " "), 5)
 	case "nodes":
 		return fmt.Sprintf("Total nodes: %d", len(e.graph.Nodes))
 	case "edges":
 		return fmt.Sprintf("Total edges: %d", len(e.graph.Edges))
 	case "help":
-		return "Commands:\n  path <from> <to>  — shortest dependency path\n  explain <node>    — all edges involving a node\n  bindings <node>   — memory reference binder state\n  route <query>     — workspace repo routing decision\n  nodes / edges     — graph stats\n  quit              — exit"
+		return "Commands:\n  path <from> <to>  — shortest dependency path\n  explain <node>    — all edges involving a node\n  bindings <node>   — memory reference binder state\n  route <query>     — workspace repo routing decision\n  lookup <term>     — candidate nodes for follow-up graph queries\n  nodes / edges     — graph stats\n  quit              — exit"
 	default:
 		return fmt.Sprintf("unknown command %q — type 'help' for available commands", cmd)
 	}

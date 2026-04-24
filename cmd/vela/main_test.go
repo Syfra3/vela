@@ -23,7 +23,7 @@ func TestRootCommandExposesReducedBuildAndQuerySurface(t *testing.T) {
 		commands[cmd.Name()] = true
 	}
 
-	for _, want := range []string{"build", "update", "watch", "hooks", "extract", "status", "search", "query", "serve", "tui", "version"} {
+	for _, want := range []string{"build", "update", "watch", "hooks", "extract", "status", "lookup", "search", "query", "serve", "tui", "version"} {
 		if !commands[want] {
 			t.Fatalf("expected command %q to be registered", want)
 		}
@@ -259,6 +259,46 @@ func TestSearchCommandRoutesStructuralPromptToQueryService(t *testing.T) {
 	for _, want := range []string{"Reverse dependencies for \"rootCmd\":", "main [repo/function] via calls"} {
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("expected stdout to contain %q, got %q", want, stdout.String())
+		}
+	}
+}
+
+func TestLookupCommandPrintsCandidateNodes(t *testing.T) {
+	graphPath := writeSearchTestGraph(t)
+
+	root := rootCmd()
+	stdout := &bytes.Buffer{}
+	root.SetOut(stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"lookup", "root", "--graph", graphPath, "--limit", "2"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	for _, want := range []string{"Candidates for \"root\":", "1. rootCmd", "id: cmd/vela/main.go:rootCmd", "Next steps:"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, stdout.String())
+		}
+	}
+}
+
+func TestQueryCommandSuggestsLookupWhenSubjectIsMissing(t *testing.T) {
+	graphPath := writeSearchTestGraph(t)
+
+	root := rootCmd()
+	stdout := &bytes.Buffer{}
+	stderr := &bytes.Buffer{}
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.SetArgs([]string{"query", "dependencies", "MissingNode", "--graph", graphPath})
+
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("expected missing-node error")
+	}
+	for _, want := range []string{"node \"MissingNode\" not found", "hint: try `vela lookup \"MissingNode\"` to find candidate nodes"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("expected error to contain %q, got %q", want, err.Error())
 		}
 	}
 }

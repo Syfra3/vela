@@ -68,7 +68,7 @@ Acceptance scenarios:
 
 - `vela extract` reports a layer summary containing repo, contract, workspace,
   and memory when present.
-- `vela search billing` shows workspace routing reasons before repo-deep hits.
+- `vela search "explain Searcher"` exposes graph-backed node context using a valid structural query.
 - `vela explain <node>` exposes layer and evidence metadata instead of a flat
   unlabeled edge dump.
 - `vela bench retrieval --suite bench/retrieval/vela-curated.json --json`

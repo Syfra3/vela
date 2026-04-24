@@ -11,9 +11,28 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-const serverInstructions = `Vela exposes read-only graph-truth dependency queries.
+const serverInstructions = `Vela exposes read-only graph-truth dependency queries over graph.json.
 
-Use the query tools to inspect dependencies, reverse dependencies, impact, paths, and explanations from graph.json.`
+Treat Vela as a structural graph tool, not as free-text or keyword search.
+
+Rules:
+- Do not send bag-of-words or full feature descriptions directly to graph query tools.
+- Do not guess generic node names like movement, transaction, service, or handler unless the exact label is already known.
+- For broad product questions, discover concrete files, symbols, DTOs, types, services, or modules first.
+- Use graph query tools only after you have an exact subject or path endpoints.
+
+Valid structural queries:
+- who uses X / what uses X / where is X used?
+- what does X depend on / dependencies of X
+- impact of X / what breaks if X changes?
+- path A -> B / path from A to B / how does A reach B?
+- explain X
+
+Workflow:
+1. Start broad questions with discovery, not graph queries.
+2. Find exact node candidates first.
+3. Run dependency, reverse dependency, impact, path, or explain queries on the most specific exact label or ID.
+4. If the subject is ambiguous, list candidates or ask a clarifying question instead of guessing.`
 
 func NewServer(engine *query.Engine) *server.MCPServer {
 	srv := server.NewMCPServer(
