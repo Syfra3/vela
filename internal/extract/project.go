@@ -1,6 +1,8 @@
 package extract
 
 import (
+	"net/url"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
@@ -16,9 +18,19 @@ import (
 //
 // Returns a Source with Type=codebase, Name, Path, and Remote (if git).
 func DetectProject(dir string) *types.Source {
+	return DetectProjectInWorkspace(dir, dir)
+}
+
+// DetectProjectInWorkspace derives a stable repo identity for dir relative to a
+// selected workspace root when a git remote is unavailable.
+func DetectProjectInWorkspace(workspaceRoot, dir string) *types.Source {
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
 		absDir = dir
+	}
+	absWorkspaceRoot, err := filepath.Abs(workspaceRoot)
+	if err != nil {
+		absWorkspaceRoot = workspaceRoot
 	}
 
 	src := &types.Source{
@@ -27,16 +39,63 @@ func DetectProject(dir string) *types.Source {
 		Path: absDir,
 	}
 
-	// Try git remote
 	remote := gitRemoteURL(absDir)
 	if remote != "" {
 		src.Remote = remote
-		if name := extractRepoName(remote); name != "" {
+		identity, org, name := parseRemoteIdentity(remote)
+		if identity != "" {
+			src.ID = identity
+			src.Organization = org
+		}
+		if name != "" {
 			src.Name = name
 		}
 	}
+	if src.ID == "" {
+		src.ID = fallbackRepoIdentity(absWorkspaceRoot, absDir)
+	}
 
 	return src
+}
+
+// IsGitRepoRoot reports whether dir itself is a git repository root.
+func IsGitRepoRoot(dir string) bool {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		absDir = dir
+	}
+	top := gitRepoTopLevel(absDir)
+	return top != "" && filepath.Clean(top) == filepath.Clean(absDir)
+}
+
+// DiscoverChildGitRepos finds nested git repositories below root.
+func DiscoverChildGitRepos(root string) ([]string, error) {
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		absRoot = root
+	}
+	var repos []string
+	err = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !d.IsDir() {
+			return nil
+		}
+		if path != absRoot && isGitDir(path) {
+			repos = append(repos, path)
+			return filepath.SkipDir
+		}
+		name := d.Name()
+		if name == ".git" || name == ".vela" {
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return repos, nil
 }
 
 // gitRemoteURL runs `git remote get-url origin` in the given directory.
@@ -51,6 +110,24 @@ func gitRemoteURL(dir string) string {
 	return strings.TrimSpace(string(out))
 }
 
+func gitRepoTopLevel(dir string) string {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
+func isGitDir(path string) bool {
+	info, err := os.Stat(filepath.Join(path, ".git"))
+	if err != nil {
+		return false
+	}
+	return info.IsDir() || info.Mode().IsRegular()
+}
+
 // extractRepoName extracts the repository name from a git remote URL.
 // Handles:
 //   - https://github.com/Syfra3/vela.git  → "vela"
@@ -58,25 +135,108 @@ func gitRemoteURL(dir string) string {
 //   - https://github.com/Syfra3/vela      → "vela"
 //   - /path/to/local/repo.git             → "repo"
 func extractRepoName(remote string) string {
-	// Remove trailing .git
-	remote = strings.TrimSuffix(remote, ".git")
+	_, _, name := parseRemoteIdentity(remote)
+	return name
+}
 
-	// SSH format: git@host:org/repo
-	if strings.HasPrefix(remote, "git@") {
-		re := regexp.MustCompile(`git@[^:]+:(.+)`)
-		if m := re.FindStringSubmatch(remote); len(m) > 1 {
-			parts := strings.Split(m[1], "/")
-			return parts[len(parts)-1]
+func parseRemoteIdentity(remote string) (identity, organization, name string) {
+	remote = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(remote, "/"), ".git"))
+	if remote == "" {
+		return "", "", ""
+	}
+
+	if strings.Contains(remote, "://") {
+		if parsed, err := url.Parse(remote); err == nil {
+			return remoteIdentityFromParts(parsed.Hostname(), splitRemotePath(parsed.Path))
 		}
 	}
 
-	// HTTPS or local path: last segment
-	parts := strings.Split(remote, "/")
-	if len(parts) > 0 {
-		return parts[len(parts)-1]
+	if m := regexp.MustCompile(`^[^@]+@([^:]+):(.+)$`).FindStringSubmatch(remote); len(m) == 3 {
+		return remoteIdentityFromParts(m[1], splitRemotePath(m[2]))
 	}
 
-	return ""
+	return "", "", fallbackRemoteName(remote)
+}
+
+func remoteIdentityFromParts(host string, parts []string) (identity, organization, name string) {
+	if len(parts) == 0 {
+		return "", "", ""
+	}
+	name = parts[len(parts)-1]
+	if name == "" {
+		return "", "", ""
+	}
+	if len(parts) > 1 {
+		organization = strings.Join(parts[:len(parts)-1], "/")
+	}
+	identityParts := make([]string, 0, len(parts)+1)
+	if host != "" {
+		identityParts = append(identityParts, host)
+	}
+	identityParts = append(identityParts, parts...)
+	return strings.Join(identityParts, "/"), organization, name
+}
+
+func splitRemotePath(raw string) []string {
+	raw = strings.TrimSpace(strings.TrimSuffix(strings.TrimSuffix(raw, "/"), ".git"))
+	raw = strings.TrimPrefix(raw, "/")
+	raw = strings.TrimPrefix(raw, "~/")
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, "/")
+	clean := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" || part == "." {
+			continue
+		}
+		clean = append(clean, part)
+	}
+	return clean
+}
+
+func fallbackRemoteName(remote string) string {
+	parts := strings.Split(remote, "/")
+	if len(parts) == 0 {
+		return ""
+	}
+	return parts[len(parts)-1]
+}
+
+func fallbackRepoIdentity(workspaceRoot, dir string) string {
+	if rel, err := filepath.Rel(workspaceRoot, dir); err == nil {
+		rel = filepath.ToSlash(filepath.Clean(rel))
+		if rel != "." && rel != "" && !strings.HasPrefix(rel, "../") {
+			return rel
+		}
+	}
+	return filepath.Base(dir)
+}
+
+func SourceIdentity(src *types.Source) string {
+	if src == nil {
+		return ""
+	}
+	if id := strings.TrimSpace(src.ID); id != "" {
+		return id
+	}
+	return strings.TrimSpace(src.Name)
+}
+
+func SourceDisplayName(src *types.Source) string {
+	if src == nil {
+		return ""
+	}
+	name := strings.TrimSpace(src.Name)
+	org := strings.TrimSpace(src.Organization)
+	if org != "" && name != "" {
+		return org + "/" + name
+	}
+	if id := strings.TrimSpace(src.ID); id != "" {
+		return id
+	}
+	return name
 }
 
 // ProjectNodeID returns the canonical node ID for a project root node.
@@ -103,14 +263,16 @@ func CreateProjectNode(src *types.Source) types.Node {
 	}
 
 	return types.Node{
-		ID:          ProjectNodeID(src.Name),
+		ID:          ProjectNodeID(SourceIdentity(src)),
 		Label:       src.Name,
 		NodeType:    string(types.NodeTypeProject),
 		Description: desc,
 		Source:      src,
 		Metadata: map[string]interface{}{
-			"path":   src.Path,
-			"remote": src.Remote,
+			"path":         src.Path,
+			"remote":       src.Remote,
+			"source_id":    SourceIdentity(src),
+			"organization": src.Organization,
 		},
 	}
 }

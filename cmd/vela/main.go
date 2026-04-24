@@ -54,7 +54,12 @@ from the persisted graph output.`,
 
 	root.AddCommand(tuiCmd())
 	root.AddCommand(buildCmd())
+	root.AddCommand(updateCmd())
+	root.AddCommand(watchCmd())
+	root.AddCommand(hooksCmd())
 	root.AddCommand(extractAliasCmd())
+	root.AddCommand(benchCmd())
+	root.AddCommand(searchCmd())
 	root.AddCommand(graphQueryCmd())
 	root.AddCommand(serveCmd())
 	root.AddCommand(versionCmd())
@@ -103,7 +108,7 @@ func writeVisualExports(g *types.Graph, outDir string, obsCfg types.ObsidianConf
 	}
 }
 
-func loadEngine(graphFlag string) (*query.Engine, error) {
+var loadEngine = func(graphFlag string) (*query.Engine, error) {
 	if graphFlag == "" {
 		var err error
 		graphFlag, err = config.FindGraphFile(".")

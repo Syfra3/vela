@@ -3,6 +3,7 @@ package tui
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -78,8 +79,13 @@ func TestUninstallAllOnlyRemovesObsidianSubdirForCustomVault(t *testing.T) {
 
 func TestUninstallModelEnterStartsRemoval(t *testing.T) {
 	originalTargets := uninstallTargetsFunc
-	t.Cleanup(func() { uninstallTargetsFunc = originalTargets })
+	originalRepos := uninstallTrackedReposFunc
+	t.Cleanup(func() {
+		uninstallTargetsFunc = originalTargets
+		uninstallTrackedReposFunc = originalRepos
+	})
 	uninstallTargetsFunc = func() ([]string, error) { return []string{"/tmp/.vela"}, nil }
+	uninstallTrackedReposFunc = func() ([]string, error) { return nil, nil }
 
 	model := NewUninstallModel()
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -88,5 +94,32 @@ func TestUninstallModelEnterStartsRemoval(t *testing.T) {
 	}
 	if updated.(UninstallModel).state != uninstallStateRunning {
 		t.Fatalf("state = %v, want running", updated.(UninstallModel).state)
+	}
+}
+
+func TestUninstallAllRemovesTrackedRepoLocalData(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repo := filepath.Join(home, "repo")
+	if err := os.MkdirAll(filepath.Join(repo, ".vela"), 0o755); err != nil {
+		t.Fatalf("mkdir repo data: %v", err)
+	}
+	registryJSON := []byte("{\n  \"version\": 1,\n  \"entries\": [\n    {\n      \"repo_root\": \"" + strings.ReplaceAll(repo, "\\", "\\\\") + "\",\n      \"name\": \"repo\"\n    }\n  ]\n}\n")
+	if err := os.MkdirAll(filepath.Join(home, ".vela"), 0o755); err != nil {
+		t.Fatalf("mkdir registry dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".vela", "registry.json"), registryJSON, 0o644); err != nil {
+		t.Fatalf("write registry: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".vela", "graph.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write local graph: %v", err)
+	}
+
+	if _, err := uninstallAll(); err != nil {
+		t.Fatalf("uninstallAll() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".vela")); !os.IsNotExist(err) {
+		t.Fatalf("expected tracked repo local data removed, stat err = %v", err)
 	}
 }

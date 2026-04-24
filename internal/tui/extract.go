@@ -13,12 +13,14 @@ import (
 
 	"github.com/Syfra3/vela/internal/app"
 	"github.com/Syfra3/vela/internal/config"
+	"github.com/Syfra3/vela/internal/registry"
 	"github.com/Syfra3/vela/pkg/types"
 )
 
 type BuildRunRequest struct {
 	RepoRoot string
 	Observe  func(app.BuildEvent)
+	Mode     string
 }
 
 type BuildStageSummary struct {
@@ -29,6 +31,7 @@ type BuildStageSummary struct {
 type BuildRunResult struct {
 	GraphPath    string
 	HTMLPath     string
+	ReportPath   string
 	ObsidianPath string
 	Files        int
 	Facts        int
@@ -91,19 +94,36 @@ var runTUIBuild = func(req BuildRunRequest) (BuildRunResult, error) {
 	for _, stage := range result.StageReports {
 		stages = append(stages, BuildStageSummary{Name: string(stage.Stage), Count: stage.Count})
 	}
-	return BuildRunResult{
+	out := BuildRunResult{
 		GraphPath:    result.GraphPath,
 		HTMLPath:     result.HTMLPath,
+		ReportPath:   result.ReportPath,
 		ObsidianPath: result.ObsidianPath,
 		Files:        result.Files,
 		Facts:        result.Facts,
 		Stages:       stages,
 		Warnings:     append([]string(nil), result.Warnings...),
-	}, nil
+	}
+	upsertErr := error(nil)
+	if len(result.Repos) > 0 {
+		for _, repo := range result.Repos {
+			if err := registry.UpsertTrackedRepo(repo.RepoRoot, repo.GraphPath, repo.ReportPath); err != nil {
+				upsertErr = err
+				break
+			}
+		}
+	} else {
+		upsertErr = registry.UpsertTrackedRepo(req.RepoRoot, result.GraphPath, result.ReportPath)
+	}
+	if upsertErr != nil {
+		out.Warnings = append(out.Warnings, fmt.Sprintf("registry update failed: %v", upsertErr))
+	}
+	return out, nil
 }
 
 type ExtractModel struct {
 	currentDir string
+	mode       string
 	entries    []dirEntry
 	cursor     int
 	selected   string
@@ -130,7 +150,23 @@ func NewExtractModel() ExtractModel {
 }
 
 func NewExtractModelWithRoot(root string) ExtractModel {
-	m := ExtractModel{currentDir: root, phase: extractPhaseBrowse}
+	m := ExtractModel{currentDir: root, phase: extractPhaseBrowse, mode: "build"}
+	m.reloadEntries()
+	return m
+}
+
+func NewUpdateModel() ExtractModel {
+	wd, err := os.Getwd()
+	if err != nil {
+		wd = "."
+	}
+	m := ExtractModel{currentDir: wd, phase: extractPhaseBrowse, mode: "update"}
+	m.reloadEntries()
+	return m
+}
+
+func NewUpdateModelWithRoot(root string) ExtractModel {
+	m := ExtractModel{currentDir: root, phase: extractPhaseBrowse, mode: "update"}
 	m.reloadEntries()
 	return m
 }
@@ -140,10 +176,10 @@ func (m ExtractModel) Quitting() bool { return m.quitting }
 
 func (m ExtractModel) StatusMessage() string {
 	if m.err != nil {
-		return "build failed: " + m.err.Error()
+		return m.actionLabelLower() + " failed: " + m.err.Error()
 	}
 	if m.result.GraphPath != "" {
-		return "build complete: " + m.result.GraphPath
+		return m.actionLabelLower() + " complete: " + m.result.GraphPath
 	}
 	return ""
 }
@@ -253,7 +289,7 @@ func (m ExtractModel) updateConfirm(msg tea.Msg) (tea.Model, tea.Cmd) {
 		done := make(chan buildFinishedMsg, 1)
 		m.eventCh = events
 		m.doneCh = done
-		startBuild(runTUIBuild, m.selected, events, done)
+		startBuild(runTUIBuild, m.mode, m.selected, events, done)
 		return m, tea.Batch(waitForBuildEvent(m.eventCh), waitForBuildDone(m.doneCh), tickExtractStatus())
 	}
 	return m, nil
@@ -293,9 +329,9 @@ func (m ExtractModel) updateResult(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func startBuild(runner func(BuildRunRequest) (BuildRunResult, error), selected string, events chan app.BuildEvent, done chan buildFinishedMsg) {
+func startBuild(runner func(BuildRunRequest) (BuildRunResult, error), mode string, selected string, events chan app.BuildEvent, done chan buildFinishedMsg) {
 	go func() {
-		result, err := runner(BuildRunRequest{RepoRoot: selected, Observe: func(event app.BuildEvent) { events <- event }})
+		result, err := runner(BuildRunRequest{RepoRoot: selected, Mode: mode, Observe: func(event app.BuildEvent) { events <- event }})
 		close(events)
 		done <- buildFinishedMsg{result: result, err: err}
 		close(done)
@@ -430,12 +466,12 @@ func (m ExtractModel) ViewContent() string {
 		}
 		b.WriteString("\nenter open folder • s select current folder • backspace parent\n")
 	case extractPhaseConfirm:
-		b.WriteString("Confirm extraction\n\n")
+		b.WriteString("Confirm " + m.actionLabelLower() + "\n\n")
 		b.WriteString("Selected folder:\n")
 		b.WriteString(stylePrompt.Render(m.selected))
 		b.WriteString("\n\nThis keeps the new backend but restores the classic guided flow.\n")
 	case extractPhaseRunning:
-		b.WriteString("Running extraction\n\n")
+		b.WriteString("Running " + m.actionLabelLower() + "\n\n")
 		b.WriteString(m.renderRunningProgress())
 	case extractPhaseResult:
 		if m.err != nil {
@@ -443,7 +479,7 @@ func (m ExtractModel) ViewContent() string {
 			b.WriteString("\n")
 			return b.String()
 		}
-		b.WriteString("Build summary\n\n")
+		b.WriteString(m.actionLabel() + " summary\n\n")
 		b.WriteString(RenderBuildSummary(m.result))
 		if len(m.result.Warnings) > 0 {
 			b.WriteString("\n\nWarnings:\n")
@@ -453,4 +489,18 @@ func (m ExtractModel) ViewContent() string {
 		}
 	}
 	return b.String()
+}
+
+func (m ExtractModel) actionLabel() string {
+	if m.mode == "update" {
+		return "Update"
+	}
+	return "Build"
+}
+
+func (m ExtractModel) actionLabelLower() string {
+	if m.mode == "update" {
+		return "update"
+	}
+	return "build"
 }

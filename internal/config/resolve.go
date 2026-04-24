@@ -31,6 +31,11 @@ func GraphFilePath(outDir string) string {
 	return filepath.Join(outDir, graphFileName)
 }
 
+// RegistryFilePath returns the global tracked-repository registry path.
+func RegistryFilePath() string {
+	return filepath.Join(velaHomeOrFallback(), "registry.json")
+}
+
 // FindGraphFile resolves graph.json for the current working directory.
 // Search order:
 //  1. ~/.vela/graph.json          — canonical global store

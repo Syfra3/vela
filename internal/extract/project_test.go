@@ -1,6 +1,7 @@
 package extract
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -17,6 +18,7 @@ func TestExtractRepoName(t *testing.T) {
 		{"https://github.com/Syfra3/vela", "vela"},
 		{"git@github.com:Syfra3/glim.git", "glim"},
 		{"git@github.com:Syfra3/ancora.git", "ancora"},
+		{"ssh://git@github.com/Syfra3/vela.git", "vela"},
 		{"https://github.com/org/my-project.git", "my-project"},
 		{"/local/path/to/repo.git", "repo"},
 	}
@@ -25,6 +27,54 @@ func TestExtractRepoName(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("extractRepoName(%q) = %q, want %q", tc.remote, got, tc.want)
 		}
+	}
+}
+
+func TestParseRemoteIdentity_NormalizesSSHAndHTTPS(t *testing.T) {
+	tests := []struct {
+		name         string
+		remote       string
+		wantID       string
+		wantOrg      string
+		wantRepoName string
+	}{
+		{
+			name:         "https github",
+			remote:       "https://github.com/Syfra3/vela.git",
+			wantID:       "github.com/Syfra3/vela",
+			wantOrg:      "Syfra3",
+			wantRepoName: "vela",
+		},
+		{
+			name:         "scp ssh github",
+			remote:       "git@github.com:Syfra3/vela.git",
+			wantID:       "github.com/Syfra3/vela",
+			wantOrg:      "Syfra3",
+			wantRepoName: "vela",
+		},
+		{
+			name:         "ssh url github",
+			remote:       "ssh://git@github.com/Syfra3/vela.git",
+			wantID:       "github.com/Syfra3/vela",
+			wantOrg:      "Syfra3",
+			wantRepoName: "vela",
+		},
+		{
+			name:         "nested namespace",
+			remote:       "git@gitlab.com:glim-it/platform/glim-agents.git",
+			wantID:       "gitlab.com/glim-it/platform/glim-agents",
+			wantOrg:      "glim-it/platform",
+			wantRepoName: "glim-agents",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotID, gotOrg, gotRepoName := parseRemoteIdentity(tt.remote)
+			if gotID != tt.wantID || gotOrg != tt.wantOrg || gotRepoName != tt.wantRepoName {
+				t.Fatalf("parseRemoteIdentity(%q) = (%q, %q, %q), want (%q, %q, %q)", tt.remote, gotID, gotOrg, gotRepoName, tt.wantID, tt.wantOrg, tt.wantRepoName)
+			}
+		})
 	}
 }
 
@@ -63,6 +113,55 @@ func TestDetectProject_GitRepo(t *testing.T) {
 	}
 	if src.Type != types.SourceTypeCodebase {
 		t.Errorf("Type = %q, want codebase", src.Type)
+	}
+	if src.ID != "github.com/test/myrepo" {
+		t.Errorf("ID = %q, want github.com/test/myrepo", src.ID)
+	}
+	if src.Organization != "test" {
+		t.Errorf("Organization = %q, want test", src.Organization)
+	}
+}
+
+func TestDetectProjectInWorkspace_FallbackIdentityUsesRelativePath(t *testing.T) {
+	root := t.TempDir()
+	repoDir := filepath.Join(root, "org-a", "vela")
+	if err := os.MkdirAll(repoDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	src := DetectProjectInWorkspace(root, repoDir)
+
+	if src.Name != "vela" {
+		t.Fatalf("Name = %q, want vela", src.Name)
+	}
+	if src.ID != "org-a/vela" {
+		t.Fatalf("ID = %q, want org-a/vela", src.ID)
+	}
+	if src.Organization != "" {
+		t.Fatalf("Organization = %q, want empty", src.Organization)
+	}
+}
+
+func TestDiscoverChildGitRepos(t *testing.T) {
+	root := t.TempDir()
+	repoA := filepath.Join(root, "org-a", "vela")
+	repoB := filepath.Join(root, "org-b", "vela")
+	for _, repo := range []string{repoA, repoB} {
+		if err := os.MkdirAll(repo, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%q) error = %v", repo, err)
+		}
+		mustGit(t, repo, "init")
+	}
+
+	repos, err := DiscoverChildGitRepos(root)
+	if err != nil {
+		t.Fatalf("DiscoverChildGitRepos() error = %v", err)
+	}
+	if len(repos) != 2 {
+		t.Fatalf("repos = %v, want 2 child repos", repos)
+	}
+	if repos[0] != repoA || repos[1] != repoB {
+		t.Fatalf("repos = %v, want [%q %q]", repos, repoA, repoB)
 	}
 }
 

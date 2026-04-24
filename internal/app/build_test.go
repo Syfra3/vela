@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -19,6 +20,7 @@ func TestBuildServiceRun_EmitsEventsAndExportsVisualArtifacts(t *testing.T) {
 	outDir := filepath.Join(repoRoot, ".vela-out")
 	graphPath := filepath.Join(outDir, "graph.json")
 	htmlPath := filepath.Join(outDir, "graph.html")
+	reportPath := filepath.Join(outDir, "GRAPH_REPORT.md")
 	obsidianPath := filepath.Join(vaultDir, "obsidian")
 
 	var events []BuildEvent
@@ -37,6 +39,12 @@ func TestBuildServiceRun_EmitsEventsAndExportsVisualArtifacts(t *testing.T) {
 		WriteHTML: func(g *types.Graph, out string) error {
 			if out != outDir {
 				t.Fatalf("html outDir = %q, want %q", out, outDir)
+			}
+			return nil
+		},
+		WriteReport: func(g *types.Graph, out string) error {
+			if out != outDir {
+				t.Fatalf("report outDir = %q, want %q", out, outDir)
 			}
 			return nil
 		},
@@ -66,6 +74,9 @@ func TestBuildServiceRun_EmitsEventsAndExportsVisualArtifacts(t *testing.T) {
 	if result.HTMLPath != htmlPath {
 		t.Fatalf("HTMLPath = %q, want %q", result.HTMLPath, htmlPath)
 	}
+	if result.ReportPath != reportPath {
+		t.Fatalf("ReportPath = %q, want %q", result.ReportPath, reportPath)
+	}
 	if result.ObsidianPath != obsidianPath {
 		t.Fatalf("ObsidianPath = %q, want %q", result.ObsidianPath, obsidianPath)
 	}
@@ -90,12 +101,14 @@ func TestBuildServiceRun_ReportsExportFailuresWithoutHidingGraphBuild(t *testing
 	vaultDir := t.TempDir()
 	htmlErr := errors.New("html down")
 	obsErr := errors.New("obsidian down")
+	reportErr := errors.New("report down")
 
 	svc := BuildService{
 		RunPipeline: func(context.Context, string, types.BuildRequest, pipeline.Observer) (pipeline.Result, error) {
 			return pipeline.Result{Graph: sampleGraph(), GraphPath: filepath.Join(repoRoot, ".vela", "graph.json")}, nil
 		},
 		WriteHTML:     func(*types.Graph, string) error { return htmlErr },
+		WriteReport:   func(*types.Graph, string) error { return reportErr },
 		WriteObsidian: func(*types.Graph, string) error { return obsErr },
 	}
 
@@ -103,14 +116,17 @@ func TestBuildServiceRun_ReportsExportFailuresWithoutHidingGraphBuild(t *testing
 	if err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if len(result.Warnings) != 2 {
-		t.Fatalf("warnings len = %d, want 2", len(result.Warnings))
+	if len(result.Warnings) != 3 {
+		t.Fatalf("warnings len = %d, want 3", len(result.Warnings))
 	}
 	if result.Warnings[0] != "HTML export failed: html down" {
 		t.Fatalf("first warning = %q", result.Warnings[0])
 	}
-	if result.Warnings[1] != "Obsidian export failed: obsidian down" {
+	if result.Warnings[1] != "Graph report export failed: report down" {
 		t.Fatalf("second warning = %q", result.Warnings[1])
+	}
+	if result.Warnings[2] != "Obsidian export failed: obsidian down" {
+		t.Fatalf("third warning = %q", result.Warnings[2])
 	}
 }
 
@@ -123,7 +139,8 @@ func TestBuildServiceRun_SkipsObsidianExportWhenAutoSyncDisabled(t *testing.T) {
 		RunPipeline: func(context.Context, string, types.BuildRequest, pipeline.Observer) (pipeline.Result, error) {
 			return pipeline.Result{Graph: sampleGraph(), GraphPath: filepath.Join(repoRoot, ".vela", "graph.json")}, nil
 		},
-		WriteHTML: func(*types.Graph, string) error { return nil },
+		WriteHTML:   func(*types.Graph, string) error { return nil },
+		WriteReport: func(*types.Graph, string) error { return nil },
 		WriteObsidian: func(*types.Graph, string) error {
 			called = true
 			return nil
@@ -158,6 +175,7 @@ func TestBuildServiceRun_PropagatesPipelineWarnings(t *testing.T) {
 			}, nil
 		},
 		WriteHTML:     func(*types.Graph, string) error { return nil },
+		WriteReport:   func(*types.Graph, string) error { return nil },
 		WriteObsidian: func(*types.Graph, string) error { return nil },
 	}
 
@@ -186,6 +204,7 @@ func TestBuildServiceRun_PropagatesDriverFailureWarnings(t *testing.T) {
 			}, nil
 		},
 		WriteHTML:     func(*types.Graph, string) error { return nil },
+		WriteReport:   func(*types.Graph, string) error { return nil },
 		WriteObsidian: func(*types.Graph, string) error { return nil },
 	}
 
@@ -198,6 +217,117 @@ func TestBuildServiceRun_PropagatesDriverFailureWarnings(t *testing.T) {
 	}
 	if got := result.Warnings[0]; !strings.Contains(got, "SCIP driver failed: scip-go") {
 		t.Fatalf("warning = %q, want driver failure guidance", got)
+	}
+}
+
+func TestBuildServiceRun_MergesChildGitReposUnderNonRepoRoot(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	repoA := filepath.Join(root, "org-a", "vela")
+	repoB := filepath.Join(root, "org-b", "vela")
+	for _, repo := range []string{repoA, repoB} {
+		if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+			t.Fatalf("mkdir .git for %q: %v", repo, err)
+		}
+	}
+
+	var seen []string
+	svc := BuildService{
+		RunPipeline: func(_ context.Context, _ string, req types.BuildRequest, _ pipeline.Observer) (pipeline.Result, error) {
+			seen = append(seen, req.RepoRoot)
+			repoName := filepath.Base(req.RepoRoot)
+			projectID := filepath.ToSlash(strings.TrimPrefix(req.RepoRoot, root+string(filepath.Separator)))
+			graphPath := filepath.Join(req.RepoRoot, ".vela", "graph.json")
+			return pipeline.Result{
+				GraphPath:     graphPath,
+				DetectedFiles: []string{filepath.Join(req.RepoRoot, "main.go")},
+				Facts:         []types.Fact{{From: projectID + ":a", To: projectID + ":b", Kind: types.FactKindDependsOn}},
+				Graph:         &types.Graph{Nodes: []types.Node{{ID: "project:" + projectID, Label: repoName, NodeType: string(types.NodeTypeProject), Source: &types.Source{Type: types.SourceTypeCodebase, ID: projectID, Name: repoName, Path: req.RepoRoot}}}},
+				StageReports:  []pipeline.StageReport{{Stage: types.BuildStageDetect, Count: 1}, {Stage: types.BuildStagePersist, Count: 1}},
+			}, nil
+		},
+		WriteHTML:     func(*types.Graph, string) error { return nil },
+		WriteReport:   func(*types.Graph, string) error { return nil },
+		WriteObsidian: func(*types.Graph, string) error { return nil },
+	}
+
+	result, err := svc.Run(context.Background(), BuildRequest{RepoRoot: root})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(seen) != 2 {
+		t.Fatalf("runPipeline calls = %v, want 2 child repos", seen)
+	}
+	if len(result.Repos) != 2 {
+		t.Fatalf("Repos len = %d, want 2", len(result.Repos))
+	}
+	if result.GraphPath != filepath.Join(root, ".vela", "graph.json") {
+		t.Fatalf("GraphPath = %q, want aggregate graph under selected root", result.GraphPath)
+	}
+	if result.Files != 2 {
+		t.Fatalf("Files = %d, want 2", result.Files)
+	}
+	if len(result.Graph.Nodes) != 2 {
+		t.Fatalf("merged graph nodes = %d, want 2", len(result.Graph.Nodes))
+	}
+}
+
+func TestBuildServiceRun_WritesPerRepoReportsForMultiRepoBuilds(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	repoA := filepath.Join(root, "org-a", "vela")
+	repoB := filepath.Join(root, "org-b", "ancora")
+	for _, repo := range []string{repoA, repoB} {
+		if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+			t.Fatalf("mkdir .git for %q: %v", repo, err)
+		}
+	}
+
+	var reportOutDirs []string
+	svc := BuildService{
+		RunPipeline: func(_ context.Context, _ string, req types.BuildRequest, _ pipeline.Observer) (pipeline.Result, error) {
+			graphPath := filepath.Join(req.RepoRoot, ".vela", "graph.json")
+			return pipeline.Result{
+				GraphPath: graphPath,
+				Graph:     &types.Graph{Nodes: []types.Node{{ID: req.RepoRoot, Label: filepath.Base(req.RepoRoot), NodeType: string(types.NodeTypeProject)}}},
+			}, nil
+		},
+		WriteHTML: func(*types.Graph, string) error { return nil },
+		WriteReport: func(_ *types.Graph, out string) error {
+			reportOutDirs = append(reportOutDirs, out)
+			return nil
+		},
+		WriteObsidian: func(*types.Graph, string) error { return nil },
+	}
+
+	result, err := svc.Run(context.Background(), BuildRequest{RepoRoot: root})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(result.Repos) != 2 {
+		t.Fatalf("Repos len = %d, want 2", len(result.Repos))
+	}
+	wantDirs := map[string]bool{
+		filepath.Join(repoA, ".vela"): true,
+		filepath.Join(repoB, ".vela"): true,
+		filepath.Join(root, ".vela"):  true,
+	}
+	if len(reportOutDirs) != len(wantDirs) {
+		t.Fatalf("WriteReport calls = %v, want %d calls", reportOutDirs, len(wantDirs))
+	}
+	for _, outDir := range reportOutDirs {
+		delete(wantDirs, outDir)
+	}
+	if len(wantDirs) != 0 {
+		t.Fatalf("missing report exports for outDirs: %+v", wantDirs)
+	}
+	for _, repo := range result.Repos {
+		want := filepath.Join(filepath.Dir(repo.GraphPath), "GRAPH_REPORT.md")
+		if repo.ReportPath != want {
+			t.Fatalf("repo.ReportPath = %q, want %q", repo.ReportPath, want)
+		}
 	}
 }
 

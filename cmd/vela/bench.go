@@ -24,8 +24,9 @@ func benchCmd() *cobra.Command {
 	var topN int
 
 	cmd := &cobra.Command{
-		Use:   "bench",
-		Short: "Compute graph health metrics (coverage, quality, structure)",
+		Use:     "status",
+		Aliases: []string{"bench"},
+		Short:   "Show global graph health plus per-project status",
 		Long: `bench reads an existing graph.json and reports a full health snapshot:
   - Coverage: node/edge counts, breakdowns by kind, confidence distribution
   - Quality:  resolution rate, broken edges, self-loops, duplicates
@@ -43,10 +44,11 @@ Use --baseline to compare against a previous bench run (JSON output).`,
 				}
 			}
 
-			m, err := igraph.LoadHealthMetrics(graphFile, topN)
+			snapshot, err := igraph.LoadStatusSnapshot(graphFile, topN)
 			if err != nil {
 				return fmt.Errorf("loading graph: %w", err)
 			}
+			m := snapshot.Metrics
 
 			historyDir, err := benchHistoryDir(graphFile)
 			if err != nil {
@@ -73,7 +75,7 @@ Use --baseline to compare against a previous bench run (JSON output).`,
 				return enc.Encode(m)
 			}
 
-			printBenchReport(m, baselinePath)
+			printBenchReport(snapshot, baselinePath)
 			return nil
 		},
 	}
@@ -186,7 +188,8 @@ func writeBenchSnapshot(historyDir string, m igraph.HealthMetrics) (string, erro
 	return path, nil
 }
 
-func printBenchReport(m igraph.HealthMetrics, baselinePath string) {
+func printBenchReport(snapshot igraph.StatusSnapshot, baselinePath string) {
+	m := snapshot.Metrics
 	var base *igraph.HealthMetrics
 	if baselinePath != "" {
 		data, err := os.ReadFile(baselinePath)
@@ -209,6 +212,21 @@ func printBenchReport(m igraph.HealthMetrics, baselinePath string) {
 	fmt.Printf("  source: %s\n", m.Path)
 	if base != nil {
 		fmt.Printf("  baseline: %s\n", baselinePath)
+	}
+	fmt.Println()
+
+	if !snapshot.Freshness.GraphUpdatedAt.IsZero() {
+		fmt.Printf("  graph updated: %s\n", snapshot.Freshness.GraphUpdatedAt.Format(time.RFC3339))
+	}
+	if snapshot.Freshness.ManifestPresent {
+		fmt.Printf("  manifest: present (%d tracked files, mode: %s)\n", snapshot.Freshness.TrackedFiles, strings.ReplaceAll(snapshot.Freshness.BuildMode, "_", " "))
+	} else {
+		fmt.Printf("  manifest: missing\n")
+	}
+	if snapshot.Freshness.ReportPresent {
+		fmt.Printf("  report: present\n")
+	} else {
+		fmt.Printf("  report: missing\n")
 	}
 	fmt.Println()
 
@@ -351,6 +369,23 @@ func printBenchReport(m igraph.HealthMetrics, baselinePath string) {
 			i+1, n.Label, n.Kind, n.OutDeg, n.InDeg, shortFile)
 	}
 	fmt.Println()
+
+	section("PROJECTS")
+	if len(snapshot.Projects) == 0 {
+		fmt.Println("  no project nodes found")
+		fmt.Println()
+	} else {
+		for _, project := range snapshot.Projects {
+			fmt.Printf("  %s\n", project.Name)
+			if project.Path != "" {
+				fmt.Printf("    path: %s\n", project.Path)
+			}
+			if project.Remote != "" {
+				fmt.Printf("    remote: %s\n", project.Remote)
+			}
+			fmt.Printf("    nodes:%d  files:%d  symbols:%d  outgoing edges:%d\n\n", project.Nodes, project.Files, project.Symbols, project.OutgoingEdges)
+		}
+	}
 
 	fmt.Printf("  %s\n\n", "Tip: run with --json to save a baseline for future comparisons.")
 }

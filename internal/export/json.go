@@ -25,8 +25,10 @@ type nodeJSON struct {
 	File         string                 `json:"file,omitempty"`
 	Description  string                 `json:"description,omitempty"`
 	Community    int                    `json:"community,omitempty"`
-	SourceType   string                 `json:"source_type,omitempty"`   // "codebase" | "memory" | "webhook"
-	SourceName   string                 `json:"source_name,omitempty"`   // repo/project name
+	SourceID     string                 `json:"source_id,omitempty"`
+	SourceType   string                 `json:"source_type,omitempty"` // "codebase" | "memory" | "webhook"
+	SourceName   string                 `json:"source_name,omitempty"` // repo/project name
+	SourceOrg    string                 `json:"source_organization,omitempty"`
 	SourcePath   string                 `json:"source_path,omitempty"`   // local codebase path
 	SourceRemote string                 `json:"source_remote,omitempty"` // git remote URL
 	Metadata     map[string]interface{} `json:"metadata,omitempty"`
@@ -124,8 +126,10 @@ func marshalGraph(g *types.Graph) ([]byte, error) {
 			Community:   n.Community,
 		}
 		if n.Source != nil {
+			nj.SourceID = n.Source.ID
 			nj.SourceType = string(n.Source.Type)
 			nj.SourceName = n.Source.Name
+			nj.SourceOrg = n.Source.Organization
 			nj.SourcePath = n.Source.Path
 			nj.SourceRemote = n.Source.Remote
 		}
@@ -189,12 +193,14 @@ func LoadJSON(path string) (*types.Graph, error) {
 	}
 	for i, n := range raw.Nodes {
 		var source *types.Source
-		if n.SourceType != "" || n.SourceName != "" || n.SourcePath != "" || n.SourceRemote != "" {
+		if n.SourceID != "" || n.SourceType != "" || n.SourceName != "" || n.SourceOrg != "" || n.SourcePath != "" || n.SourceRemote != "" {
 			source = &types.Source{
-				Type:   types.SourceType(n.SourceType),
-				Name:   n.SourceName,
-				Path:   n.SourcePath,
-				Remote: n.SourceRemote,
+				Type:         types.SourceType(n.SourceType),
+				ID:           n.SourceID,
+				Name:         n.SourceName,
+				Organization: n.SourceOrg,
+				Path:         n.SourcePath,
+				Remote:       n.SourceRemote,
 			}
 		}
 		g.Nodes[i] = types.Node{

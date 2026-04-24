@@ -146,7 +146,7 @@ func ExtractContract(root string, files []string, src *types.Source) ([]types.No
 				seenService[n.ID] = true
 				binding := types.Edge{
 					Source:     n.ID,
-					Target:     ProjectNodeID(src.Name),
+					Target:     ProjectNodeID(SourceIdentity(src)),
 					Relation:   "declared_in",
 					SourceFile: rel,
 				}

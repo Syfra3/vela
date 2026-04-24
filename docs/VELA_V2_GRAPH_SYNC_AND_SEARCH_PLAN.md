@@ -1,5 +1,10 @@
 # Vela v2 Graph Sync and Search Plan
 
+Related docs:
+
+- `docs/VELA_V2_GRAPH_SYNC_AND_SEARCH_SPEC.md`
+- `docs/VELA_V2_GRAPH_SYNC_AND_SEARCH_TASKS.md`
+
 ## Goal
 
 Bring the strongest ideas from `graphify` into Vela v2 while keeping the implementation focused on the local CLI workflow.

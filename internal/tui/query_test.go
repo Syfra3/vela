@@ -20,8 +20,8 @@ func TestMenuModelRestoresClassicMainSurface(t *testing.T) {
 		got = append(got, item.key)
 	}
 	joined := strings.Join(got, ",")
-	if joined != "extract,graphstatus,obsidian,query,projects,purge,quit" {
-		t.Fatalf("menu keys = %q, want extract,graphstatus,obsidian,query,projects,purge,quit", joined)
+	if joined != "extract,graphstatus,obsidian,projects,purge,quit" {
+		t.Fatalf("menu keys = %q, want extract,graphstatus,obsidian,projects,purge,quit", joined)
 	}
 	view := m.View()
 	if !strings.Contains(view, "██╗   ██╗███████╗██╗") {
@@ -92,37 +92,6 @@ func TestViewObsidianShowsProgressContextWhileRunning(t *testing.T) {
 	}
 }
 
-func TestHandleMenuSelectQueryStartsClassicQueryScreen(t *testing.T) {
-	t.Parallel()
-
-	m := NewMenuModel()
-	queryIndex := -1
-	for i, item := range m.items {
-		if item.key == "query" {
-			queryIndex = i
-			break
-		}
-	}
-	if queryIndex == -1 {
-		t.Fatal("query menu item not found")
-	}
-
-	m.cursor = queryIndex
-	updated, _ := m.handleMenuSelect()
-	menu := updated.(MenuModel)
-
-	if menu.screen != screenQuery {
-		t.Fatalf("screen = %v, want %v", menu.screen, screenQuery)
-	}
-	view := menu.viewQuery()
-	if !strings.Contains(view, "dependencies") || !strings.Contains(view, "reverse_dependencies") {
-		t.Fatalf("expected query kinds in view, got %q", view)
-	}
-	if strings.Contains(view, "Graph-truth only") {
-		t.Fatalf("did not expect reduced subtitle in view, got %q", view)
-	}
-}
-
 func TestExtractModelNavigatesFoldersThenRunsBuildSummary(t *testing.T) {
 	originalReadDir := readDirEntries
 	originalRun := runTUIBuild
@@ -142,7 +111,7 @@ func TestExtractModelNavigatesFoldersThenRunsBuildSummary(t *testing.T) {
 		}
 	}
 	runTUIBuild = func(req BuildRunRequest) (BuildRunResult, error) {
-		return BuildRunResult{GraphPath: "/repo/cmd/vela/.vela/graph.json", HTMLPath: "/repo/cmd/vela/.vela/graph.html", ObsidianPath: "/vault/obsidian", Files: 3, Facts: 2}, nil
+		return BuildRunResult{GraphPath: "/repo/cmd/vela/.vela/graph.json", HTMLPath: "/repo/cmd/vela/.vela/graph.html", ReportPath: "/repo/cmd/vela/.vela/GRAPH_REPORT.md", ObsidianPath: "/vault/obsidian", Files: 3, Facts: 2}, nil
 	}
 
 	m := NewExtractModelWithRoot("/repo")
@@ -171,10 +140,10 @@ func TestExtractModelNavigatesFoldersThenRunsBuildSummary(t *testing.T) {
 		t.Fatal("expected build to enter running state from confirm screen")
 	}
 
-	updated, _ = m.Update(buildFinishedMsg{result: BuildRunResult{GraphPath: "/repo/cmd/vela/.vela/graph.json", HTMLPath: "/repo/cmd/vela/.vela/graph.html", ObsidianPath: "/vault/obsidian", Files: 3, Facts: 2}})
+	updated, _ = m.Update(buildFinishedMsg{result: BuildRunResult{GraphPath: "/repo/cmd/vela/.vela/graph.json", HTMLPath: "/repo/cmd/vela/.vela/graph.html", ReportPath: "/repo/cmd/vela/.vela/GRAPH_REPORT.md", ObsidianPath: "/vault/obsidian", Files: 3, Facts: 2}})
 	m = updated.(ExtractModel)
 	view := m.ViewContent()
-	for _, want := range []string{"Build summary", "graph.json", "graph.html", "/vault/obsidian"} {
+	for _, want := range []string{"Build summary", "graph.json", "graph.html", "GRAPH_REPORT.md", "/vault/obsidian"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected %q in view, got %q", want, view)
 		}
@@ -194,7 +163,7 @@ func TestExtractModelRunningViewShowsProgressBar(t *testing.T) {
 	}
 
 	view := m.ViewContent()
-	for _, want := range []string{"Running extraction", "Files discovered: 12", "Current stage: scan (42)", "Recent events:"} {
+	for _, want := range []string{"Running build", "Files discovered: 12", "Current stage: scan (42)", "Recent events:"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected %q in extraction progress view, got %q", want, view)
 		}
@@ -309,54 +278,4 @@ func TestExtractModelBrowsesIntoFolderAndSelectsCurrentDirectory(t *testing.T) {
 	if !strings.Contains(m.ViewContent(), "/repo/cmd") {
 		t.Fatalf("expected selected path in confirm view, got %q", m.ViewContent())
 	}
-}
-
-func TestQueryModelRunsGraphTruthRequest(t *testing.T) {
-	originalLoad := queryLoadEngineFunc
-	originalRun := queryRunRequestFunc
-	t.Cleanup(func() {
-		queryLoadEngineFunc = originalLoad
-		queryRunRequestFunc = originalRun
-	})
-
-	queryLoadEngineFunc = func(graphPath string) (queryRunner, error) {
-		return stubQueryRunner{}, nil
-	}
-	queryRunRequestFunc = func(r queryRunner, req types.QueryRequest) (string, error) {
-		return "Dependencies for \"AuthService\":\n  - Database via uses", nil
-	}
-
-	m := NewQueryModel()
-	for _, r := range "AuthService" {
-		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
-		m = updated.(QueryModel)
-	}
-
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	m = updated.(QueryModel)
-	if !m.running {
-		t.Fatal("expected query to enter running state")
-	}
-	if cmd == nil {
-		t.Fatal("expected query command")
-	}
-
-	updated, _ = m.Update(queryFinishedMsg{output: "Dependencies for \"AuthService\":\n  - Database via uses"})
-	m = updated.(QueryModel)
-	if m.running {
-		t.Fatal("expected query to finish")
-	}
-	view := m.ViewContent()
-	if !strings.Contains(view, "Dependencies for \"AuthService\"") {
-		t.Fatalf("expected query output in view, got %q", view)
-	}
-	if !strings.Contains(view, "dependencies") {
-		t.Fatalf("expected query kind list in view, got %q", view)
-	}
-}
-
-type stubQueryRunner struct{}
-
-func (stubQueryRunner) RunRequest(req types.QueryRequest) (string, error) {
-	return "", nil
 }

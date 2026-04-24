@@ -116,8 +116,12 @@ const (
 type Source struct {
 	// Type discriminates the source category.
 	Type SourceType `json:"type"`
+	// ID is the stable repo/source identity used for node namespacing.
+	ID string `json:"id,omitempty"`
 	// Name is the project/repo name (e.g., "vela", "glim", "ancora").
 	Name string `json:"name"`
+	// Organization is the git remote owner/org when available.
+	Organization string `json:"organization,omitempty"`
 	// Path is the local filesystem path (codebase only).
 	Path string `json:"path,omitempty"`
 	// Remote is the git remote URL if detected (codebase only).

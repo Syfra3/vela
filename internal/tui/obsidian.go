@@ -1,79 +1,76 @@
 package tui
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
+	"strings"
 
+	"github.com/Syfra3/vela/internal/config"
+	"github.com/Syfra3/vela/internal/export"
+	igraph "github.com/Syfra3/vela/internal/graph"
+	"github.com/Syfra3/vela/internal/registry"
 	"github.com/Syfra3/vela/pkg/types"
 )
 
 func loadGraph(graphPath string) (*types.Graph, error) {
-	data, err := os.ReadFile(graphPath)
+	g, err := export.LoadJSON(graphPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", graphPath, err)
 	}
-
-	var raw struct {
-		Nodes []struct {
-			ID           string                 `json:"id"`
-			Label        string                 `json:"label"`
-			Kind         string                 `json:"kind"`
-			File         string                 `json:"file"`
-			Description  string                 `json:"description"`
-			SourceType   string                 `json:"source_type"`
-			SourceName   string                 `json:"source_name"`
-			SourcePath   string                 `json:"source_path"`
-			SourceRemote string                 `json:"source_remote"`
-			Metadata     map[string]interface{} `json:"metadata"`
-		} `json:"nodes"`
-		Edges []struct {
-			From       string                 `json:"from"`
-			To         string                 `json:"to"`
-			Kind       string                 `json:"kind"`
-			File       string                 `json:"file"`
-			Confidence string                 `json:"confidence"`
-			Score      float64                `json:"score"`
-			Metadata   map[string]interface{} `json:"metadata"`
-		} `json:"edges"`
-	}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("parsing graph.json: %w", err)
-	}
-
-	g := &types.Graph{
-		Nodes: make([]types.Node, len(raw.Nodes)),
-		Edges: make([]types.Edge, len(raw.Edges)),
-	}
-	for i, n := range raw.Nodes {
-		g.Nodes[i] = types.Node{
-			ID:          n.ID,
-			Label:       n.Label,
-			NodeType:    n.Kind,
-			SourceFile:  n.File,
-			Description: n.Description,
-			Metadata:    n.Metadata,
-		}
-		if n.SourceType != "" || n.SourceName != "" || n.SourcePath != "" || n.SourceRemote != "" {
-			g.Nodes[i].Source = &types.Source{
-				Type:   types.SourceType(n.SourceType),
-				Name:   n.SourceName,
-				Path:   n.SourcePath,
-				Remote: n.SourceRemote,
-			}
-		}
-	}
-	for i, e := range raw.Edges {
-		g.Edges[i] = types.Edge{
-			Source:     e.From,
-			Target:     e.To,
-			Relation:   e.Kind,
-			SourceFile: e.File,
-			Confidence: e.Confidence,
-			Score:      e.Score,
-			Metadata:   e.Metadata,
-		}
-	}
-
 	return g, nil
+}
+
+func loadObsidianExportGraph(lastGraphPath string) (*types.Graph, string, error) {
+	entries, err := registry.Load()
+	if err != nil {
+		return nil, "", err
+	}
+	if len(entries) > 0 {
+		g, loaded, err := loadTrackedGraphs(entries)
+		if loaded > 0 {
+			return g, config.RegistryFilePath(), nil
+		}
+		if err != nil {
+			return nil, config.RegistryFilePath(), err
+		}
+	}
+	graphPath := strings.TrimSpace(lastGraphPath)
+	if graphPath == "" {
+		graphPath, err = config.FindGraphFile(".")
+		if err != nil {
+			return nil, "", err
+		}
+	}
+	g, err := loadGraph(graphPath)
+	if err != nil {
+		return nil, graphPath, err
+	}
+	return g, graphPath, nil
+}
+
+func loadTrackedGraphs(entries []registry.Entry) (*types.Graph, int, error) {
+	merged := &types.Graph{}
+	loaded := 0
+	var lastErr error
+	for _, entry := range entries {
+		graphPath := strings.TrimSpace(entry.GraphPath)
+		if graphPath == "" {
+			continue
+		}
+		g, err := loadGraph(graphPath)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		merged.Nodes = append(merged.Nodes, g.Nodes...)
+		merged.Edges = append(merged.Edges, g.Edges...)
+		loaded++
+	}
+	if loaded == 0 {
+		if lastErr != nil {
+			return nil, 0, lastErr
+		}
+		return nil, 0, fmt.Errorf("no tracked repository graphs available")
+	}
+	merged.Nodes, merged.Edges = igraph.Canonicalize(merged.Nodes, merged.Edges)
+	return merged, loaded, nil
 }

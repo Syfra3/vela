@@ -37,6 +37,7 @@ func ExtractAll(
 	if src == nil {
 		src = DetectProject(root)
 	}
+	repoID := SourceIdentity(src)
 
 	// Project root node — one per extraction run. Stamp with repo-layer
 	// project evidence so downstream consumers can attribute routing and
@@ -60,7 +61,7 @@ func ExtractAll(
 		if !emittedFiles[rel] {
 			emittedFiles[rel] = true
 			fileNode := types.Node{
-				ID:         fileNodeID(src.Name, rel),
+				ID:         fileNodeID(repoID, rel),
 				Label:      rel,
 				NodeType:   string(types.NodeTypeFile),
 				SourceFile: rel,
@@ -94,7 +95,7 @@ func ExtractAll(
 			continue
 		}
 
-		for _, fileEdge := range extractFileEdges(path, root, src.Name, rel) {
+		for _, fileEdge := range extractFileEdges(path, root, repoID, rel) {
 			stampRepoEdge(&fileEdge, evType, evConfidence, rel)
 			allEdges = append(allEdges, fileEdge)
 		}
@@ -106,13 +107,13 @@ func ExtractAll(
 		// Prefix all node IDs and stamp Source + evidence metadata.
 		prefixed := make([]types.Node, 0, len(rawNodes))
 		for _, n := range rawNodes {
-			n.ID = prefixID(src.Name, n.ID)
+			n.ID = prefixID(repoID, n.ID)
 			n.Source = src
 			stampRepoNode(&n, evType, evConfidence, rel)
 			prefixed = append(prefixed, n)
 			// file → symbol
 			fileContains := types.Edge{
-				Source:     fileNodeID(src.Name, rel),
+				Source:     fileNodeID(repoID, rel),
 				Target:     n.ID,
 				Relation:   "contains",
 				SourceFile: rel,
@@ -126,7 +127,7 @@ func ExtractAll(
 		// so Build() can resolve them — cross-file and cross-project calls resolve
 		// by label in the label index.
 		for _, e := range rawEdges {
-			e.Source = prefixID(src.Name, e.Source)
+			e.Source = prefixID(repoID, e.Source)
 			// Target stays as bare callee label — Build() resolves via labelIndex.
 			stampRepoEdge(&e, evType, evConfidence, rel)
 			allEdges = append(allEdges, e)

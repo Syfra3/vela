@@ -86,6 +86,7 @@ func RenderBuildSummary(result BuildRunResult) string {
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("graph: %s\n", result.GraphPath))
 	b.WriteString(fmt.Sprintf("html: %s\n", result.HTMLPath))
+	b.WriteString(fmt.Sprintf("report: %s\n", result.ReportPath))
 	b.WriteString(fmt.Sprintf("obsidian: %s\n", result.ObsidianPath))
 	b.WriteString(fmt.Sprintf("files: %d\n", result.Files))
 	b.WriteString(fmt.Sprintf("facts: %d\n", result.Facts))

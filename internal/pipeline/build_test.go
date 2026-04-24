@@ -25,6 +25,16 @@ type fakeScanner struct {
 	order    *[]string
 }
 
+func writeTestFile(t *testing.T, path string, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(path), err)
+	}
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("WriteFile(%s) error = %v", path, err)
+	}
+}
+
 func (s *fakeScanner) Scan(root string, files []string, src *types.Source) ([]types.Node, []types.Edge, error) {
 	s.gotRoot = root
 	s.gotFiles = append([]string(nil), files...)
@@ -102,6 +112,8 @@ func (p *fakePatcher) Patch(context.Context, types.BuildRequest, []types.Fact) (
 func TestBuilderBuild_RunsDetectScanDriverPatchMergeAndPersist(t *testing.T) {
 	repoRoot := t.TempDir()
 	outDir := filepath.Join(repoRoot, ".vela-test")
+	writeTestFile(t, filepath.Join(repoRoot, "main.go"), "package main\n")
+	writeTestFile(t, filepath.Join(repoRoot, "README.md"), "# test\n")
 	scanner := &fakeScanner{
 		nodes: []types.Node{{ID: "svc", Label: "svc", NodeType: "function"}},
 	}
@@ -240,6 +252,7 @@ func TestBuilderBuild_RunsDetectScanDriverPatchMergeAndPersist(t *testing.T) {
 
 func TestBuilderBuild_BootstrapsDriversBeforeScan(t *testing.T) {
 	repoRoot := t.TempDir()
+	writeTestFile(t, filepath.Join(repoRoot, "main.go"), "package main\n")
 	order := make([]string, 0, 3)
 	scanner := &fakeScanner{
 		nodes: []types.Node{{ID: "svc", Label: "svc", NodeType: "function"}},
@@ -274,8 +287,6 @@ func TestBuilderBuild_BootstrapsDriversBeforeScan(t *testing.T) {
 }
 
 func TestBuilderBuild_ReusesFreshPersistedGraphForDefaultBuild(t *testing.T) {
-	t.Parallel()
-
 	repoRoot := t.TempDir()
 	outDir := filepath.Join(repoRoot, ".vela")
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
@@ -290,6 +301,14 @@ func TestBuilderBuild_ReusesFreshPersistedGraphForDefaultBuild(t *testing.T) {
 	}
 	if err := export.WriteJSONAtomic(graph, outDir); err != nil {
 		t.Fatalf("WriteJSONAtomic() error = %v", err)
+	}
+	manifest, err := buildManifest(repoRoot, []string{filepath.Join(repoRoot, "main.go")})
+	if err != nil {
+		t.Fatalf("buildManifest() error = %v", err)
+	}
+	manifest.GeneratedAt = time.Now().UTC()
+	if err := export.WriteManifestAtomic(manifest, outDir); err != nil {
+		t.Fatalf("WriteManifestAtomic() error = %v", err)
 	}
 
 	origRepoChange := latestRelevantRepoChange
@@ -331,8 +350,6 @@ func TestBuilderBuild_ReusesFreshPersistedGraphForDefaultBuild(t *testing.T) {
 }
 
 func TestBuilderBuild_SkipsCacheWhenExecutableIsNewer(t *testing.T) {
-	t.Parallel()
-
 	repoRoot := t.TempDir()
 	outDir := filepath.Join(repoRoot, ".vela")
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
@@ -343,6 +360,14 @@ func TestBuilderBuild_SkipsCacheWhenExecutableIsNewer(t *testing.T) {
 	}
 	if err := export.WriteJSONAtomic(&types.Graph{}, outDir); err != nil {
 		t.Fatalf("WriteJSONAtomic() error = %v", err)
+	}
+	manifest, err := buildManifest(repoRoot, []string{filepath.Join(repoRoot, "main.go")})
+	if err != nil {
+		t.Fatalf("buildManifest() error = %v", err)
+	}
+	manifest.GeneratedAt = time.Now().UTC()
+	if err := export.WriteManifestAtomic(manifest, outDir); err != nil {
+		t.Fatalf("WriteManifestAtomic() error = %v", err)
 	}
 
 	origRepoChange := latestRelevantRepoChange
@@ -363,12 +388,243 @@ func TestBuilderBuild_SkipsCacheWhenExecutableIsNewer(t *testing.T) {
 		OutDir:       outDir,
 	})
 
-	_, err := builder.Build(context.Background(), types.BuildRequest{RepoRoot: repoRoot})
+	_, err = builder.Build(context.Background(), types.BuildRequest{RepoRoot: repoRoot})
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
 	if scanner.gotRoot != repoRoot {
 		t.Fatal("expected full rebuild when executable is newer than cached graph")
+	}
+}
+
+func TestBuilderBuild_FallsBackToFullRebuildWhenManifestMissing(t *testing.T) {
+	repoRoot := t.TempDir()
+	outDir := filepath.Join(repoRoot, ".vela")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, "main.go"), []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(main.go) error = %v", err)
+	}
+	if err := export.WriteJSONAtomic(&types.Graph{}, outDir); err != nil {
+		t.Fatalf("WriteJSONAtomic() error = %v", err)
+	}
+
+	origRepoChange := latestRelevantRepoChange
+	origExeChange := currentExecutableChange
+	t.Cleanup(func() {
+		latestRelevantRepoChange = origRepoChange
+		currentExecutableChange = origExeChange
+	})
+	latestRelevantRepoChange = func(string) (time.Time, error) { return time.Time{}, nil }
+	currentExecutableChange = func() (time.Time, error) { return time.Time{}, nil }
+
+	scanner := &fakeScanner{nodes: []types.Node{{ID: "svc", Label: "svc", NodeType: "function"}}}
+	builder := NewBuilder(Config{
+		Detect:       func(string) ([]string, error) { return []string{filepath.Join(repoRoot, "main.go")}, nil },
+		Scanner:      scanner,
+		GraphBuilder: igraph.Build,
+		Persist:      func(*types.Graph, string) error { return nil },
+		OutDir:       outDir,
+	})
+
+	_, err := builder.Build(context.Background(), types.BuildRequest{RepoRoot: repoRoot})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if scanner.gotRoot != repoRoot {
+		t.Fatal("expected full rebuild when manifest is missing")
+	}
+}
+
+func TestBuilderBuild_FallsBackToFullRebuildWhenManifestHashChanges(t *testing.T) {
+	repoRoot := t.TempDir()
+	outDir := filepath.Join(repoRoot, ".vela")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	mainFile := filepath.Join(repoRoot, "main.go")
+	if err := os.WriteFile(mainFile, []byte("package main\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(main.go) error = %v", err)
+	}
+	if err := export.WriteJSONAtomic(&types.Graph{}, outDir); err != nil {
+		t.Fatalf("WriteJSONAtomic() error = %v", err)
+	}
+	manifest, err := buildManifest(repoRoot, []string{mainFile})
+	if err != nil {
+		t.Fatalf("buildManifest() error = %v", err)
+	}
+	manifest.GeneratedAt = time.Now().UTC()
+	if err := export.WriteManifestAtomic(manifest, outDir); err != nil {
+		t.Fatalf("WriteManifestAtomic() error = %v", err)
+	}
+	if err := os.WriteFile(mainFile, []byte("package main\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(main.go updated) error = %v", err)
+	}
+
+	origRepoChange := latestRelevantRepoChange
+	origExeChange := currentExecutableChange
+	t.Cleanup(func() {
+		latestRelevantRepoChange = origRepoChange
+		currentExecutableChange = origExeChange
+	})
+	latestRelevantRepoChange = func(string) (time.Time, error) { return time.Time{}, nil }
+	currentExecutableChange = func() (time.Time, error) { return time.Time{}, nil }
+
+	scanner := &fakeScanner{nodes: []types.Node{{ID: "svc", Label: "svc", NodeType: "function"}}}
+	builder := NewBuilder(Config{
+		Detect:       func(string) ([]string, error) { return []string{mainFile}, nil },
+		Scanner:      scanner,
+		GraphBuilder: igraph.Build,
+		Persist:      func(*types.Graph, string) error { return nil },
+		OutDir:       outDir,
+	})
+
+	_, err = builder.Build(context.Background(), types.BuildRequest{RepoRoot: repoRoot})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if scanner.gotRoot != repoRoot {
+		t.Fatal("expected full rebuild when manifest hash no longer matches current file")
+	}
+}
+
+func TestManifestReuseMode_ClassifiesDeletedOnlyDiff(t *testing.T) {
+	saved := &types.Manifest{
+		Version:              manifestVersion,
+		ExtractorFingerprint: extractorFingerprint,
+		Files: []types.ManifestFile{
+			{Path: "cmd/vela/main.go", SHA256: "a"},
+			{Path: "internal/query/query.go", SHA256: "b"},
+		},
+	}
+	current := &types.Manifest{
+		Version:              manifestVersion,
+		ExtractorFingerprint: extractorFingerprint,
+		Files: []types.ManifestFile{
+			{Path: "cmd/vela/main.go", SHA256: "a"},
+		},
+	}
+
+	mode, diff := manifestReuseMode(saved, current)
+	if mode != cacheReuseDeletedOnly {
+		t.Fatalf("reuse mode = %q, want %q", mode, cacheReuseDeletedOnly)
+	}
+	if len(diff.DeletedFiles) != 1 || diff.DeletedFiles[0].Path != "internal/query/query.go" {
+		t.Fatalf("deleted files = %+v", diff.DeletedFiles)
+	}
+	if len(diff.NewFiles) != 0 || len(diff.ChangedFiles) != 0 {
+		t.Fatalf("unexpected manifest diff = %+v", diff)
+	}
+}
+
+func TestPruneGraphForDeletedFiles_RemovesOwnedNodesAndEdges(t *testing.T) {
+	g := &types.Graph{
+		Nodes: []types.Node{
+			{ID: "repo:file:cmd/vela/main.go", Label: "cmd/vela/main.go", NodeType: string(types.NodeTypeFile), SourceFile: "cmd/vela/main.go"},
+			{ID: "repo:cmd/vela/main.go:main", Label: "main", NodeType: string(types.NodeTypeFunction), SourceFile: "cmd/vela/main.go"},
+			{ID: "repo:file:internal/query/query.go", Label: "internal/query/query.go", NodeType: string(types.NodeTypeFile), SourceFile: "internal/query/query.go"},
+			{ID: "repo:internal/query/query.go:Search", Label: "Search", NodeType: string(types.NodeTypeFunction), SourceFile: "internal/query/query.go"},
+		},
+		Edges: []types.Edge{
+			{Source: "repo:cmd/vela/main.go:main", Target: "repo:internal/query/query.go:Search", Relation: string(types.FactKindCalls), SourceFile: "cmd/vela/main.go"},
+			{Source: "repo:internal/query/query.go:Search", Target: "repo:file:internal/query/query.go", Relation: string(types.FactKindContains), SourceFile: "internal/query/query.go"},
+		},
+	}
+
+	pruned := pruneGraphForDeletedFiles(g, []string{"internal/query/query.go"})
+	if len(pruned.Nodes) != 2 {
+		t.Fatalf("pruned nodes = %d, want 2", len(pruned.Nodes))
+	}
+	for _, node := range pruned.Nodes {
+		if strings.Contains(node.ID, "internal/query/query.go") || node.SourceFile == "internal/query/query.go" {
+			t.Fatalf("unexpected node retained after prune: %+v", node)
+		}
+	}
+	if len(pruned.Edges) != 0 {
+		t.Fatalf("pruned edges = %d, want 0", len(pruned.Edges))
+	}
+}
+
+func TestBuilderBuild_PrunesDeletedFilesFromCachedGraph(t *testing.T) {
+	repoRoot := t.TempDir()
+	outDir := filepath.Join(repoRoot, ".vela")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	mainFile := filepath.Join(repoRoot, "main.go")
+	deletedFile := filepath.Join(repoRoot, "old.go")
+	writeTestFile(t, mainFile, "package main\n")
+	writeTestFile(t, deletedFile, "package main\nfunc old() {}\n")
+	graph := &types.Graph{
+		Nodes: []types.Node{
+			{ID: "repo:file:main.go", Label: "main.go", NodeType: string(types.NodeTypeFile), SourceFile: "main.go"},
+			{ID: "repo:main.go:main", Label: "main", NodeType: string(types.NodeTypeFunction), SourceFile: "main.go"},
+			{ID: "repo:file:old.go", Label: "old.go", NodeType: string(types.NodeTypeFile), SourceFile: "old.go"},
+			{ID: "repo:old.go:old", Label: "old", NodeType: string(types.NodeTypeFunction), SourceFile: "old.go"},
+		},
+		Edges: []types.Edge{{Source: "repo:main.go:main", Target: "repo:old.go:old", Relation: string(types.FactKindCalls), SourceFile: "main.go"}},
+	}
+	if err := export.WriteJSONAtomic(graph, outDir); err != nil {
+		t.Fatalf("WriteJSONAtomic() error = %v", err)
+	}
+	savedManifest, err := buildManifest(repoRoot, []string{mainFile, deletedFile})
+	if err != nil {
+		t.Fatalf("buildManifest(saved) error = %v", err)
+	}
+	savedManifest.GeneratedAt = time.Now().UTC()
+	if err := export.WriteManifestAtomic(savedManifest, outDir); err != nil {
+		t.Fatalf("WriteManifestAtomic() error = %v", err)
+	}
+	if err := os.Remove(deletedFile); err != nil {
+		t.Fatalf("Remove(old.go) error = %v", err)
+	}
+
+	origRepoChange := latestRelevantRepoChange
+	origExeChange := currentExecutableChange
+	t.Cleanup(func() {
+		latestRelevantRepoChange = origRepoChange
+		currentExecutableChange = origExeChange
+	})
+	latestRelevantRepoChange = func(string) (time.Time, error) { return time.Time{}, nil }
+	currentExecutableChange = func() (time.Time, error) { return time.Time{}, nil }
+
+	builder := NewBuilder(Config{
+		Detect:       func(string) ([]string, error) { return []string{mainFile}, nil },
+		Scanner:      &fakeScanner{nodes: []types.Node{{ID: "should-not-run", Label: "should-not-run", NodeType: "function"}}},
+		GraphBuilder: igraph.Build,
+		Persist:      export.WriteJSONAtomic,
+		OutDir:       outDir,
+	})
+
+	result, err := builder.Build(context.Background(), types.BuildRequest{RepoRoot: repoRoot})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if len(result.Graph.Nodes) != 2 {
+		t.Fatalf("result graph nodes = %d, want 2 after deleted-file prune", len(result.Graph.Nodes))
+	}
+	for _, node := range result.Graph.Nodes {
+		if node.SourceFile == "old.go" || strings.Contains(node.ID, "old.go") {
+			t.Fatalf("deleted-file node retained in result: %+v", node)
+		}
+	}
+	if len(result.Graph.Edges) != 0 {
+		t.Fatalf("result graph edges = %d, want 0 after prune", len(result.Graph.Edges))
+	}
+	reloaded, err := export.LoadJSON(filepath.Join(outDir, "graph.json"))
+	if err != nil {
+		t.Fatalf("LoadJSON() error = %v", err)
+	}
+	if len(reloaded.Nodes) != 2 {
+		t.Fatalf("reloaded graph nodes = %d, want 2 after persisted prune", len(reloaded.Nodes))
+	}
+	reloadedManifest, err := export.LoadManifest(filepath.Join(outDir, "manifest.json"))
+	if err != nil {
+		t.Fatalf("LoadManifest() error = %v", err)
+	}
+	if len(reloadedManifest.Files) != 1 || reloadedManifest.Files[0].Path != "main.go" {
+		t.Fatalf("persisted manifest files = %+v", reloadedManifest.Files)
 	}
 }
 
@@ -394,6 +650,7 @@ func TestBuilderBuild_FailsWhenNamedPatcherMissing(t *testing.T) {
 
 func TestBuilderBuild_EmitsObserverStageEvents(t *testing.T) {
 	repoRoot := t.TempDir()
+	writeTestFile(t, filepath.Join(repoRoot, "main.go"), "package main\n")
 	var events []StageEvent
 	builder := NewBuilder(Config{
 		Detect:       func(string) ([]string, error) { return []string{filepath.Join(repoRoot, "main.go")}, nil },
@@ -431,6 +688,7 @@ func TestBuilderBuild_EmitsObserverStageEvents(t *testing.T) {
 
 func TestBuilderBuild_WarnsAndContinuesWhenDriverBinaryMissing(t *testing.T) {
 	repoRoot := t.TempDir()
+	writeTestFile(t, filepath.Join(repoRoot, "index.ts"), "export const value = 1;\n")
 	driver := &fakeDriver{
 		name:      "scip-typescript",
 		language:  "typescript",
@@ -467,6 +725,7 @@ func TestBuilderBuild_WarnsAndContinuesWhenDriverBinaryMissing(t *testing.T) {
 
 func TestBuilderBuild_WarnsAndContinuesWhenDriverExecutionFails(t *testing.T) {
 	repoRoot := t.TempDir()
+	writeTestFile(t, filepath.Join(repoRoot, "main.go"), "package main\n")
 	driver := &fakeDriver{
 		name:      "scip-go",
 		language:  "go",
@@ -506,6 +765,7 @@ func TestBuilderBuild_WarnsAndContinuesWhenDriverExecutionFails(t *testing.T) {
 
 func TestBuilderBuild_WarnsAndContinuesWhenClusteringFails(t *testing.T) {
 	repoRoot := t.TempDir()
+	writeTestFile(t, filepath.Join(repoRoot, "main.go"), "package main\n")
 	clusterer := &fakeClusterer{err: igraph.ErrGraspologicMissing}
 	builder := NewBuilder(Config{
 		Detect:       func(string) ([]string, error) { return []string{filepath.Join(repoRoot, "main.go")}, nil },

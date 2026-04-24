@@ -12,6 +12,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/Syfra3/vela/internal/config"
+	"github.com/Syfra3/vela/internal/hooks"
+	"github.com/Syfra3/vela/internal/registry"
 )
 
 type uninstallState int
@@ -27,12 +29,18 @@ type uninstallResult struct {
 	Warnings []string
 }
 
+type uninstallPlan struct {
+	Targets []string
+	Repos   []string
+}
+
 type uninstallResultMsg struct {
 	result uninstallResult
 	err    error
 }
 
 var uninstallTargetsFunc = uninstallTargets
+var uninstallTrackedReposFunc = uninstallTrackedRepos
 
 type UninstallModel struct {
 	state    uninstallState
@@ -43,8 +51,14 @@ type UninstallModel struct {
 }
 
 func NewUninstallModel() UninstallModel {
-	targets, _ := uninstallTargetsFunc()
-	return UninstallModel{targets: targets}
+	plan := uninstallPlan{}
+	plan.Targets, _ = uninstallTargetsFunc()
+	plan.Repos, _ = uninstallTrackedReposFunc()
+	targets := append([]string(nil), plan.Targets...)
+	for _, repo := range plan.Repos {
+		targets = append(targets, filepath.Join(repo, ".vela"))
+	}
+	return UninstallModel{targets: uniqueSortedPaths(targets)}
 }
 
 func (m UninstallModel) Init() tea.Cmd { return nil }
@@ -93,7 +107,7 @@ func (m UninstallModel) ViewContent() string {
 
 	switch m.state {
 	case uninstallStateConfirm:
-		b.WriteString(warnStyle.Render("This purges Vela-managed graph, cache, and export data."))
+		b.WriteString(warnStyle.Render("This purges Vela-managed graph, cache, export, and tracked local repo data."))
 		b.WriteString("\n")
 		b.WriteString(textStyle.Render("It deletes only Vela-managed paths:"))
 		b.WriteString("\n\n")
@@ -102,7 +116,7 @@ func (m UninstallModel) ViewContent() string {
 			b.WriteString("\n")
 		}
 		b.WriteString("\n")
-		b.WriteString(mutedStyle.Render("Source repositories are not deleted. Custom files outside these paths are left alone."))
+		b.WriteString(mutedStyle.Render("Source repositories are not deleted. Tracked repo .vela data and managed git hooks are removed."))
 	case uninstallStateRunning:
 		b.WriteString(textStyle.Render("Purging Vela-managed data..."))
 	case uninstallStateDone:
@@ -159,6 +173,28 @@ func uninstallAll() (uninstallResult, error) {
 		return uninstallResult{}, err
 	}
 	result := uninstallResult{}
+	repos, err := uninstallTrackedReposFunc()
+	if err != nil {
+		return result, err
+	}
+	for _, repo := range repos {
+		if strings.TrimSpace(repo) == "" {
+			continue
+		}
+		if err := hooks.Uninstall(repo); err != nil {
+			result.Warnings = append(result.Warnings, fmt.Sprintf("remove hooks %s: %v", repo, err))
+		}
+		localData := filepath.Join(repo, ".vela")
+		if _, err := os.Stat(localData); os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return result, fmt.Errorf("checking %s: %w", localData, err)
+		}
+		if err := os.RemoveAll(localData); err != nil {
+			return result, fmt.Errorf("removing %s: %w", localData, err)
+		}
+		result.Removed = append(result.Removed, localData)
+	}
 	for _, target := range targets {
 		if _, err := os.Stat(target); os.IsNotExist(err) {
 			continue
@@ -187,6 +223,20 @@ func uninstallTargets() ([]string, error) {
 		}
 	}
 	return uniqueSortedPaths(targets), nil
+}
+
+func uninstallTrackedRepos() ([]string, error) {
+	entries, err := registry.Load()
+	if err != nil {
+		return nil, err
+	}
+	repos := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.RepoRoot) != "" {
+			repos = append(repos, entry.RepoRoot)
+		}
+	}
+	return uniqueSortedPaths(repos), nil
 }
 
 func uniqueSortedPaths(paths []string) []string {

@@ -2,11 +2,14 @@ package pipeline
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -21,6 +24,14 @@ import (
 var ErrUnknownPatcher = errors.New("unknown pipeline patcher")
 
 var codeExtensions = []string{".go", ".py", ".ts", ".tsx", ".js", ".jsx"}
+
+const manifestVersion = 1
+const extractorFingerprint = "pipeline-build-v1"
+
+const (
+	buildModeFullRebuild = "full_rebuild"
+	buildModeDeletedOnly = "deleted_only_prune"
+)
 
 var latestRelevantRepoChange = latestRelevantRepoModTime
 var currentExecutableChange = executableModTime
@@ -54,6 +65,21 @@ type Result struct {
 	DetectedFiles []string
 	GraphPath     string
 	StageReports  []StageReport
+}
+
+type cacheReuseMode string
+
+const (
+	cacheReuseNone        cacheReuseMode = ""
+	cacheReuseUnchanged   cacheReuseMode = "unchanged"
+	cacheReuseDeletedOnly cacheReuseMode = "deleted_only"
+)
+
+type manifestDiff struct {
+	NewFiles       []types.ManifestFile
+	ChangedFiles   []types.ManifestFile
+	UnchangedFiles []types.ManifestFile
+	DeletedFiles   []types.ManifestFile
 }
 
 type Config struct {
@@ -129,12 +155,6 @@ func (b *Builder) Build(ctx context.Context, req types.BuildRequest) (Result, er
 	if strings.TrimSpace(outDir) == "" {
 		outDir = filepath.Join(req.RepoRoot, ".vela")
 	}
-	if cached, ok, err := loadCachedResult(req, outDir); err != nil {
-		return Result{}, fmt.Errorf("cache check: %w", err)
-	} else if ok {
-		b.emit(types.BuildStagePersist, len(cached.Graph.Edges), "reused cached graph")
-		return cached, nil
-	}
 
 	source := extract.DetectProject(req.RepoRoot)
 	b.emit(types.BuildStageDetect, 0, "starting detect stage")
@@ -144,6 +164,29 @@ func (b *Builder) Build(ctx context.Context, req types.BuildRequest) (Result, er
 	}
 	files = filterCodeFiles(files)
 	b.emit(types.BuildStageDetect, len(files), "detected source files")
+	manifest, err := buildManifest(req.RepoRoot, files)
+	if err != nil {
+		return Result{}, fmt.Errorf("manifest stage: %w", err)
+	}
+	if cached, mode, ok, err := loadCachedResult(req, outDir, manifest); err != nil {
+		return Result{}, fmt.Errorf("cache check: %w", err)
+	} else if ok {
+		if cached.GraphPath != "" && len(cached.DetectedFiles) == 0 {
+			cached.DetectedFiles = manifestPaths(manifest.Files)
+		}
+		b.emit(types.BuildStagePersist, len(cached.Graph.Edges), "reused cached graph")
+		if mode == cacheReuseDeletedOnly && cached.Graph != nil && cached.GraphPath != "" {
+			if err := b.persist(cached.Graph, outDir); err != nil {
+				return Result{}, fmt.Errorf("persist stage: %w", err)
+			}
+			manifest.GeneratedAt = time.Now().UTC()
+			manifest.BuildMode = buildModeDeletedOnly
+			if err := export.WriteManifestAtomic(manifest, outDir); err != nil {
+				return Result{}, fmt.Errorf("persist manifest: %w", err)
+			}
+		}
+		return cached, nil
+	}
 
 	if b.registry != nil {
 		if err := b.registry.Bootstrap(ctx, req); err != nil {
@@ -192,6 +235,11 @@ func (b *Builder) Build(ctx context.Context, req types.BuildRequest) (Result, er
 	if err := b.persist(tg, outDir); err != nil {
 		return Result{}, fmt.Errorf("persist stage: %w", err)
 	}
+	manifest.GeneratedAt = time.Now().UTC()
+	manifest.BuildMode = buildModeFullRebuild
+	if err := export.WriteManifestAtomic(manifest, outDir); err != nil {
+		return Result{}, fmt.Errorf("persist manifest: %w", err)
+	}
 	b.emit(types.BuildStageMerge, len(tg.Edges), "merged graph")
 	b.emit(types.BuildStagePersist, 1, "persisted graph")
 
@@ -220,49 +268,59 @@ func clusteringWarning(err error) string {
 	return "Community detection failed: " + message
 }
 
-func loadCachedResult(req types.BuildRequest, outDir string) (Result, bool, error) {
+func loadCachedResult(req types.BuildRequest, outDir string, currentManifest *types.Manifest) (Result, cacheReuseMode, bool, error) {
 	if len(req.Languages) > 0 || len(req.Drivers) > 0 || len(req.Patchers) > 0 {
-		return Result{}, false, nil
+		return Result{}, cacheReuseNone, false, nil
+	}
+	if currentManifest == nil {
+		return Result{}, cacheReuseNone, false, nil
 	}
 	graphPath := filepath.Join(outDir, "graph.json")
 	info, err := os.Stat(graphPath)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return Result{}, false, nil
+			return Result{}, cacheReuseNone, false, nil
 		}
-		return Result{}, false, err
+		return Result{}, cacheReuseNone, false, err
 	}
 	if info.IsDir() || info.Size() == 0 {
-		return Result{}, false, nil
+		return Result{}, cacheReuseNone, false, nil
 	}
 	latestRepoChange, err := latestRelevantRepoChange(req.RepoRoot)
 	if err != nil {
-		return Result{}, false, err
+		return Result{}, cacheReuseNone, false, err
 	}
 	if !latestRepoChange.IsZero() && latestRepoChange.After(info.ModTime()) {
-		return Result{}, false, nil
+		return Result{}, cacheReuseNone, false, nil
 	}
 	exeChange, err := currentExecutableChange()
 	if err != nil {
-		return Result{}, false, err
+		return Result{}, cacheReuseNone, false, err
 	}
 	if !exeChange.IsZero() && exeChange.After(info.ModTime()) {
-		return Result{}, false, nil
+		return Result{}, cacheReuseNone, false, nil
+	}
+	manifestPath := filepath.Join(outDir, "manifest.json")
+	savedManifest, err := export.LoadManifest(manifestPath)
+	if err != nil {
+		return Result{}, cacheReuseNone, false, nil
 	}
 	g, err := export.LoadJSON(graphPath)
 	if err != nil {
-		return Result{}, false, nil
+		return Result{}, cacheReuseNone, false, nil
 	}
-	fileCount := 0
-	for _, node := range g.Nodes {
-		if node.NodeType == string(types.NodeTypeFile) {
-			fileCount++
-		}
+	mode, diff := manifestReuseMode(savedManifest, currentManifest)
+	if mode == cacheReuseNone {
+		return Result{}, cacheReuseNone, false, nil
 	}
+	if mode == cacheReuseDeletedOnly {
+		g = pruneGraphForDeletedFiles(g, manifestPaths(diff.DeletedFiles))
+	}
+	fileCount := len(currentManifest.Files)
 	return Result{
 		Graph:         g,
 		GraphPath:     graphPath,
-		DetectedFiles: make([]string, 0, fileCount),
+		DetectedFiles: manifestPaths(currentManifest.Files),
 		StageReports: []StageReport{
 			{Stage: types.BuildStageDetect, Count: fileCount},
 			{Stage: types.BuildStageScan, Count: len(g.Nodes)},
@@ -271,7 +329,226 @@ func loadCachedResult(req types.BuildRequest, outDir string) (Result, bool, erro
 			{Stage: types.BuildStageMerge, Count: len(g.Edges)},
 			{Stage: types.BuildStagePersist, Count: 1},
 		},
-	}, true, nil
+	}, mode, true, nil
+}
+
+func buildManifest(repoRoot string, files []string) (*types.Manifest, error) {
+	entries := make([]types.ManifestFile, 0, len(files))
+	for _, file := range files {
+		rel, err := filepath.Rel(repoRoot, file)
+		if err != nil {
+			return nil, fmt.Errorf("relative path for %s: %w", file, err)
+		}
+		info, err := os.Stat(file)
+		if err != nil {
+			return nil, fmt.Errorf("stat %s: %w", file, err)
+		}
+		if info.IsDir() {
+			continue
+		}
+		hash, err := fileSHA256(file)
+		if err != nil {
+			return nil, fmt.Errorf("hash %s: %w", file, err)
+		}
+		entries = append(entries, types.ManifestFile{
+			Path:       filepath.ToSlash(rel),
+			SHA256:     hash,
+			Size:       info.Size(),
+			ModTimeUTC: info.ModTime().UTC(),
+			Language:   languageForFile(file),
+			Status:     "active",
+		})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Path < entries[j].Path
+	})
+	return &types.Manifest{
+		Version:              manifestVersion,
+		RepoRoot:             filepath.Clean(repoRoot),
+		ExtractorFingerprint: extractorFingerprint,
+		Files:                entries,
+	}, nil
+}
+
+func fileSHA256(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func languageForFile(path string) string {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".go":
+		return "go"
+	case ".py":
+		return "python"
+	case ".ts":
+		return "typescript"
+	case ".tsx":
+		return "tsx"
+	case ".js":
+		return "javascript"
+	case ".jsx":
+		return "jsx"
+	default:
+		return strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
+	}
+}
+
+func manifestReuseMode(saved, current *types.Manifest) (cacheReuseMode, manifestDiff) {
+	diff := diffManifest(saved, current)
+	if saved == nil || current == nil {
+		return cacheReuseNone, diff
+	}
+	if saved.Version != current.Version || saved.ExtractorFingerprint != current.ExtractorFingerprint {
+		return cacheReuseNone, diff
+	}
+	if len(diff.NewFiles) == 0 && len(diff.ChangedFiles) == 0 && len(diff.DeletedFiles) == 0 {
+		return cacheReuseUnchanged, diff
+	}
+	if len(diff.NewFiles) == 0 && len(diff.ChangedFiles) == 0 && len(diff.DeletedFiles) > 0 {
+		return cacheReuseDeletedOnly, diff
+	}
+	return cacheReuseNone, diff
+}
+
+func diffManifest(saved, current *types.Manifest) manifestDiff {
+	var diff manifestDiff
+	if saved == nil || current == nil {
+		return diff
+	}
+	savedByPath := make(map[string]types.ManifestFile, len(saved.Files))
+	for _, file := range saved.Files {
+		savedByPath[file.Path] = file
+	}
+	currentByPath := make(map[string]types.ManifestFile, len(current.Files))
+	for _, file := range current.Files {
+		currentByPath[file.Path] = file
+		if previous, ok := savedByPath[file.Path]; !ok {
+			diff.NewFiles = append(diff.NewFiles, file)
+		} else if previous.SHA256 != file.SHA256 {
+			diff.ChangedFiles = append(diff.ChangedFiles, file)
+		} else {
+			diff.UnchangedFiles = append(diff.UnchangedFiles, file)
+		}
+	}
+	for _, file := range saved.Files {
+		if _, ok := currentByPath[file.Path]; !ok {
+			diff.DeletedFiles = append(diff.DeletedFiles, file)
+		}
+	}
+	sortManifestFiles(diff.NewFiles)
+	sortManifestFiles(diff.ChangedFiles)
+	sortManifestFiles(diff.UnchangedFiles)
+	sortManifestFiles(diff.DeletedFiles)
+	return diff
+}
+
+func sortManifestFiles(files []types.ManifestFile) {
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].Path < files[j].Path
+	})
+}
+
+func manifestPaths(files []types.ManifestFile) []string {
+	paths := make([]string, 0, len(files))
+	for _, file := range files {
+		paths = append(paths, file.Path)
+	}
+	return paths
+}
+
+func pruneGraphForDeletedFiles(g *types.Graph, deletedPaths []string) *types.Graph {
+	if g == nil || len(deletedPaths) == 0 {
+		return g
+	}
+	deleted := make(map[string]struct{}, len(deletedPaths))
+	for _, path := range deletedPaths {
+		deleted[normalizeGraphPath(path)] = struct{}{}
+	}
+	keptNodes := make([]types.Node, 0, len(g.Nodes))
+	removedNodeIDs := make(map[string]struct{})
+	for _, node := range g.Nodes {
+		if nodeOwnedByDeletedFile(node, deleted) {
+			removedNodeIDs[node.ID] = struct{}{}
+			continue
+		}
+		keptNodes = append(keptNodes, node)
+	}
+	keptEdges := make([]types.Edge, 0, len(g.Edges))
+	for _, edge := range g.Edges {
+		if edgeOwnedByDeletedFile(edge, deleted) {
+			continue
+		}
+		if _, removed := removedNodeIDs[edge.Source]; removed {
+			continue
+		}
+		if _, removed := removedNodeIDs[edge.Target]; removed {
+			continue
+		}
+		keptEdges = append(keptEdges, edge)
+	}
+	clonedMetadata := map[string]interface{}{}
+	for k, v := range g.Metadata {
+		clonedMetadata[k] = v
+	}
+	return &types.Graph{
+		Nodes:       keptNodes,
+		Edges:       keptEdges,
+		Communities: g.Communities,
+		Metadata:    clonedMetadata,
+		ExtractedAt: g.ExtractedAt,
+	}
+}
+
+func nodeOwnedByDeletedFile(node types.Node, deleted map[string]struct{}) bool {
+	for _, candidate := range nodeFileCandidates(node) {
+		if _, ok := deleted[candidate]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+func edgeOwnedByDeletedFile(edge types.Edge, deleted map[string]struct{}) bool {
+	if edge.SourceFile == "" {
+		return false
+	}
+	_, ok := deleted[normalizeGraphPath(edge.SourceFile)]
+	return ok
+}
+
+func nodeFileCandidates(node types.Node) []string {
+	seen := map[string]struct{}{}
+	add := func(raw string, out *[]string) {
+		raw = normalizeGraphPath(raw)
+		if raw == "" {
+			return
+		}
+		if _, ok := seen[raw]; ok {
+			return
+		}
+		seen[raw] = struct{}{}
+		*out = append(*out, raw)
+	}
+	var candidates []string
+	add(node.SourceFile, &candidates)
+	if node.NodeType == string(types.NodeTypeFile) {
+		add(node.Label, &candidates)
+		if idx := strings.Index(node.ID, ":file:"); idx >= 0 {
+			add(node.ID[idx+len(":file:"):], &candidates)
+		}
+	}
+	return candidates
+}
+
+func normalizeGraphPath(path string) string {
+	path = filepath.ToSlash(strings.TrimSpace(path))
+	path = strings.TrimPrefix(path, "./")
+	return path
 }
 
 func latestRelevantRepoModTime(repoRoot string) (time.Time, error) {

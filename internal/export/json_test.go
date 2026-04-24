@@ -21,10 +21,12 @@ func TestWriteJSON(t *testing.T) {
 				Description: "primary entrypoint",
 				Metadata:    map[string]interface{}{"path": "/tmp/project", "remote": "https://github.com/Syfra3/vela.git"},
 				Source: &types.Source{
-					Type:   types.SourceTypeCodebase,
-					Name:   "vela",
-					Path:   "/tmp/project",
-					Remote: "https://github.com/Syfra3/vela.git",
+					Type:         types.SourceTypeCodebase,
+					ID:           "github.com/Syfra3/vela",
+					Name:         "vela",
+					Organization: "Syfra3",
+					Path:         "/tmp/project",
+					Remote:       "https://github.com/Syfra3/vela.git",
 				},
 			},
 			{ID: "b", Label: "B", NodeType: "struct", SourceFile: "main.go"},
@@ -66,6 +68,12 @@ func TestWriteJSON(t *testing.T) {
 	}
 	if parsed.Nodes[0].SourceRemote != "https://github.com/Syfra3/vela.git" {
 		t.Fatalf("node source_remote = %q", parsed.Nodes[0].SourceRemote)
+	}
+	if parsed.Nodes[0].SourceID != "github.com/Syfra3/vela" {
+		t.Fatalf("node source_id = %q", parsed.Nodes[0].SourceID)
+	}
+	if parsed.Nodes[0].SourceOrg != "Syfra3" {
+		t.Fatalf("node source_organization = %q", parsed.Nodes[0].SourceOrg)
 	}
 	if parsed.Nodes[0].Description != "primary entrypoint" {
 		t.Fatalf("node description = %q", parsed.Nodes[0].Description)
@@ -117,10 +125,12 @@ func TestLoadJSON_RoundTripsExportFormat(t *testing.T) {
 				Community:   7,
 				Metadata:    map[string]interface{}{"role": "root"},
 				Source: &types.Source{
-					Type:   types.SourceTypeCodebase,
-					Name:   "vela",
-					Path:   "/work/vela",
-					Remote: "https://github.com/Syfra3/vela.git",
+					Type:         types.SourceTypeCodebase,
+					ID:           "github.com/Syfra3/vela",
+					Name:         "vela",
+					Organization: "Syfra3",
+					Path:         "/work/vela",
+					Remote:       "https://github.com/Syfra3/vela.git",
 				},
 			},
 			{
@@ -167,6 +177,12 @@ func TestLoadJSON_RoundTripsExportFormat(t *testing.T) {
 	}
 	if loaded.Nodes[0].Source == nil || loaded.Nodes[0].Source.Path != "/work/vela" {
 		t.Fatalf("loaded source path = %#v", loaded.Nodes[0].Source)
+	}
+	if loaded.Nodes[0].Source.ID != "github.com/Syfra3/vela" {
+		t.Fatalf("loaded source ID = %q", loaded.Nodes[0].Source.ID)
+	}
+	if loaded.Nodes[0].Source.Organization != "Syfra3" {
+		t.Fatalf("loaded source organization = %q", loaded.Nodes[0].Source.Organization)
 	}
 	if len(loaded.Edges) != 1 {
 		t.Fatalf("loaded edge count = %d, want 1", len(loaded.Edges))

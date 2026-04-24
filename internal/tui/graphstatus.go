@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 
 	"github.com/Syfra3/vela/internal/config"
 	igraph "github.com/Syfra3/vela/internal/graph"
+	"github.com/Syfra3/vela/internal/registry"
 )
 
 // ---------------------------------------------------------------------------
@@ -32,15 +34,23 @@ type vaultStats struct {
 // ---------------------------------------------------------------------------
 
 type graphStatusLoadedMsg struct {
-	metrics igraph.HealthMetrics
-	vault   vaultStats
-	loadErr error
+	snapshot igraph.StatusSnapshot
+	registry igraph.RegistryStatusSnapshot
+	vault    vaultStats
+	loadErr  error
+	global   bool
+	repoName string
 }
 
 type GraphStatusModel struct {
 	graphPath    string
+	global       bool
+	repoName     string
 	metrics      igraph.HealthMetrics
 	vault        vaultStats
+	fresh        igraph.FreshnessStats
+	projects     []igraph.ProjectStatus
+	registryData igraph.RegistryStatusSnapshot
 	loadErr      error
 	loading      bool
 	quitting     bool
@@ -50,7 +60,7 @@ type GraphStatusModel struct {
 }
 
 func NewGraphStatusModel() GraphStatusModel {
-	return GraphStatusModel{loading: true, termWidth: 100, termHeight: 24}
+	return GraphStatusModel{loading: true, global: true, termWidth: 100, termHeight: 24}
 }
 
 func NewGraphStatusModelWithGraphPath(graphPath string) GraphStatusModel {
@@ -66,6 +76,15 @@ func (m GraphStatusModel) Init() tea.Cmd {
 func loadMetricsCmd(graphPath string) tea.Cmd {
 	return func() tea.Msg {
 		resolvedGraphPath := graphPath
+		entries, registryErr := registry.Load()
+		if strings.TrimSpace(resolvedGraphPath) == "" && registryErr == nil && len(entries) > 0 {
+			cfg, cfgErr := config.Load()
+			if cfgErr != nil {
+				return graphStatusLoadedMsg{global: true, loadErr: cfgErr}
+			}
+			vs := loadVaultStats(filepath.Join(config.ResolveVaultDir(cfg.Obsidian.VaultDir), "obsidian"))
+			return graphStatusLoadedMsg{registry: igraph.LoadRegistryStatusSnapshot(entries, 5), vault: vs, global: true}
+		}
 		if strings.TrimSpace(resolvedGraphPath) == "" {
 			var err error
 			resolvedGraphPath, err = config.FindGraphFile(".")
@@ -73,13 +92,13 @@ func loadMetricsCmd(graphPath string) tea.Cmd {
 				return graphStatusLoadedMsg{loadErr: err}
 			}
 		}
-		mx, loadErr := igraph.LoadHealthMetrics(resolvedGraphPath, 5)
+		snapshot, loadErr := igraph.LoadStatusSnapshot(resolvedGraphPath, 5)
 		cfg, cfgErr := config.Load()
 		if cfgErr != nil {
-			return graphStatusLoadedMsg{metrics: mx, loadErr: cfgErr}
+			return graphStatusLoadedMsg{snapshot: snapshot, loadErr: cfgErr}
 		}
 		vs := loadVaultStats(filepath.Join(config.ResolveVaultDir(cfg.Obsidian.VaultDir), "obsidian"))
-		return graphStatusLoadedMsg{metrics: mx, vault: vs, loadErr: loadErr}
+		return graphStatusLoadedMsg{snapshot: snapshot, vault: vs, loadErr: loadErr, repoName: resolveSingleRepoName(resolvedGraphPath, entries, snapshot)}
 	}
 }
 
@@ -116,8 +135,13 @@ func loadVaultStats(vaultPath string) vaultStats {
 func (m GraphStatusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case graphStatusLoadedMsg:
-		m.metrics = msg.metrics
+		m.global = msg.global
+		m.repoName = msg.repoName
+		m.metrics = msg.snapshot.Metrics
 		m.vault = msg.vault
+		m.fresh = msg.snapshot.Freshness
+		m.projects = msg.snapshot.Projects
+		m.registryData = msg.registry
 		m.loadErr = msg.loadErr
 		m.loading = false
 		m.clampScroll()
@@ -180,6 +204,9 @@ func (m GraphStatusModel) ViewContent() string {
 }
 
 func (m GraphStatusModel) renderContent() string {
+	if m.global {
+		return m.renderGlobalContent()
+	}
 	var b strings.Builder
 
 	text := lipgloss.NewStyle().Foreground(colorText)
@@ -202,6 +229,14 @@ func (m GraphStatusModel) renderContent() string {
 
 	mx := m.metrics
 	vs := m.vault
+	fresh := m.fresh
+	projects := append([]igraph.ProjectStatus(nil), m.projects...)
+	sort.Slice(projects, func(i, j int) bool {
+		if projects[i].Name == projects[j].Name {
+			return projects[i].Path < projects[j].Path
+		}
+		return projects[i].Name < projects[j].Name
+	})
 
 	// ── Graph section ────────────────────────────────────────────────────────
 	b.WriteString(accent.Render("Graph"))
@@ -226,6 +261,52 @@ func (m GraphStatusModel) renderContent() string {
 	}
 	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Broken edges"), brokenEdgeS))
 	b.WriteString("\n")
+
+	b.WriteString(accent.Render("Freshness"))
+	b.WriteString("\n\n")
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Graph path"), dim.Render(truncateMiddle(fresh.GraphPath, 64))))
+	if !fresh.GraphUpdatedAt.IsZero() {
+		b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Graph updated"), dim.Render(fresh.GraphUpdatedAt.Format("2006-01-02 15:04 UTC"))))
+	}
+	manifestState := warn.Render("missing")
+	if fresh.ManifestPresent {
+		manifestState = ok.Render("present")
+	}
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Manifest"), manifestState))
+	if fresh.ManifestPresent {
+		if !fresh.ManifestUpdatedAt.IsZero() {
+			b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Manifest updated"), dim.Render(fresh.ManifestUpdatedAt.Format("2006-01-02 15:04 UTC"))))
+		}
+		b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Tracked files"), text.Render(fmt.Sprintf("%d", fresh.TrackedFiles))))
+		b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Last refresh mode"), renderBuildMode(fresh.BuildMode, ok, warn, dim)))
+	}
+	reportState := warn.Render("missing")
+	if fresh.ReportPresent {
+		reportState = ok.Render("present")
+	}
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("GRAPH_REPORT.md"), reportState))
+	b.WriteString("\n")
+
+	if len(projects) > 0 {
+		b.WriteString(accent.Render("Projects"))
+		b.WriteString("\n\n")
+		for _, project := range projects {
+			b.WriteString(fmt.Sprintf("  %s\n", text.Copy().Bold(true).Render(project.Name)))
+			if project.Path != "" {
+				b.WriteString(fmt.Sprintf("    %s %s\n", dim.Render("path"), dim.Render(truncateMiddle(project.Path, 72))))
+			}
+			if project.Remote != "" {
+				b.WriteString(fmt.Sprintf("    %s %s\n", dim.Render("remote"), dim.Render(truncateMiddle(project.Remote, 72))))
+			}
+			b.WriteString(fmt.Sprintf("    %s nodes:%d  files:%d  symbols:%d  outgoing edges:%d\n\n",
+				dim.Render("coverage"),
+				project.Nodes,
+				project.Files,
+				project.Symbols,
+				project.OutgoingEdges,
+			))
+		}
+	}
 
 	// ── Coverage ─────────────────────────────────────────────────────────────
 	b.WriteString(accent.Render("Coverage"))
@@ -385,6 +466,193 @@ func (m GraphStatusModel) renderContent() string {
 	return b.String()
 }
 
+func (m GraphStatusModel) renderGlobalContent() string {
+	var b strings.Builder
+	text := lipgloss.NewStyle().Foreground(colorText)
+	dim := lipgloss.NewStyle().Foreground(colorSubtext)
+	ok := lipgloss.NewStyle().Foreground(colorSuccess).Bold(true)
+	warn := lipgloss.NewStyle().Foreground(colorWarn).Bold(true)
+	errS := lipgloss.NewStyle().Foreground(colorErr).Bold(true)
+	accent := lipgloss.NewStyle().Foreground(colorAccent).Bold(true)
+	label := lipgloss.NewStyle().Foreground(colorSubtext).Width(22)
+
+	if m.loading {
+		b.WriteString(dim.Render("Loading metrics..."))
+		return b.String()
+	}
+	if m.loadErr != nil {
+		b.WriteString(errS.Render("✗ " + m.loadErr.Error()))
+		return b.String()
+	}
+	summary := m.registryData.Summary
+	b.WriteString(accent.Render("Global Summary"))
+	b.WriteString("\n\n")
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Tracked repos"), text.Render(fmt.Sprintf("%d", summary.Repositories))))
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Healthy graphs"), text.Render(fmt.Sprintf("%d", summary.HealthyGraphs))))
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Missing graphs"), renderState(summary.MissingGraphs == 0, ok, warn, errS, fmt.Sprintf("%d", summary.MissingGraphs))))
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Installed hooks"), text.Render(fmt.Sprintf("%d", summary.InstalledHooks))))
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Missing hooks"), renderState(summary.MissingHooks == 0, ok, warn, errS, fmt.Sprintf("%d", summary.MissingHooks))))
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Missing manifest"), renderState(summary.MissingManifest == 0, ok, warn, errS, fmt.Sprintf("%d", summary.MissingManifest))))
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Missing report"), renderState(summary.MissingReport == 0, ok, warn, errS, fmt.Sprintf("%d", summary.MissingReport))))
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Merged nodes"), text.Render(fmt.Sprintf("%d", summary.Nodes))))
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Merged edges"), text.Render(fmt.Sprintf("%d", summary.Edges))))
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Broken edges"), renderState(summary.BrokenEdges == 0, ok, warn, errS, fmt.Sprintf("%d", summary.BrokenEdges))))
+	if !summary.LatestGraphUTC.IsZero() {
+		b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Latest graph"), dim.Render(summary.LatestGraphUTC.Format("2006-01-02 15:04 UTC"))))
+	}
+	b.WriteString("\n")
+
+	b.WriteString(accent.Render("Repositories"))
+	b.WriteString("\n\n")
+	for _, repo := range m.registryData.Repos {
+		name := repo.Name
+		if name == "" {
+			name = filepath.Base(repo.RepoRoot)
+		}
+		b.WriteString(fmt.Sprintf("  %s\n", text.Copy().Bold(true).Render(name)))
+		if repo.RepoRoot != "" {
+			b.WriteString(fmt.Sprintf("    %s %s\n", dim.Render("path"), dim.Render(truncateMiddle(repo.RepoRoot, 72))))
+		}
+		if repo.Remote != "" {
+			b.WriteString(fmt.Sprintf("    %s %s\n", dim.Render("remote"), dim.Render(truncateMiddle(repo.Remote, 72))))
+		}
+		if repo.GraphPath != "" {
+			b.WriteString(fmt.Sprintf("    %s %s\n", dim.Render("graph"), dim.Render(truncateMiddle(repo.GraphPath, 72))))
+		}
+		if repo.ManifestPath != "" {
+			b.WriteString(fmt.Sprintf("    %s %s\n", dim.Render("manifest file"), dim.Render(truncateMiddle(repo.ManifestPath, 72))))
+		}
+		if repo.ReportPath != "" {
+			b.WriteString(fmt.Sprintf("    %s %s\n", dim.Render("report file"), dim.Render(truncateMiddle(repo.ReportPath, 72))))
+		}
+		b.WriteString(fmt.Sprintf("    %s %s\n", dim.Render("hooks"), renderHookState(repo.HookStatus, repo.HookInstalled, ok, warn, errS)))
+		b.WriteString(fmt.Sprintf("    %s %s  %s %s\n", dim.Render("manifest"), renderBinaryState(repo.Snapshot.Freshness.ManifestPresent, ok, warn), dim.Render("report"), renderBinaryState(repo.Snapshot.Freshness.ReportPresent, ok, warn)))
+		if repo.LoadError != "" {
+			b.WriteString(fmt.Sprintf("    %s %s\n\n", dim.Render("status"), errS.Render(repo.LoadError)))
+			continue
+		}
+		if !repo.Snapshot.Freshness.GraphUpdatedAt.IsZero() {
+			b.WriteString(fmt.Sprintf("    %s %s\n", dim.Render("updated"), dim.Render(repo.Snapshot.Freshness.GraphUpdatedAt.Format("2006-01-02 15:04 UTC"))))
+		}
+		b.WriteString(fmt.Sprintf("    %s nodes:%d  files:%d  symbols:%d  edges:%d  broken:%d\n\n",
+			dim.Render("coverage"),
+			repo.Snapshot.Metrics.Nodes,
+			totalProjectFiles(repo.Snapshot.Projects),
+			totalProjectSymbols(repo.Snapshot.Projects),
+			repo.Snapshot.Metrics.Edges,
+			repo.Snapshot.Metrics.BrokenEdges,
+		))
+		if len(repo.Snapshot.Projects) > 0 {
+			projects := append([]igraph.ProjectStatus(nil), repo.Snapshot.Projects...)
+			sort.Slice(projects, func(i, j int) bool {
+				if projects[i].Name == projects[j].Name {
+					return projects[i].Path < projects[j].Path
+				}
+				return projects[i].Name < projects[j].Name
+			})
+			for _, project := range projects {
+				b.WriteString(fmt.Sprintf("      %s\n", text.Render(project.Name)))
+				if project.Path != "" {
+					b.WriteString(fmt.Sprintf("        %s %s\n", dim.Render("path"), dim.Render(truncateMiddle(project.Path, 68))))
+				}
+				b.WriteString(fmt.Sprintf("        %s nodes:%d  files:%d  symbols:%d  outgoing edges:%d\n", dim.Render("project"), project.Nodes, project.Files, project.Symbols, project.OutgoingEdges))
+			}
+			b.WriteString("\n")
+		}
+	}
+	if len(m.registryData.Repos) == 0 {
+		b.WriteString(dim.Render("No tracked repositories in ~/.vela/registry.json."))
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString(accent.Render("Obsidian Vault"))
+	b.WriteString("\n\n")
+	if m.vault.Notes == 0 {
+		b.WriteString(fmt.Sprintf("  %s\n", warn.Render("No vault found — run Export to Obsidian")))
+	} else {
+		b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Notes"), text.Render(fmt.Sprintf("%d", m.vault.Notes))))
+		b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Wikilinks"), text.Render(fmt.Sprintf("%d", m.vault.Links))))
+	}
+	b.WriteString("\n")
+	return b.String()
+}
+
+func renderBuildMode(mode string, ok, warn, dim lipgloss.Style) string {
+	switch strings.TrimSpace(mode) {
+	case "full_rebuild":
+		return ok.Render("full rebuild")
+	case "deleted_only_prune":
+		return warn.Render("deleted-file prune")
+	case "":
+		return dim.Render("unknown")
+	default:
+		return dim.Render(strings.ReplaceAll(mode, "_", " "))
+	}
+}
+
+func renderBinaryState(value bool, ok, warn lipgloss.Style) string {
+	if value {
+		return ok.Render("present")
+	}
+	return warn.Render("missing")
+}
+
+func renderHookState(status string, installed bool, ok, warn, errS lipgloss.Style) string {
+	if installed {
+		return ok.Render("installed")
+	}
+	switch status {
+	case "partial":
+		return warn.Render(status)
+	case "missing", "unavailable", "path unavailable":
+		return errS.Render(status)
+	default:
+		return warn.Render(status)
+	}
+}
+
+func renderState(healthy bool, ok, warn, errS lipgloss.Style, value string) string {
+	if healthy {
+		return ok.Render(value)
+	}
+	if value == "0" {
+		return warn.Render(value)
+	}
+	return errS.Render(value)
+}
+
+func totalProjectFiles(projects []igraph.ProjectStatus) int {
+	total := 0
+	for _, project := range projects {
+		total += project.Files
+	}
+	return total
+}
+
+func totalProjectSymbols(projects []igraph.ProjectStatus) int {
+	total := 0
+	for _, project := range projects {
+		total += project.Symbols
+	}
+	return total
+}
+
+func resolveSingleRepoName(graphPath string, entries []registry.Entry, snapshot igraph.StatusSnapshot) string {
+	cleanGraphPath := strings.TrimSpace(graphPath)
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.GraphPath) == cleanGraphPath && strings.TrimSpace(entry.Name) != "" {
+			return entry.Name
+		}
+	}
+	if len(snapshot.Projects) == 1 && strings.TrimSpace(snapshot.Projects[0].Name) != "" {
+		return snapshot.Projects[0].Name
+	}
+	if cleanGraphPath != "" {
+		return filepath.Base(filepath.Dir(cleanGraphPath))
+	}
+	return ""
+}
+
 func (m GraphStatusModel) View() string { return m.ViewContent() }
 
 func (m GraphStatusModel) FooterHelp() string {
@@ -392,6 +660,16 @@ func (m GraphStatusModel) FooterHelp() string {
 		return "↑↓ scroll • pgup/pgdn page • r reload • esc back"
 	}
 	return "r refresh • esc back"
+}
+
+func (m GraphStatusModel) Subtitle() string {
+	if m.global {
+		return "Global tracked repositories"
+	}
+	if strings.TrimSpace(m.repoName) != "" {
+		return "Repository: " + m.repoName
+	}
+	return "Read-only"
 }
 
 func (m GraphStatusModel) contentWidth() int {

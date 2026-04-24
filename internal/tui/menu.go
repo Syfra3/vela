@@ -20,7 +20,6 @@ const (
 	screenMain menuScreen = iota
 	screenExtract
 	screenObsidian
-	screenQuery
 	screenGraphStatus
 	screenProjects
 	screenPurge
@@ -49,7 +48,6 @@ type MenuModel struct {
 	obsidianResult   string
 	obsidianErr      error
 	extractModel     ExtractModel
-	queryModel       QueryModel
 	graphStatusModel GraphStatusModel
 	projectsModel    ProjectsModel
 	purgeModel       UninstallModel
@@ -72,7 +70,6 @@ func (m *MenuModel) rebuildMenu() {
 		{label: "Extract", description: "Browse folders and build a graph snapshot", key: "extract"},
 		{label: "Graph Status", description: "Inspect the current graph snapshot", key: "graphstatus"},
 		{label: "Export to Obsidian", description: "Export graph.json to an Obsidian vault", key: "obsidian"},
-		{label: "Query", description: "Run dependency queries against graph.json", key: "query"},
 		{label: "Projects", description: "Inspect, refresh, or delete tracked codebases", key: "projects"},
 		{label: "Purge Data", description: "Delete Vela-managed graph, cache, and vault data", key: "purge"},
 		{label: "Quit", description: "Exit Vela", key: "quit"},
@@ -95,8 +92,6 @@ func (m MenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateExtract(msg)
 	case screenObsidian:
 		return m.updateObsidian(msg)
-	case screenQuery:
-		return m.updateQuery(msg)
 	case screenGraphStatus:
 		return m.updateGraphStatus(msg)
 	case screenProjects:
@@ -116,8 +111,6 @@ func (m MenuModel) View() string {
 		return m.viewExtract()
 	case screenObsidian:
 		return m.viewObsidian()
-	case screenQuery:
-		return m.viewQuery()
 	case screenGraphStatus:
 		return m.viewGraphStatus()
 	case screenProjects:
@@ -158,7 +151,7 @@ func (m MenuModel) handleMenuSelect() (tea.Model, tea.Cmd) {
 		return m, nil
 	case "graphstatus":
 		m.screen = screenGraphStatus
-		m.graphStatusModel = NewGraphStatusModelWithGraphPath(m.lastGraphPath)
+		m.graphStatusModel = NewGraphStatusModel()
 		return m, m.graphStatusModel.Init()
 	case "obsidian":
 		m.screen = screenObsidian
@@ -173,13 +166,11 @@ func (m MenuModel) handleMenuSelect() (tea.Model, tea.Cmd) {
 		done := make(chan obsidianExportMsg, 1)
 		startObsidianExport(m.lastGraphPath, progress, done)
 		return m, tea.Batch(waitForObsidianProgress(progress), waitForObsidianDone(done))
-	case "query":
-		m.screen = screenQuery
-		m.queryModel = NewQueryModel()
-		return m, nil
 	case "projects":
 		m.screen = screenProjects
 		m.projectsModel = NewProjectsModelWithGraphPath(m.lastGraphPath)
+		m.projectsModel.termWidth = m.termWidth
+		m.projectsModel.termHeight = m.termHeight
 		return m, m.projectsModel.Init()
 	case "purge":
 		m.screen = screenPurge
@@ -203,17 +194,6 @@ func (m MenuModel) updateExtract(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 	return m, cmd
 }
-
-func (m MenuModel) updateQuery(msg tea.Msg) (tea.Model, tea.Cmd) {
-	updated, cmd := m.queryModel.Update(msg)
-	m.queryModel = updated.(QueryModel)
-	if m.queryModel.Quitting() {
-		m.screen = screenMain
-		return m, nil
-	}
-	return m, cmd
-}
-
 func (m MenuModel) updateGraphStatus(msg tea.Msg) (tea.Model, tea.Cmd) {
 	updated, cmd := m.graphStatusModel.Update(msg)
 	m.graphStatusModel = updated.(GraphStatusModel)
@@ -227,6 +207,13 @@ func (m MenuModel) updateGraphStatus(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m MenuModel) updateProjects(msg tea.Msg) (tea.Model, tea.Cmd) {
 	updated, cmd := m.projectsModel.Update(msg)
 	m.projectsModel = updated.(ProjectsModel)
+	if graphPath, ok := m.projectsModel.ConsumeGraphStatusPath(); ok {
+		m.screen = screenGraphStatus
+		m.graphStatusModel = NewGraphStatusModelWithGraphPath(graphPath)
+		m.graphStatusModel.termWidth = m.termWidth
+		m.graphStatusModel.termHeight = m.termHeight
+		return m, m.graphStatusModel.Init()
+	}
 	if m.projectsModel.Quitting() {
 		m.screen = screenMain
 		return m, nil
@@ -267,7 +254,6 @@ func (m MenuModel) viewMain() string {
 func (m MenuModel) viewExtract() string {
 	return appStyle.Render(renderFrame("Extract", m.version, "Classic folder flow") + "\n" + m.extractModel.ViewContent() + "\n\nesc back • enter select/run\n")
 }
-
 func (m MenuModel) viewObsidian() string {
 	var b strings.Builder
 	b.WriteString(renderFrame("Export to Obsidian", m.version, "Graph visualization vault"))
@@ -294,13 +280,8 @@ func (m MenuModel) viewObsidian() string {
 	b.WriteString("\nesc back\n")
 	return appStyle.Render(b.String())
 }
-
-func (m MenuModel) viewQuery() string {
-	return appStyle.Render(renderFrame("Query", m.version, "Classic query console") + "\n" + m.queryModel.ViewContent() + "\n\nesc back • tab next field • enter run\n")
-}
-
 func (m MenuModel) viewGraphStatus() string {
-	return appStyle.Render(renderFrame("Graph Status", m.version, "Read-only") + "\n" + m.graphStatusModel.ViewContent() + "\n\n" + m.graphStatusModel.FooterHelp() + "\n")
+	return appStyle.Render(renderFrame("Graph Status", m.version, m.graphStatusModel.Subtitle()) + "\n" + m.graphStatusModel.ViewContent() + "\n\n" + m.graphStatusModel.FooterHelp() + "\n")
 }
 
 func (m MenuModel) viewProjects() string {
@@ -331,8 +312,9 @@ func renderFrame(title, version, subtitle string) string {
 }
 
 type obsidianExportMsg struct {
-	path string
-	err  error
+	path   string
+	source string
+	err    error
 }
 
 type obsidianProgressMsg struct {
@@ -350,34 +332,25 @@ func startObsidianExport(lastGraphPath string, progress chan obsidianProgressMsg
 		}
 
 		emit(1, "resolving graph path")
-		graphPath := strings.TrimSpace(lastGraphPath)
-		if graphPath == "" {
-			var err error
-			graphPath, err = config.FindGraphFile(".")
-			if err != nil {
-				done <- obsidianExportMsg{err: err}
-				return
-			}
-		}
 		emit(2, "loading graph.json")
-		graph, err := loadGraph(graphPath)
+		graph, graphSource, err := loadObsidianExportGraph(strings.TrimSpace(lastGraphPath))
 		if err != nil {
-			done <- obsidianExportMsg{err: err}
+			done <- obsidianExportMsg{source: graphSource, err: err}
 			return
 		}
 		emit(3, "loading Obsidian config")
 		cfg, err := config.Load()
 		if err != nil {
-			done <- obsidianExportMsg{err: err}
+			done <- obsidianExportMsg{source: graphSource, err: err}
 			return
 		}
 		vaultDir := config.ResolveVaultDir(cfg.Obsidian.VaultDir)
 		emit(4, "writing Obsidian vault")
 		if err := export.WriteObsidian(graph, vaultDir); err != nil {
-			done <- obsidianExportMsg{err: err}
+			done <- obsidianExportMsg{source: graphSource, err: err}
 			return
 		}
-		done <- obsidianExportMsg{path: filepath.Join(vaultDir, "obsidian")}
+		done <- obsidianExportMsg{path: filepath.Join(vaultDir, "obsidian"), source: graphSource}
 	}()
 }
 
@@ -402,8 +375,8 @@ func (m MenuModel) updateObsidian(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			m.message = ""
 			m.obsidianResult = "obsidian: " + msg.path
-		} else if strings.TrimSpace(m.lastGraphPath) != "" {
-			m.obsidianErr = fmt.Errorf("reading %s: %w", m.lastGraphPath, msg.err)
+		} else if strings.TrimSpace(msg.source) != "" {
+			m.obsidianErr = fmt.Errorf("reading %s: %w", msg.source, msg.err)
 		}
 	}
 	return m, nil

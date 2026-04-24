@@ -72,8 +72,9 @@ var (
 	}
 )
 
-// WriteObsidianConfig writes .obsidian/graph.json with colorGroups derived
-// from the graph's node types and workspace/project structure.
+// WriteObsidianConfig writes .obsidian/graph.json for the default vault at
+// outDir/obsidian using colorGroups derived from the graph's node types and
+// workspace/project structure.
 //
 // Group priority (Obsidian first-match wins):
 //  1. Memories/_root        — amber memory source root
@@ -82,18 +83,22 @@ var (
 //  4. Memories/*/personal   — rose (personal observations)
 //  5. Memories/*/           — workspace catch-all
 //  6. Projects/<name>/_index — project root (per-project color)
-//  7. Projects/<name>/      — code symbols catch-all
+//  7. Projects/<name>/       — code symbols catch-all
 //
 // Physics settings are preserved from existing graph.json if present.
 func WriteObsidianConfig(g *types.Graph, outDir string) error {
 	vaultDir := filepath.Join(outDir, "obsidian")
+	return writeObsidianConfig(g, vaultDir)
+}
+
+func writeObsidianConfig(g *types.Graph, vaultDir string) error {
 	obsidianDir := filepath.Join(vaultDir, ".obsidian")
 	if err := os.MkdirAll(obsidianDir, 0755); err != nil {
 		return err
 	}
 
 	workspaces := collectWorkspaces(g)
-	projects := collectProjects(g)
+	projects := collectProjectDirs(g)
 
 	var groups []obsidianColorGroup
 
@@ -107,7 +112,7 @@ func WriteObsidianConfig(g *types.Graph, outDir string) error {
 
 	// Per-workspace groups (work > personal > catch-all).
 	for _, ws := range workspaces {
-		safe := sanitize(ws)
+		safe := safePathComponent(ws)
 		groups = append(groups,
 			obsidianColorGroup{Query: "path:Memories/" + safe + "/work", Color: colorVisWork},
 			obsidianColorGroup{Query: "path:Memories/" + safe + "/personal", Color: colorVisPersonal},
@@ -122,22 +127,22 @@ func WriteObsidianConfig(g *types.Graph, outDir string) error {
 
 	// ── Project hierarchy ─────────────────────────────────────────────────
 	for i, proj := range projects {
-		safe := sanitize(proj)
 		projColor := projectPalette[i%len(projectPalette)]
 
 		groups = append(groups,
 			// Project root index note
-			obsidianColorGroup{Query: "path:Projects/" + safe + "/_index", Color: projColor},
+			obsidianColorGroup{Query: "path:" + proj + "/_index", Color: projColor},
 		)
 
 		// Symbol type groups within this project
 		groups = append(groups,
-			obsidianColorGroup{Query: "path:Projects/" + safe, Color: projColor},
+			obsidianColorGroup{Query: "path:" + proj, Color: projColor},
 		)
 	}
 
 	// Catch-all for all Projects
 	groups = append(groups,
+		obsidianColorGroup{Query: "path:Organizations", Color: projectPalette[0]},
 		obsidianColorGroup{Query: "path:Projects", Color: projectPalette[0]},
 	)
 
@@ -180,21 +185,12 @@ func collectWorkspaces(g *types.Graph) []string {
 	return out
 }
 
-// collectProjects returns project names in stable alphabetical order.
-func collectProjects(g *types.Graph) []string {
-	seen := make(map[string]bool)
-	for _, n := range g.Nodes {
-		if n.NodeType == string(types.NodeTypeProject) {
-			seen[n.Label] = true
-		}
-		// Also detect via Source.
-		if n.Source != nil && n.Source.Type == types.SourceTypeCodebase && n.Source.Name != "" {
-			seen[n.Source.Name] = true
-		}
-	}
-	out := make([]string, 0, len(seen))
-	for p := range seen {
-		out = append(out, p)
+// collectProjectDirs returns project note directories in stable alphabetical order.
+func collectProjectDirs(g *types.Graph) []string {
+	dirs := buildProjectNoteDirs(g)
+	out := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		out = append(out, dir)
 	}
 	sort.Strings(out)
 	return out
