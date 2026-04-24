@@ -37,6 +37,7 @@ vela-out/
 # Cache
 .cache/
 vela-cache/
+corpora/workdirs/
 
 # Python (for clustering wrapper)
 __pycache__/
