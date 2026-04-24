@@ -195,8 +195,9 @@ func TestExtractModelRunsAsyncBuild(t *testing.T) {
 	}
 
 	m := NewExtractModelWithRoot("/tmp")
+	var cmd tea.Cmd
 
-	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	m = updated.(ExtractModel)
 	if m.phase != extractPhaseBrowse {
 		t.Fatalf("phase = %v, want browse", m.phase)
@@ -205,7 +206,7 @@ func TestExtractModelRunsAsyncBuild(t *testing.T) {
 		t.Fatalf("currentDir = %q, want /tmp/repo", m.currentDir)
 	}
 
-	updated, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
 	m = updated.(ExtractModel)
 	if m.phase != extractPhaseConfirm {
 		t.Fatalf("phase after select current = %v, want confirm", m.phase)

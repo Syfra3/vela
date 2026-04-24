@@ -66,8 +66,6 @@ func TestWriteBenchSnapshotAndResolveLatest(t *testing.T) {
 }
 
 func TestPrintBenchReportIncludesProjectSection(t *testing.T) {
-	t.Parallel()
-
 	stdout := os.Stdout
 	r, w, err := os.Pipe()
 	if err != nil {

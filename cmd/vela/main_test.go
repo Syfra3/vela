@@ -15,8 +15,6 @@ import (
 )
 
 func TestRootCommandExposesReducedBuildAndQuerySurface(t *testing.T) {
-	t.Parallel()
-
 	root := rootCmd()
 	commands := map[string]bool{}
 	for _, cmd := range root.Commands() {
@@ -220,8 +218,6 @@ func TestHooksUninstallCommandRoutesThroughRemover(t *testing.T) {
 }
 
 func TestServeCommandOmitsLegacyAncoraFlag(t *testing.T) {
-	t.Parallel()
-
 	cmd := serveCmd()
 	buf := &bytes.Buffer{}
 	cmd.SetOut(buf)
