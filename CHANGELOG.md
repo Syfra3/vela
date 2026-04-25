@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.2](https://github.com/Syfra3/vela/compare/v1.7.1...v1.7.2) (2026-04-25)
+
+
+### Bug Fixes
+
+* **clustering:** make Python setup visible and reliable ([b1bf493](https://github.com/Syfra3/vela/commit/b1bf4938d57a758817406481477e53c37c016737))
+
 ## [1.7.1](https://github.com/Syfra3/vela/compare/v1.7.0...v1.7.1) (2026-04-25)
 
 
