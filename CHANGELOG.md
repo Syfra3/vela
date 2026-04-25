@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.1](https://github.com/Syfra3/vela/compare/v1.7.0...v1.7.1) (2026-04-25)
+
+
+### Bug Fixes
+
+* **ci:** configure release-please manifest workflow ([#29](https://github.com/Syfra3/vela/issues/29)) ([a6c4ca2](https://github.com/Syfra3/vela/commit/a6c4ca2b33ce55d5c943e7dc66bcd17fb4345b96))
+
 ## [1.7.0](https://github.com/Syfra3/vela/compare/v1.6.0...v1.7.0) (2026-04-20)
 
 
