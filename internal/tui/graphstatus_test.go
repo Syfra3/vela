@@ -16,6 +16,10 @@ func TestGraphStatusModelScrollsLongContent(t *testing.T) {
 	m := GraphStatusModel{
 		termWidth:  100,
 		termHeight: 18,
+		env: igraph.ClusteringEnvironment{
+			BaseInstallCommand:   "python3 -m venv .venv && .venv/bin/pip install -r requirements-clustering.txt",
+			LeidenInstallCommand: ".venv/bin/pip install -r requirements-clustering-leiden.txt",
+		},
 		metrics: igraph.HealthMetrics{
 			Nodes:                5491,
 			Edges:                12466,
@@ -36,8 +40,8 @@ func TestGraphStatusModelScrollsLongContent(t *testing.T) {
 	}
 
 	before := m.ViewContent()
-	if !strings.Contains(before, "Graph") {
-		t.Fatalf("expected top of graph status content, got %q", before)
+	if !strings.Contains(before, "Environment") {
+		t.Fatalf("expected top of graph status content to include environment section, got %q", before)
 	}
 	if strings.Contains(before, "Obsidian Vault") {
 		t.Fatalf("did not expect bottom section before scrolling, got %q", before)
@@ -95,6 +99,12 @@ func TestGraphStatusModelRendersFreshnessSection(t *testing.T) {
 	m := GraphStatusModel{
 		termWidth:  100,
 		termHeight: 30,
+		env: igraph.ClusteringEnvironment{
+			PythonFound:        true,
+			PythonPath:         "/repo/.venv/bin/python3",
+			NetworkXAvailable:  true,
+			BaseInstallCommand: "python3 -m venv .venv && .venv/bin/pip install -r requirements-clustering.txt",
+		},
 		fresh: igraph.FreshnessStats{
 			GraphPath:         "/repo/.vela/graph.json",
 			ManifestPresent:   true,
@@ -107,7 +117,7 @@ func TestGraphStatusModelRendersFreshnessSection(t *testing.T) {
 	}
 
 	view := m.renderContent()
-	for _, want := range []string{"Freshness", "Tracked files", "42", "Last refresh mode", "deleted-file prune", "GRAPH_REPORT.md"} {
+	for _, want := range []string{"Environment", "Python", "found", "networkx", "present", "Install base", "requirements-clustering.txt", "Freshness", "Tracked files", "42", "Last refresh mode", "deleted-file prune", "GRAPH_REPORT.md"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected %q in freshness view, got %q", want, view)
 		}
@@ -146,6 +156,10 @@ func TestGraphStatusModelRendersGlobalRegistrySection(t *testing.T) {
 		global:     true,
 		termWidth:  100,
 		termHeight: 30,
+		env: igraph.ClusteringEnvironment{
+			BaseInstallCommand:   "python3 -m venv .venv && .venv/bin/pip install -r requirements-clustering.txt",
+			LeidenInstallCommand: ".venv/bin/pip install -r requirements-clustering-leiden.txt",
+		},
 		registryData: igraph.RegistryStatusSnapshot{
 			Summary: igraph.RegistrySummary{Repositories: 2, HealthyGraphs: 1, MissingGraphs: 1, InstalledHooks: 1, MissingHooks: 1, Nodes: 120, Edges: 240},
 			Repos: []igraph.RepoStatusSnapshot{
@@ -156,7 +170,7 @@ func TestGraphStatusModelRendersGlobalRegistrySection(t *testing.T) {
 	}
 
 	view := m.renderContent()
-	for _, want := range []string{"Global Summary", "Tracked repos", "2", "Repositories", "vela", "ancora", "graph path unavailable", "manifest file", "report file", "Syfra3/vela", "outgoing edges:98"} {
+	for _, want := range []string{"Environment", "Python", "missing", "Install base", "requirements-clustering.txt", "Install Leiden", "requirements-clustering-leiden.txt", "Global Summary", "Tracked repos", "2", "Repositories", "vela", "ancora", "graph path unavailable", "manifest file", "report file", "Syfra3/vela", "outgoing edges:98"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected %q in global registry view, got %q", want, view)
 		}

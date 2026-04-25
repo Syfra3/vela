@@ -10,9 +10,22 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	embeddedscripts "github.com/Syfra3/vela/scripts"
 )
 
 var ErrGraspologicMissing = errors.New("graspologic is not installed")
+var ErrClusteringDepsMissing = errors.New("python clustering dependencies are not installed")
+var embeddedLeidenScript = embeddedscripts.LeidenPy
+
+type ClusteringEnvironment struct {
+	PythonFound          bool   `json:"python_found"`
+	PythonPath           string `json:"python_path,omitempty"`
+	NetworkXAvailable    bool   `json:"networkx_available"`
+	GraspologicAvailable bool   `json:"graspologic_available"`
+	BaseInstallCommand   string `json:"base_install_command"`
+	LeidenInstallCommand string `json:"leiden_install_command"`
+}
 
 // leidenInput is the payload sent to the Python subprocess via stdin.
 type leidenInput struct {
@@ -32,10 +45,11 @@ type leidenEdge struct {
 // If Python or the script is unavailable, a clear error is returned (no panic).
 // The script itself falls back to connected-components if graspologic is missing.
 func RunLeiden(g *Graph) (map[string]int, error) {
-	scriptPath, err := findScript("leiden.py")
+	scriptPath, cleanup, err := resolveLeidenScript("leiden.py")
 	if err != nil {
 		return nil, fmt.Errorf("leiden script not found: %w", err)
 	}
+	defer cleanup()
 
 	// Build input payload using resolved edges only.
 	// e.Target is the resolved node label after Build(); Leiden needs node IDs,
@@ -70,6 +84,9 @@ func RunLeiden(g *Graph) (map[string]int, error) {
 	if err != nil {
 		return nil, fmt.Errorf("python not found: %w (install python3 to enable clustering)", err)
 	}
+	if err := ensureClusteringDependencies(python); err != nil {
+		return nil, err
+	}
 
 	cmd := exec.Command(python, scriptPath)
 	cmd.Stdin = bytes.NewReader(payload)
@@ -95,6 +112,32 @@ func RunLeiden(g *Graph) (map[string]int, error) {
 	}
 
 	return partition, nil
+}
+
+func resolveLeidenScript(name string) (string, func(), error) {
+	if scriptPath, err := findScript(name); err == nil {
+		return scriptPath, func() {}, nil
+	}
+	return materializeEmbeddedScript(name, embeddedLeidenScript)
+}
+
+func materializeEmbeddedScript(name string, script []byte) (string, func(), error) {
+	if len(script) == 0 {
+		return "", func() {}, fmt.Errorf("embedded script is empty")
+	}
+	tempDir, err := os.MkdirTemp("", "vela-leiden-*")
+	if err != nil {
+		return "", func() {}, fmt.Errorf("create temp dir: %w", err)
+	}
+	cleanup := func() {
+		_ = os.RemoveAll(tempDir)
+	}
+	scriptPath := filepath.Join(tempDir, name)
+	if err := os.WriteFile(scriptPath, script, 0o600); err != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("write embedded script: %w", err)
+	}
+	return scriptPath, cleanup, nil
 }
 
 // ApplyCommunities writes community IDs back onto the graph's node metadata
@@ -195,4 +238,33 @@ func localPythonCandidates(scriptPath string) []string {
 		)
 	}
 	return candidates
+}
+
+func LoadClusteringEnvironment() ClusteringEnvironment {
+	env := ClusteringEnvironment{
+		BaseInstallCommand:   "python3 -m venv .venv && .venv/bin/pip install -r requirements-clustering.txt",
+		LeidenInstallCommand: ".venv/bin/pip install -r requirements-clustering-leiden.txt",
+	}
+
+	python, err := findPython("")
+	if err != nil {
+		return env
+	}
+	env.PythonFound = true
+	env.PythonPath = python
+	env.NetworkXAvailable = pythonModuleAvailable(python, "networkx")
+	env.GraspologicAvailable = pythonModuleAvailable(python, "graspologic")
+	return env
+}
+
+func pythonModuleAvailable(python, module string) bool {
+	cmd := exec.Command(python, "-c", fmt.Sprintf(`import importlib.util, sys; sys.exit(0 if importlib.util.find_spec(%q) else 1)`, module))
+	return cmd.Run() == nil
+}
+
+func ensureClusteringDependencies(python string) error {
+	if pythonModuleAvailable(python, "graspologic") || pythonModuleAvailable(python, "networkx") {
+		return nil
+	}
+	return fmt.Errorf("%w; install them with: %s", ErrClusteringDepsMissing, LoadClusteringEnvironment().BaseInstallCommand)
 }

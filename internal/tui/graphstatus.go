@@ -36,6 +36,7 @@ type vaultStats struct {
 type graphStatusLoadedMsg struct {
 	snapshot igraph.StatusSnapshot
 	registry igraph.RegistryStatusSnapshot
+	env      igraph.ClusteringEnvironment
 	vault    vaultStats
 	loadErr  error
 	global   bool
@@ -51,6 +52,7 @@ type GraphStatusModel struct {
 	fresh        igraph.FreshnessStats
 	projects     []igraph.ProjectStatus
 	registryData igraph.RegistryStatusSnapshot
+	env          igraph.ClusteringEnvironment
 	loadErr      error
 	loading      bool
 	quitting     bool
@@ -75,30 +77,31 @@ func (m GraphStatusModel) Init() tea.Cmd {
 
 func loadMetricsCmd(graphPath string) tea.Cmd {
 	return func() tea.Msg {
+		env := igraph.LoadClusteringEnvironment()
 		resolvedGraphPath := graphPath
 		entries, registryErr := registry.Load()
 		if strings.TrimSpace(resolvedGraphPath) == "" && registryErr == nil && len(entries) > 0 {
 			cfg, cfgErr := config.Load()
 			if cfgErr != nil {
-				return graphStatusLoadedMsg{global: true, loadErr: cfgErr}
+				return graphStatusLoadedMsg{env: env, global: true, loadErr: cfgErr}
 			}
 			vs := loadVaultStats(filepath.Join(config.ResolveVaultDir(cfg.Obsidian.VaultDir), "obsidian"))
-			return graphStatusLoadedMsg{registry: igraph.LoadRegistryStatusSnapshot(entries, 5), vault: vs, global: true}
+			return graphStatusLoadedMsg{registry: igraph.LoadRegistryStatusSnapshot(entries, 5), env: env, vault: vs, global: true}
 		}
 		if strings.TrimSpace(resolvedGraphPath) == "" {
 			var err error
 			resolvedGraphPath, err = config.FindGraphFile(".")
 			if err != nil {
-				return graphStatusLoadedMsg{loadErr: err}
+				return graphStatusLoadedMsg{env: env, loadErr: err}
 			}
 		}
 		snapshot, loadErr := igraph.LoadStatusSnapshot(resolvedGraphPath, 5)
 		cfg, cfgErr := config.Load()
 		if cfgErr != nil {
-			return graphStatusLoadedMsg{snapshot: snapshot, loadErr: cfgErr}
+			return graphStatusLoadedMsg{snapshot: snapshot, env: env, loadErr: cfgErr}
 		}
 		vs := loadVaultStats(filepath.Join(config.ResolveVaultDir(cfg.Obsidian.VaultDir), "obsidian"))
-		return graphStatusLoadedMsg{snapshot: snapshot, vault: vs, loadErr: loadErr, repoName: resolveSingleRepoName(resolvedGraphPath, entries, snapshot)}
+		return graphStatusLoadedMsg{snapshot: snapshot, env: env, vault: vs, loadErr: loadErr, repoName: resolveSingleRepoName(resolvedGraphPath, entries, snapshot)}
 	}
 }
 
@@ -142,6 +145,7 @@ func (m GraphStatusModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.fresh = msg.snapshot.Freshness
 		m.projects = msg.snapshot.Projects
 		m.registryData = msg.registry
+		m.env = msg.env
 		m.loadErr = msg.loadErr
 		m.loading = false
 		m.clampScroll()
@@ -237,6 +241,8 @@ func (m GraphStatusModel) renderContent() string {
 		}
 		return projects[i].Name < projects[j].Name
 	})
+
+	renderEnvironmentSection(&b, m.env, label, text, dim, ok, warn, errS, accent)
 
 	// ── Graph section ────────────────────────────────────────────────────────
 	b.WriteString(accent.Render("Graph"))
@@ -485,6 +491,7 @@ func (m GraphStatusModel) renderGlobalContent() string {
 		return b.String()
 	}
 	summary := m.registryData.Summary
+	renderEnvironmentSection(&b, m.env, label, text, dim, ok, warn, errS, accent)
 	b.WriteString(accent.Render("Global Summary"))
 	b.WriteString("\n\n")
 	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Tracked repos"), text.Render(fmt.Sprintf("%d", summary.Repositories))))
@@ -575,6 +582,38 @@ func (m GraphStatusModel) renderGlobalContent() string {
 	}
 	b.WriteString("\n")
 	return b.String()
+}
+
+func renderEnvironmentSection(b *strings.Builder, env igraph.ClusteringEnvironment, label, text, dim, ok, warn, errS, accent lipgloss.Style) {
+	b.WriteString(accent.Render("Environment"))
+	b.WriteString("\n\n")
+
+	pythonState := warn.Render("missing")
+	if env.PythonFound {
+		pythonState = ok.Render("found")
+	}
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Python"), pythonState))
+	if env.PythonFound && strings.TrimSpace(env.PythonPath) != "" {
+		b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Python path"), dim.Render(truncateMiddle(env.PythonPath, 64))))
+	}
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("networkx"), renderBinaryState(env.NetworkXAvailable, ok, warn)))
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("graspologic"), renderBinaryState(env.GraspologicAvailable, ok, warn)))
+
+	backendState := warn.Render("missing")
+	if env.NetworkXAvailable || env.GraspologicAvailable {
+		backendState = ok.Render("ready")
+	}
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Clustering"), backendState))
+
+	installStyle := dim
+	if !env.PythonFound || (!env.NetworkXAvailable && !env.GraspologicAvailable) {
+		installStyle = errS
+	}
+	b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Install base"), installStyle.Render(env.BaseInstallCommand)))
+	if !env.GraspologicAvailable {
+		b.WriteString(fmt.Sprintf("  %s %s\n", label.Render("Install Leiden"), dim.Render(env.LeidenInstallCommand)))
+	}
+	b.WriteString("\n")
 }
 
 func renderBuildMode(mode string, ok, warn, dim lipgloss.Style) string {
