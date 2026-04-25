@@ -191,6 +191,7 @@ func (s BuildService) runMultiRepo(
 	aggregate := &types.Graph{}
 	buildResult := BuildResult{Repos: make([]RepoBuildResult, 0, len(repoRoots))}
 	for _, repoRoot := range repoRoots {
+		repoLabel := repoWarningLabel(req.RepoRoot, repoRoot)
 		observer := func(event pipeline.StageEvent) {
 			if req.Observe != nil {
 				req.Observe(BuildEvent{Kind: BuildEventStage, Stage: event.Stage, Message: fmt.Sprintf("%s: %s", filepath.Base(repoRoot), event.Message), Count: event.Count})
@@ -206,7 +207,7 @@ func (s BuildService) runMultiRepo(
 			return BuildResult{}, err
 		}
 		buildResult.Repos = append(buildResult.Repos, RepoBuildResult{RepoRoot: repoRoot, GraphPath: result.GraphPath, ReportPath: filepath.Join(filepath.Dir(result.GraphPath), "GRAPH_REPORT.md")})
-		buildResult.Warnings = append(buildResult.Warnings, result.Warnings...)
+		buildResult.Warnings = append(buildResult.Warnings, prefixRepoWarnings(repoLabel, result.Warnings)...)
 		buildResult.DetectedFiles = append(buildResult.DetectedFiles, result.DetectedFiles...)
 		buildResult.Facts += len(result.Facts)
 		for _, report := range result.StageReports {
@@ -253,6 +254,24 @@ func (s BuildService) runMultiRepo(
 		req.Observe(BuildEvent{Kind: BuildEventComplete, Message: fmt.Sprintf("build complete (%d repos)", len(repoRoots))})
 	}
 	return buildResult, nil
+}
+
+func repoWarningLabel(root, repoRoot string) string {
+	if rel, err := filepath.Rel(root, repoRoot); err == nil && rel != "." && !strings.HasPrefix(rel, "..") {
+		return filepath.ToSlash(rel)
+	}
+	return filepath.Base(repoRoot)
+}
+
+func prefixRepoWarnings(repoLabel string, warnings []string) []string {
+	if len(warnings) == 0 {
+		return nil
+	}
+	prefixed := make([]string, 0, len(warnings))
+	for _, warning := range warnings {
+		prefixed = append(prefixed, fmt.Sprintf("%s: %s", repoLabel, warning))
+	}
+	return prefixed
 }
 
 func summarizeStageReports(totals map[types.BuildStage]int) []pipeline.StageReport {

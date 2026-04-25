@@ -285,14 +285,20 @@ Add to `~/.config/opencode/mcp_settings.json`:
 - Specialized extractors (if needed)
 - Runs as subprocess, called only when necessary
 
-Install the clustering dependency explicitly if you want community detection to run:
+Install the baseline clustering dependency explicitly if you want community detection to run reliably across Python versions:
 
 ```bash
 python3 -m venv .venv
 .venv/bin/pip install -r requirements-clustering.txt
 ```
 
-If you specifically want the Leiden backend, install `graspologic` into that same virtualenv when it supports your Python version.
+That installs the NetworkX fallback backend used by `scripts/leiden.py` when Leiden is unavailable.
+
+If you specifically want the Leiden backend, install `graspologic` into that same virtualenv when it supports your Python version:
+
+```bash
+.venv/bin/pip install -r requirements-clustering-leiden.txt
+```
 
 ### Pluggable LLM Interface
 

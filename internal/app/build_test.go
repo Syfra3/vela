@@ -331,6 +331,51 @@ func TestBuildServiceRun_WritesPerRepoReportsForMultiRepoBuilds(t *testing.T) {
 	}
 }
 
+func TestBuildServiceRun_PrefixesMultiRepoWarningsWithRepoPath(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	repoA := filepath.Join(root, "org-a", "vela")
+	repoB := filepath.Join(root, "org-b", "vela")
+	for _, repo := range []string{repoA, repoB} {
+		if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o755); err != nil {
+			t.Fatalf("mkdir .git for %q: %v", repo, err)
+		}
+	}
+
+	svc := BuildService{
+		RunPipeline: func(_ context.Context, _ string, req types.BuildRequest, _ pipeline.Observer) (pipeline.Result, error) {
+			return pipeline.Result{
+				GraphPath: filepath.Join(req.RepoRoot, ".vela", "graph.json"),
+				Graph:     &types.Graph{Nodes: []types.Node{{ID: req.RepoRoot, Label: filepath.Base(req.RepoRoot), NodeType: string(types.NodeTypeProject)}}},
+				Warnings:  []string{"SCIP driver failed: scip-typescript: no files got indexed"},
+			}, nil
+		},
+		WriteHTML:     func(*types.Graph, string) error { return nil },
+		WriteReport:   func(*types.Graph, string) error { return nil },
+		WriteObsidian: func(*types.Graph, string) error { return nil },
+	}
+
+	result, err := svc.Run(context.Background(), BuildRequest{RepoRoot: root})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if len(result.Warnings) != 2 {
+		t.Fatalf("warnings len = %d, want 2", len(result.Warnings))
+	}
+	if got := result.Warnings[0]; !strings.HasPrefix(got, "org-a/vela: ") {
+		t.Fatalf("first warning = %q, want repo-relative prefix", got)
+	}
+	if got := result.Warnings[1]; !strings.HasPrefix(got, "org-b/vela: ") {
+		t.Fatalf("second warning = %q, want repo-relative prefix", got)
+	}
+	for _, warning := range result.Warnings {
+		if !strings.Contains(warning, "no files got indexed") {
+			t.Fatalf("warning = %q, want original warning text preserved", warning)
+		}
+	}
+}
+
 func sampleGraph() *types.Graph {
 	return &types.Graph{
 		Nodes:       []types.Node{{ID: "project:vela", Label: "vela", NodeType: string(types.NodeTypeProject)}},
