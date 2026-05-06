@@ -216,5 +216,5 @@ The "embedding compatibility" concern is a **non-issue** because:
 - Vela LLM: `internal/llm/local.go`
 - Ollama setup: `internal/setup/ollama.go`
 - Model metadata: `internal/setup/models.go`
-- Ancora embeddings: `~/Documents/personal/ancora/internal/embed/embed.go`
+- Ancora embeddings: `../ancora/internal/embed/embed.go`
 - Nomic model: https://huggingface.co/nomic-ai/nomic-embed-text-v1.5-GGUF

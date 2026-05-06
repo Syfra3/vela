@@ -107,13 +107,13 @@ You've hit your limit · resets 6pm (America/Bogota)
 > G33N-RALPH · gpt-5.4
 [0m
 Checking prior context and the Ralph workflow state first, then I’ll delegate the implementation work for this story with the repo-specific constraints.
-[0m⚙ [0mancora_start {"directory":"/home/geen/Documents/personal/vela","id":"session-us006-2026-04-19","project":"vela"}
+[0m⚙ [0mancora_start {"directory":"/path/to/vela","id":"session-us006-2026-04-19","project":"vela"}
 [0m→ [0mRead workflows/ralph/progress.txt[90m [offset=1, limit=300][0m
 [0m⚙ [0mancora_save_prompt {"content":"Execute Ralph workflow story US-006 in Vela: materialize memory graph from Ancora-backed observations on branch feature/ralph-full-architecture-workflow. Must read workflows/ralph/progress.txt before editing, keep memory/contract/workspace/repo responsibilities separate, run relevant tests and go test ./... if feasible, update workflows/ralph/prd.json and workflows/ralph/progress.txt only if story passes, and print exactly STORY_COMPLETE: US-006 or STORY_BLOCKED: US-006.","project":"vela","session_id":"session-us006-2026-04-19"}
 [0m⚙ [0mancora_search {"limit":5,"query":"US-006 Ancora memory graph observations Vela Ralph workflow","type":"","visibility":"work","workspace":"vela"}
 There’s prior Ancora extraction work in memory already. I’m pulling that context and delegating the implementation so the actual code/test work happens in a fresh sub-agent context.
 [0m⚙ [0mancora_get {"id":145}
-[0m⚙ [0mdelegate {"prompt":"You are implementing one Ralph workflow story in the Vela repository.\n\nRepository: Vela\nWorking directory: /home/geen/Documents/personal/vela\nRequired branch: feature/ralph-full-architecture-workflow\nStory: US-006 - Materialize memory graph from Ancora-backed observations\n\nDescription:\nAs a developer, I need memory to be a first-class graph layer sourced from Ancora so that historical decisions, bugs, and preferences participate in retrieval with structure and provenance.\n\nAcceptance Criteria:\n- Build on existing memory-related areas such as `internal/ancora`, `internal/listener`, and `internal/extract/ancora.go` to ingest or sync observation data into a structured memory layer\n- Store observations and references separately from repo graph structure\n- Support links from memory entities to repos, files, symbols, concepts, workspaces, or organizations by reference\n- Add or update tests for Ancora ingestion or graph materialization behavior\n- Typecheck passes\n- Tests pass\n\nRules:\n- Work on THIS story only.\n- Read `workflows/ralph/progress.txt` before editing.\n- Keep memory, contract, workspace, and repo responsibilities separate.\n- Run relevant tests for the touched areas and then run `go test ./...` if feasible.\n- Do not create a commit unless explicitly requested by the human operator.\n- If the story passes, update `workflows/ralph/prd.json` to set `passes=true` for this story and append a progress entry to `workflows/ralph/progress.txt`.\n- If the story does not pass, leave passes=false and append retry notes to `workflows/ralph/progress.txt`.\n- When complete, do NOT commit; just report status and exact output marker.\n\nPrior project context from memory:\n- On 2026-04-16, Vela gained an Ancora extraction path that reads `ancora.db` directly via SQLite and produces a knowledge graph from observations.\n\nSKILL LOADING (do this FIRST):\nCheck for available skills:\n  1. Try: search memory/context for skill registry if useful\n  2. Fallback: read `.atl/skill-registry.md`\nLoad and follow any skills relevant to your task.\n\nAncora instructions:\n- If you make important discoveries, decisions, or fix bugs, save them to ancora with workspace `vela` and visibility `work`.\n- Before finishing, save a concise session summary to ancora.\n\nExecution requirements:\n1. Inspect current code and progress file first.\n2. Implement the smallest correct changes for US-006.\n3. Add/update tests.\n4. Run focused tests for touched packages, then `go test ./...` if feasible.\n5. Update Ralph workflow files according to pass/fail result.\n6. Return a concise summary including files changed, tests run, whether story passed, and the exact required output line: either `STORY_COMPLETE: US-006` or `STORY_BLOCKED: US-006`.\n\nDo the work directly in the repo.","agent":"general"}
+[0m⚙ [0mdelegate {"prompt":"You are implementing one Ralph workflow story in the Vela repository.\n\nRepository: Vela\nWorking directory: /path/to/vela\nRequired branch: feature/ralph-full-architecture-workflow\nStory: US-006 - Materialize memory graph from Ancora-backed observations\n\nDescription:\nAs a developer, I need memory to be a first-class graph layer sourced from Ancora so that historical decisions, bugs, and preferences participate in retrieval with structure and provenance.\n\nAcceptance Criteria:\n- Build on existing memory-related areas such as `internal/ancora`, `internal/listener`, and `internal/extract/ancora.go` to ingest or sync observation data into a structured memory layer\n- Store observations and references separately from repo graph structure\n- Support links from memory entities to repos, files, symbols, concepts, workspaces, or organizations by reference\n- Add or update tests for Ancora ingestion or graph materialization behavior\n- Typecheck passes\n- Tests pass\n\nRules:\n- Work on THIS story only.\n- Read `workflows/ralph/progress.txt` before editing.\n- Keep memory, contract, workspace, and repo responsibilities separate.\n- Run relevant tests for the touched areas and then run `go test ./...` if feasible.\n- Do not create a commit unless explicitly requested by the human operator.\n- If the story passes, update `workflows/ralph/prd.json` to set `passes=true` for this story and append a progress entry to `workflows/ralph/progress.txt`.\n- If the story does not pass, leave passes=false and append retry notes to `workflows/ralph/progress.txt`.\n- When complete, do NOT commit; just report status and exact output marker.\n\nPrior project context from memory:\n- On 2026-04-16, Vela gained an Ancora extraction path that reads `ancora.db` directly via SQLite and produces a knowledge graph from observations.\n\nSKILL LOADING (do this FIRST):\nCheck for available skills:\n  1. Try: search memory/context for skill registry if useful\n  2. Fallback: read `.atl/skill-registry.md`\nLoad and follow any skills relevant to your task.\n\nAncora instructions:\n- If you make important discoveries, decisions, or fix bugs, save them to ancora with workspace `vela` and visibility `work`.\n- Before finishing, save a concise session summary to ancora.\n\nExecution requirements:\n1. Inspect current code and progress file first.\n2. Implement the smallest correct changes for US-006.\n3. Add/update tests.\n4. Run focused tests for touched packages, then `go test ./...` if feasible.\n5. Update Ralph workflow files according to pass/fail result.\n6. Return a concise summary including files changed, tests run, whether story passed, and the exact required output line: either `STORY_COMPLETE: US-006` or `STORY_BLOCKED: US-006`.\n\nDo the work directly in the repo.","agent":"general"}
 Implementation is running in a sub-agent now. I’ll synthesize the result, verify the workflow updates, and return only the required story marker once it finishes.
 [0m⚙ [0mdelegation_list Unknown
 I’m waiting on the sub-agent result before touching the workflow status files or returning the story marker.
@@ -140,7 +140,7 @@ Checking prior context and current Ralph workflow state before touching code.
 [0m→ [0mRead workflows/ralph/progress.txt[90m [offset=1, limit=200][0m
 [0m⚙ [0mancora_search {"limit":5,"query":"US-007 identity resolver evidence model Vela Ralph workflow","type":"","visibility":"work","workspace":"vela"}
 Capturing the story request in memory and delegating code-level implementation with the branch and workflow constraints.
-[0m⚙ [0mancora_start {"directory":"/home/geen/Documents/personal/vela","id":"session-us007-2026-04-19","project":"vela"}
+[0m⚙ [0mancora_start {"directory":"/path/to/vela","id":"session-us007-2026-04-19","project":"vela"}
 [0m⚙ [0mancora_save_prompt {"content":"Execute Ralph workflow story US-007 in Vela: implement identity resolver and evidence model on branch feature/ralph-full-architecture-workflow. Must read workflows/ralph/progress.txt before editing, keep memory/contract/workspace/repo responsibilities separate, run relevant tests and go test ./... if feasible, update workflows/ralph/prd.json and workflows/ralph/progress.txt only if story passes, and print exactly STORY_COMPLETE: US-007 or STORY_BLOCKED: US-007.","project":"vela","session_id":"session-us007-2026-04-19"}
 [0m⚙ [0mancora_get {"id":319}
 [0m⚙ [0mancora_get {"id":321}
@@ -247,7 +247,7 @@ STORY_COMPLETE: US-007
 [0m
 Reviewing the existing workflow state and the code paths around memory references before touching anything.
 [0m⚙ [0mancora_save_prompt {"content":"Implement US-008 in Vela: memory reference binder and stale reference handling on branch feature/ralph-full-architecture-workflow. Read workflows/ralph/progress.txt before editing, run relevant tests and go test ./... if feasible, update Ralph workflow files only if story passes, and print exactly STORY_COMPLETE: US-008 or STORY_BLOCKED: US-008.","project":"vela","session_id":"session-us-008-memory-binder-2026-04-19"}
-[0m⚙ [0mancora_start {"directory":"/home/geen/Documents/personal/vela","id":"session-us-008-memory-binder-2026-04-19","project":"vela"}
+[0m⚙ [0mancora_start {"directory":"/path/to/vela","id":"session-us-008-memory-binder-2026-04-19","project":"vela"}
 [0m→ [0mRead workflows/ralph/progress.txt[90m [offset=1, limit=400][0m
 [0m
 [0m$ [0mrtk git branch --show-current && rtk git status --short
@@ -343,7 +343,7 @@ I’ve got the shape now: bind at the graph layer where live nodes are available
 [0m→ [0mRead internal/graph/memory.go[90m [offset=1, limit=120][0m
 [0m→ [0mRead internal/query/query.go[90m [offset=320, limit=80][0m
 [0m✗ [0mapply_patch failed
-[91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /home/geen/Documents/personal/vela/internal/query/query_test.go:
+[91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /path/to/vela/internal/query/query_test.go:
 			{"id": "auth", "label": "AuthService", "kind": "struct", "file": "auth.go"},
 			{"id": "db", "label": "Database", "kind": "struct", "file": "db.go"},
 			{"id": "user", "label": "UserRepo", "kind": "struct", "file": "user.go"},
@@ -352,7 +352,7 @@ I’ve got the shape now: bind at the graph layer where live nodes are available
 A internal/graph/binder.go
 A internal/query/bindings.go
 [0m✗ [0mapply_patch failed
-[91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /home/geen/Documents/personal/vela/internal/query/query.go:
+[91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /path/to/vela/internal/query/query.go:
 func formatExplainEdge(edge types.Edge) string {
 	line := fmt.Sprintf("%s --[%s]--> %s", edge.Source, edge.Relation, edge.Target)
 	ev := types.Evidence{}
@@ -422,8 +422,8 @@ Go test: 259 passed in 22 packages
 [0m
 The implementation is valid on real packages. The only remaining `go test ./...` failures are the same pre-existing empty fixture files under `tests/fixtures/detect/**`, so I’m recording that explicitly in the Ralph progress instead of pretending the repo is cleaner than it is.
 [0m✗ [0mapply_patch failed
-[91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /home/geen/Documents/personal/vela/workflows/ralph/progress.txt:
-215: [0m⚙ [0mancora_start {"directory":"/home/geen/Documents/personal/vela","id":"session-us-008-memory-binder-2026-04-19","project":"vela"}
+[91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /path/to/vela/workflows/ralph/progress.txt:
+215: [0m⚙ [0mancora_start {"directory":"/path/to/vela","id":"session-us-008-memory-binder-2026-04-19","project":"vela"}
 [0m→ [0mRead workflows/ralph/progress.txt[90m [offset=200, limit=40][0m
 [0m→ [0mRead workflows/ralph/prd.json[90m [offset=112, limit=24][0m
 [0m⚙ [0mapply_patch Success. Updated the following files:
@@ -444,7 +444,7 @@ M workflows/ralph/progress.txt
 ---
 [0m→ [0mRead workflows/ralph/progress.txt[90m [offset=330, limit=100][0m
 [0m✗ [0mapply_patch failed
-[91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /home/geen/Documents/personal/vela/workflows/ralph/progress.txt:
+[91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /path/to/vela/workflows/ralph/progress.txt:
 404:  [0m→ [0mRead workflows/ralph/prd.json[90m [offset=112, limit=24][0m
 405: [0m⚙ [0mapply_patch Success. Updated the following files:
 406: M workflows/ralph/prd.json
@@ -985,7 +985,7 @@ STORY_COMPLETE: US-008
 > G33N-RALPH · gpt-5.4
 [0m
 Reviewing current Ralph workflow state and the existing retrieval/query code before making changes. Then I’ll implement the routing/fusion changes, run focused tests, and only mark the story complete if the full verification passes.
-[0m⚙ [0mancora_start {"directory":"/home/geen/Documents/personal/vela","id":"session-us-009-2026-04-19","project":"vela"}
+[0m⚙ [0mancora_start {"directory":"/path/to/vela","id":"session-us-009-2026-04-19","project":"vela"}
 [0m→ [0mRead workflows/ralph/progress.txt[90m [offset=1, limit=400][0m
 [0m✱ [0mGlob "internal/{query,retrieval}/**/*.go"[90m in . · 12 matches[0m
 [0m✱ [0mGlob "internal/**/*.go"[90m in . · 100 matches[0m
@@ -1021,7 +1021,7 @@ The current search path is still basically `ancora + whole-graph`. That violates
 [0m→ [0mRead internal/extract/contract.go[90m [offset=1, limit=260][0m
 I have the shape. The fix is not “search more”, it’s “route first, then search the right layer with provenance”. I’m patching retrieval filtering, workspace graph hydration, query routing inspection, and the federated search fusion together so the behavior stays coherent instead of becoming a pile of ad hoc branches.
 [0m✗ [0mapply_patch failed
-[91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /home/geen/Documents/personal/vela/internal/query/search.go:
+[91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /path/to/vela/internal/query/search.go:
 	return SearchResponse{
 		Query:   comp.query,
 		Hits:    comp.federatedHits,
@@ -1043,11 +1043,11 @@ M internal/retrieval/repo_local_test.go
 M internal/query/search.go
 
 LSP errors detected in internal/query/search.go, please fix:
-<diagnostics file="/home/geen/Documents/personal/vela/internal/query/search.go">
+<diagnostics file="/path/to/vela/internal/query/search.go">
 ERROR [13:2] "github.com/Syfra3/vela/internal/graph" imported as igraph and not used
 </diagnostics>
 [0m✗ [0mapply_patch failed
-[91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /home/geen/Documents/personal/vela/internal/query/search.go:
+[91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /path/to/vela/internal/query/search.go:
 func (s *Searcher) Search(input string, limit int) (SearchResponse, error) {
 	comp, err := s.computeSearch(input, limit)
 	if err != nil {
@@ -1065,7 +1065,7 @@ func (s *Searcher) Search(input string, limit int) (SearchResponse, error) {
 M internal/query/search.go
 
 LSP errors detected in internal/query/search.go, please fix:
-<diagnostics file="/home/geen/Documents/personal/vela/internal/query/search.go">
+<diagnostics file="/path/to/vela/internal/query/search.go">
 ERROR [13:2] "github.com/Syfra3/vela/internal/graph" imported as igraph and not used
 ERROR [256:17] assignment mismatch: 2 variables but searchGraph returns 3 values
 </diagnostics>
@@ -1073,7 +1073,7 @@ ERROR [256:17] assignment mismatch: 2 variables but searchGraph returns 3 values
 M internal/query/search.go
 
 LSP errors detected in internal/query/search.go, please fix:
-<diagnostics file="/home/geen/Documents/personal/vela/internal/query/search.go">
+<diagnostics file="/path/to/vela/internal/query/search.go">
 ERROR [13:2] "github.com/Syfra3/vela/internal/graph" imported as igraph and not used
 ERROR [256:17] assignment mismatch: 2 variables but searchGraph returns 3 values
 ERROR [318:22] assignment mismatch: 2 variables but searchGraph returns 3 values
@@ -1082,7 +1082,7 @@ ERROR [318:22] assignment mismatch: 2 variables but searchGraph returns 3 values
 M internal/query/search.go
 
 LSP errors detected in internal/query/search.go, please fix:
-<diagnostics file="/home/geen/Documents/personal/vela/internal/query/search.go">
+<diagnostics file="/path/to/vela/internal/query/search.go">
 ERROR [13:2] "github.com/Syfra3/vela/internal/graph" imported as igraph and not used
 ERROR [317:13] undefined: routeWorkspace
 </diagnostics>
@@ -1090,7 +1090,7 @@ ERROR [317:13] undefined: routeWorkspace
 M internal/query/search.go
 
 LSP errors detected in internal/query/search.go, please fix:
-<diagnostics file="/home/geen/Documents/personal/vela/internal/query/search.go">
+<diagnostics file="/path/to/vela/internal/query/search.go">
 ERROR [13:2] "github.com/Syfra3/vela/internal/graph" imported as igraph and not used
 ERROR [317:13] undefined: routeWorkspace
 ERROR [439:13] undefined: routeWorkspace
@@ -1122,7 +1122,7 @@ M internal/query/search_test.go
 M internal/query/search_test.go
 
 LSP errors detected in internal/query/search_test.go, please fix:
-<diagnostics file="/home/geen/Documents/personal/vela/internal/query/search_test.go">
+<diagnostics file="/path/to/vela/internal/query/search_test.go">
 ERROR [407:15] undefined: types
 ERROR [409:15] undefined: types
 ERROR [411:15] undefined: types
@@ -1212,7 +1212,7 @@ Go test: 26 passed in 1 packages
 [0m
 The story implementation itself is green on the touched surfaces and the real-package suite only fails in pre-existing daemon tests plus the known empty fixture packages. I’m recording that explicitly in the Ralph files instead of faking a cleaner repo than the branch actually has.
 [0m✗ [0mapply_patch failed
-[91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /home/geen/Documents/personal/vela/workflows/ralph/progress.txt:
+[91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /path/to/vela/workflows/ralph/progress.txt:
 602:   +	if ev.Type != "" {
 603:   +		parts = append(parts, "type="+ev.Type)
 604:   +	}
@@ -1221,14 +1221,14 @@ The story implementation itself is green on the touched surfaces and the real-pa
 [0m→ [0mRead workflows/ralph/progress.txt[90m [offset=1120, limit=80][0m
 [0m→ [0mRead workflows/ralph/prd.json[90m [offset=130, limit=24][0m
 [0m✗ [0mapply_patch failed
-[91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /home/geen/Documents/personal/vela/workflows/ralph/progress.txt:
+[91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /path/to/vela/workflows/ralph/progress.txt:
 1181: 604:   +	}
 1182: 605:   +	if ev.SourceArtifact != "" {
 1183: 606:   +		parts = append(parts, "artifact="+ev.SourceArtifact)
 [0m→ [0mRead workflows/ralph/progress.txt[90m [offset=1174, limit=12][0m
 [0m→ [0mRead workflows/ralph/progress.txt[90m [offset=1186, limit=10][0m
 [0m✗ [0mapply_patch failed
-[91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /home/geen/Documents/personal/vela/workflows/ralph/progress.txt:
+[91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /path/to/vela/workflows/ralph/progress.txt:
 \u001b[0m→ \u001b[0mRead workflows/ralph/progress.txt\u001b[90m [offset=1174, limit=12]\u001b[0m
 [0m⚙ [0mapply_patch Success. Updated the following files:
 M workflows/ralph/prd.json
@@ -1339,7 +1339,7 @@ I’ve confirmed the branch and there are many existing in-progress changes from
 [0m→ [0mRead internal/server/server_test.go[90m [offset=220, limit=160][0m
 [0m✱ [0mGrep "func CreateProjectNode|type SourceType|SourceTypeMemory"[90m in . · 15 matches[0m
 [0m✗ [0mread failed
-[91m[1mError: [0mFile not found: /home/geen/Documents/personal/vela/internal/graph/graph.go
+[91m[1mError: [0mFile not found: /path/to/vela/internal/graph/graph.go
 [0m→ [0mRead internal/extract/project.go[90m [offset=1, limit=160][0m
 [0m✱ [0mGrep "func Build\("[90m in internal/graph · 1 match[0m
 [0m→ [0mRead internal/graph/build.go[90m [offset=1, limit=260][0m
@@ -1351,7 +1351,7 @@ I found the bigger risk: the real exported graph is still very repo-era in a few
 [0m→ [0mRead pkg/types/architecture.go[90m [offset=260, limit=140][0m
 Editing the CLI and query engine now. The focus is: preserve the layered graph during `extract`, normalize exported edges back into layer-aware references for `path`/`explain`, and print provenance in a way a human can actually inspect.
 [0m✗ [0mapply_patch failed
-[91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /home/geen/Documents/personal/vela/internal/query/query.go:
+[91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /path/to/vela/internal/query/query.go:
 func metadataStringSlice(v interface{}) []string {
 [0m⚙ [0mapply_patch Success. Updated the following files:
 M internal/query/query.go
@@ -2040,7 +2040,7 @@ M internal/doctor/integration_test.go
 M internal/tui/doctor_test.go
 
 LSP errors detected in internal/tui/doctor_test.go, please fix:
-<diagnostics file="/home/geen/Documents/personal/vela/internal/tui/doctor_test.go">
+<diagnostics file="/path/to/vela/internal/tui/doctor_test.go">
 ERROR [64:116] []StepLike{…}.toDoctorSteps undefined (type []StepLike has no field or method toDoctorSteps)
 ERROR [82:34] undefined: vdoctor
 ERROR [83:9] undefined: vdoctor
@@ -2050,7 +2050,7 @@ ERROR [86:43] undefined: vdoctor
 ERROR [87:16] undefined: vdoctor
 </diagnostics>
 [0m✗ [0mapply_patch failed
-[91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /home/geen/Documents/personal/vela/internal/tui/doctor_test.go:
+[91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /path/to/vela/internal/tui/doctor_test.go:
 	updated, _ := m.Update(doctorReportMsg{
 		llmResults: []healthCheckMsg{{provider: "local[llama3 @ http://localhost:11434]", ok: true}},
 		integrationChecks: []StepLike{{Name: "Graph update / reconcile", Status: "ok", Detail: "graph.json is healthy"}}.toDoctorSteps(),
@@ -2115,7 +2115,7 @@ The story criteria are met in code and in the targeted packages. I’m updating 
 [0m⚙ [0mapply_patch Success. Updated the following files:
 M workflows/ralph/prd.json
 M workflows/ralph/progress.txt
-[0m⚙ [0mancora_save {"content":"**What**: Hardened local setup validation by making doctor and the setup wizard verify real runtime readiness instead of trusting config presence.\n**Why**: Ralph story US-011 required a trustworthy local setup path; the previous wizard final check was a stub and doctor did not validate enough of the live installation.\n**Where**: internal/doctor/integration.go, internal/doctor/integration_test.go, internal/setup/wizard.go, internal/setup/wizard_test.go, internal/tui/doctor.go, internal/tui/doctor_test.go, cmd/vela/main.go\n**Learned**: `go test ./...` in this repo still fails because fixture files under `tests/fixtures/detect/**` are intentionally empty/non-package files; `go test ./cmd/... ./internal/... ./pkg/...` is the reliable whole-codebase signal for real packages.","organization":"geen","references":"[{\"type\":\"file\",\"target\":\"internal/doctor/integration.go\"},{\"type\":\"file\",\"target\":\"internal/setup/wizard.go\"},{\"type\":\"file\",\"target\":\"internal/tui/doctor.go\"},{\"type\":\"file\",\"target\":\"cmd/vela/main.go\"}]","session_id":"manual-save-vela-us011","title":"Hardened doctor and wizard readiness checks","topic_key":"workflow/us-011-local-setup-validation","type":"bugfix","visibility":"work","workspace":"vela"}
+[0m⚙ [0mancora_save {"content":"**What**: Hardened local setup validation by making doctor and the setup wizard verify real runtime readiness instead of trusting config presence.\n**Why**: Ralph story US-011 required a trustworthy local setup path; the previous wizard final check was a stub and doctor did not validate enough of the live installation.\n**Where**: internal/doctor/integration.go, internal/doctor/integration_test.go, internal/setup/wizard.go, internal/setup/wizard_test.go, internal/tui/doctor.go, internal/tui/doctor_test.go, cmd/vela/main.go\n**Learned**: `go test ./...` in this repo still fails because fixture files under `tests/fixtures/detect/**` are intentionally empty/non-package files; `go test ./cmd/... ./internal/... ./pkg/...` is the reliable whole-codebase signal for real packages.","organization":"example-org","references":"[{\"type\":\"file\",\"target\":\"internal/doctor/integration.go\"},{\"type\":\"file\",\"target\":\"internal/setup/wizard.go\"},{\"type\":\"file\",\"target\":\"internal/tui/doctor.go\"},{\"type\":\"file\",\"target\":\"cmd/vela/main.go\"}]","session_id":"manual-save-vela-us011","title":"Hardened doctor and wizard readiness checks","topic_key":"workflow/us-011-local-setup-validation","type":"bugfix","visibility":"work","workspace":"vela"}
 [0m⚙ [0mancora_summarize {"content":"## Goal\nImplement Ralph story US-011 in Vela by making doctor and the setup wizard verify real local setup readiness.\n\n## Instructions\n- Work only on US-011.\n- Read `workflows/ralph/progress.txt` before editing.\n- Do not create a commit.\n- Update Ralph workflow files only if the story passes.\n\n## Discoveries\n- `internal/setup/wizard.go` final validation was still a stub that only checked local booleans.\n- `internal/tui/doctor.go` was probing all providers, which produced misleading setup results for unconfigured providers.\n- `go test ./...` still fails on pre-existing empty fixture files under `tests/fixtures/detect/**`, while `go test ./cmd/... ./internal/... ./pkg/...` is green for the real code packages.\n\n## Accomplished\n- ✅ Strengthened `internal/doctor/integration.go` to validate source configuration, listener connectivity, configured LLM runtime health, graph health, MCP registration, and Obsidian export state.\n- ✅ Updated `internal/tui/doctor.go` to check only the configured provider and adjusted the loading copy plus tests.\n- ✅ Reworked `internal/setup/wizard.go` final validation to verify `vela` is on PATH, local/remote provider readiness, provider health, and MCP registration; wizard now fails instead of giving fake confidence.\n- ✅ Added/updated tests in `internal/doctor/integration_test.go`, `internal/setup/wizard_test.go`, and `internal/tui/doctor_test.go`.\n- ✅ Updated `workflows/ralph/prd.json` to set `US-011` passes to true and appended a progress entry to `workflows/ralph/progress.txt`.\n\n## Next Steps\n- Validate US-012 or other remaining Ralph workflow stories.\n- Investigate whether the empty `tests/fixtures/detect/**` files should be excluded from `go test ./...` or converted into non-buildable fixtures explicitly.\n\n## Relevant Files\n- internal/doctor/integration.go — doctor readiness checks for source/runtime/graph/integrations\n- internal/setup/wizard.go — setup wizard flow and final readiness verification\n- internal/tui/doctor.go — doctor TUI execution path and rendering\n- cmd/vela/main.go — `vela doctor` command wiring and failure semantics\n- workflows/ralph/prd.json — Ralph story pass/fail state\n- workflows/ralph/progress.txt — Ralph story execution log","project":"vela","session_id":"manual-save-vela-us011"}
 STORY_COMPLETE: US-011
 
@@ -2278,7 +2278,7 @@ The code/tests are where they should be: focused suites and the package-wide rea
 2026-04-19 18:35:42
 [0m
 [0m✗ [0mapply_patch failed
- [91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /home/geen/Documents/personal/vela/workflows/ralph/progress.txt:
+ [91m[1mError: [0mapply_patch verification failed: Error: Failed to find expected lines in /path/to/vela/workflows/ralph/progress.txt:
   Line 510:   +	eng.graphPath = graphPath
   Line 511:   +	return eng, nil
   Line 512:    }

@@ -34,6 +34,12 @@ make verify
 # Extract knowledge graph from a folder
 ./vela extract ./my-repo
 
+# Query an extracted graph
+vela search --graph "./examples/wallet-service/.vela/graph.json" "explain Transaction"
+vela search --graph "./examples/wallet-service/.vela/graph.json" "who uses Transaction"
+vela search --graph "./examples/api-service/.vela/graph.json" "impact of OrderStatusDto"
+vela search --graph "./examples/mobile-app/.vela/graph.json" "who uses OrderListScreen"
+
 # Start interactive TUI to monitor extraction
 ./vela extract ./my-repo --tui
 
