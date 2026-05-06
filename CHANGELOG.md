@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.7.3](https://github.com/Syfra3/vela/compare/v1.7.2...v1.7.3) (2026-05-06)
+
+
+### Documentation
+
+* remove personal paths from examples ([63f535b](https://github.com/Syfra3/vela/commit/63f535b887238789a7fc294416beb4a8740efc8b))
+
 ## [1.7.2](https://github.com/Syfra3/vela/compare/v1.7.1...v1.7.2) (2026-04-25)
 
 
