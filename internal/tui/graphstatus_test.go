@@ -177,6 +177,37 @@ func TestGraphStatusModelRendersGlobalRegistrySection(t *testing.T) {
 	}
 }
 
+// REQ-003 → SCN-005 → TestSCN005_GraphStatusShowsProjectStatesAndFreshness
+func TestSCN005_GraphStatusShowsProjectStatesAndFreshness(t *testing.T) {
+	// Scenario: TUI shows graph status and freshness.
+	updatedAt := time.Date(2026, 6, 27, 8, 30, 0, 0, time.UTC)
+	m := GraphStatusModel{
+		global:     true,
+		termWidth:  120,
+		termHeight: 60,
+		registryData: igraph.RegistryStatusSnapshot{Repos: []igraph.RepoStatusSnapshot{
+			{Name: "missing", RepoRoot: "/work/missing", LoadError: "graph file missing"},
+			{Name: "fresh", RepoRoot: "/work/fresh", GraphPath: "/work/fresh/.vela/graph.db", Snapshot: igraph.StatusSnapshot{Freshness: igraph.FreshnessStats{Status: "fresh", GraphUpdatedAt: updatedAt, TrackedFiles: 7}}},
+			{Name: "stale", RepoRoot: "/work/stale", GraphPath: "/work/stale/.vela/graph.db", Snapshot: igraph.StatusSnapshot{Freshness: igraph.FreshnessStats{Status: "stale", GraphUpdatedAt: updatedAt.Add(-time.Hour), TrackedFiles: 3, StaleFiles: []string{"main.go"}}}},
+			{Name: "indexing", RepoRoot: "/work/indexing", GraphPath: "/work/indexing/.vela/graph.db", Snapshot: igraph.StatusSnapshot{Freshness: igraph.FreshnessStats{Status: "indexing"}}},
+			{Name: "error", RepoRoot: "/work/error", GraphPath: "/work/error/.vela/graph.db", LoadError: "permission denied"},
+		}},
+	}
+
+	view := m.renderContent()
+	for _, want := range []string{
+		"missing", "state missing",
+		"fresh", "state fresh", "updated 2026-06-27 08:30 UTC", "tracked files 7",
+		"stale", "state stale", "stale files main.go",
+		"indexing", "state indexing",
+		"error", "state error", "permission denied",
+	} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected %q in graph status view, got %q", want, view)
+		}
+	}
+}
+
 func TestGraphStatusModelSubtitleUsesSelectedRepositoryName(t *testing.T) {
 	t.Parallel()
 

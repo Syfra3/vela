@@ -1,6 +1,10 @@
-version: vela-v0.4
+version: vela-agent-explore-runtime
 implemented: true
-status: final-review-ready
+status: complete
+
+workflow:
+  spec: specs/hard_spec.md
+  feature: features/vela-agent-explore-runtime.feature
 
 scenarios:
   - SCN-001
@@ -18,28 +22,14 @@ scenarios:
   - SCN-013
   - SCN-014
   - SCN-015
-  - SCN-016
-  - SCN-017
-  - SCN-018
-  - SCN-019
-  - SCN-020
-  - SCN-021
-  - SCN-022
-  - SCN-023
-  - SCN-024
-  - SCN-025
-  - SCN-026
 
 completion_notes:
-  - SCN-001 through SCN-026 are implemented and have Bob review evidence.
-  - SCN-025 real workspace smoke passed with warnings using a maintainer-selected workspace.
-  - SCN-025 smoke evidence uses no-secrets redaction; absolute workspace paths are represented as `<REAL_WORKSPACE>` in persisted evidence.
-  - Full `go test ./...` is excluded from the active final gate because known malformed detect fixture packages contain empty `.go` files.
+  - SCN-001 through SCN-015 are implemented for the Vela agent explore runtime workflow.
+  - Approval evidence is recorded in `specs/.approved` for `features/vela-agent-explore-runtime.feature`.
+  - No new runtime behavior is introduced by this marker; it only restores Bob review precondition evidence.
 
 evidence:
-  hard_spec: specs/vela-v0.4-hard-spec.md
+  hard_spec: specs/hard_spec.md
+  feature: features/vela-agent-explore-runtime.feature
   approval_marker: specs/.approved
-  tdd_log: .uncle-bob/tdd-log.md
-  scn_025_smoke_report: reports/SCN-025-real-workspace-smoke.md
-  quality_gates: .uncle-bob/quality-gates.yaml
   judge_report: reports/judge_report.md

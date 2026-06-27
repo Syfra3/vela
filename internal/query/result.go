@@ -12,10 +12,12 @@ import (
 type ResultStatus string
 
 const (
-	ResultStatusOK         ResultStatus = "ok"
-	ResultStatusAmbiguous  ResultStatus = "ambiguous"
-	ResultStatusUnresolved ResultStatus = "unresolved"
-	ResultStatusError      ResultStatus = "error"
+	ResultStatusOK          ResultStatus = "ok"
+	ResultStatusPartial     ResultStatus = "partial"
+	ResultStatusUnavailable ResultStatus = "unavailable"
+	ResultStatusAmbiguous   ResultStatus = "ambiguous"
+	ResultStatusUnresolved  ResultStatus = "unresolved"
+	ResultStatusError       ResultStatus = "error"
 )
 
 // FreshnessStatus qualifies the runtime graph state used by a result.
@@ -24,20 +26,29 @@ type FreshnessStatus string
 const (
 	FreshnessUnknown FreshnessStatus = "unknown"
 	FreshnessFresh   FreshnessStatus = "fresh"
+	FreshnessWarming FreshnessStatus = "warming"
 	FreshnessStale   FreshnessStatus = "stale"
 )
 
 // Result is the minimal adapter-independent envelope for graph-backed answers.
 type Result struct {
-	SchemaVersion    string           `json:"schema_version"`
-	QueryKind        string           `json:"query_kind"`
-	Status           ResultStatus     `json:"status"`
-	ResolvedSubjects []Subject        `json:"resolved_subjects,omitempty"`
-	Facts            []Fact           `json:"facts,omitempty"`
-	Evidence         []types.Evidence `json:"evidence,omitempty"`
-	Confidence       types.Confidence `json:"confidence,omitempty"`
-	Freshness        Freshness        `json:"freshness"`
-	Diagnostics      []Diagnostic     `json:"diagnostics,omitempty"`
+	SchemaVersion         string           `json:"schema_version"`
+	QueryKind             string           `json:"query_kind"`
+	Status                ResultStatus     `json:"status"`
+	ResolvedSubjects      []Subject        `json:"resolved_subjects,omitempty"`
+	Facts                 []Fact           `json:"facts,omitempty"`
+	Evidence              []types.Evidence `json:"evidence,omitempty"`
+	Confidence            types.Confidence `json:"confidence,omitempty"`
+	Freshness             Freshness        `json:"freshness"`
+	Diagnostics           []Diagnostic     `json:"diagnostics"`
+	Answer                string           `json:"answer,omitempty"`
+	RelevantSource        []string         `json:"relevant_source,omitempty"`
+	PathsAndRelationships []Fact           `json:"paths_and_relationships,omitempty"`
+	ImpactRadius          string           `json:"impact_radius,omitempty"`
+	LayeredEvidence       []Fact           `json:"layered_evidence,omitempty"`
+	ConfidenceAndLimits   string           `json:"confidence_and_limits,omitempty"`
+	SuggestedNextQueries  []string         `json:"suggested_next_queries,omitempty"`
+	InterpretedIntent     string           `json:"interpreted_intent,omitempty"`
 }
 
 // Subject is a resolved graph subject included in a shared Result.
@@ -108,12 +119,23 @@ func (e *Engine) LookupResult(term string, limit int) Result {
 
 // ExploreResult returns structured broad-request resolution data for MCP agents.
 func (e *Engine) ExploreResult(request string, limit int) Result {
-	result := Result{SchemaVersion: "vela.query.v1", QueryKind: "explore", Status: ResultStatusOK, Freshness: e.Freshness()}
+	result := Result{
+		SchemaVersion:       "vela.explore.v1",
+		QueryKind:           "explore",
+		Status:              ResultStatusOK,
+		Freshness:           e.Freshness(),
+		InterpretedIntent:   exploreIntent(request),
+		ImpactRadius:        "not calculated for this explore result",
+		ConfidenceAndLimits: "Free-text matching is candidate discovery only, not proof.",
+	}
 	results := e.Lookup(request, limit)
 	nodeSet := make(map[string]bool, len(results))
 	for _, candidate := range results {
 		result.ResolvedSubjects = append(result.ResolvedSubjects, subjectFromNode(candidate.Node))
 		nodeSet[candidate.Node.ID] = true
+		if strings.TrimSpace(candidate.Node.SourceFile) != "" {
+			result.RelevantSource = append(result.RelevantSource, candidate.Node.SourceFile)
+		}
 	}
 	if len(results) == 0 {
 		result.Status = ResultStatusUnresolved
@@ -121,7 +143,17 @@ func (e *Engine) ExploreResult(request string, limit int) Result {
 		appendFreshnessDiagnostics(&result)
 		return result
 	}
-	result.Facts = e.factsForNodeSet(nodeSet)
+	result.Facts = e.exploreFactsForNodeSet(nodeSet)
+	result.PathsAndRelationships = result.Facts
+	result.LayeredEvidence = result.Facts
+	result.Answer = fmt.Sprintf("Resolved graph-backed candidates for %q", request)
+	if len(results) > 0 {
+		best := results[0].Node.Label
+		if strings.TrimSpace(best) == "" {
+			best = results[0].Node.ID
+		}
+		result.SuggestedNextQueries = []string{fmt.Sprintf("vela search \"explain %s\"", best), fmt.Sprintf("vela search \"who uses %s\"", best)}
+	}
 	if len(results) == 1 {
 		appendFreshnessDiagnostics(&result)
 		return result
@@ -130,6 +162,28 @@ func (e *Engine) ExploreResult(request string, limit int) Result {
 	result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "AMBIGUOUS_SUBJECT", Message: fmt.Sprintf("ambiguous subject resolution for %q; refine the request or run `vela lookup`", request)})
 	appendFreshnessDiagnostics(&result)
 	return result
+}
+
+func (e *Engine) exploreFactsForNodeSet(nodeSet map[string]bool) []Fact {
+	var facts []Fact
+	for _, edge := range e.graph.Edges {
+		if !nodeSet[edge.Source] && !nodeSet[edge.Target] {
+			continue
+		}
+		fact := factFromEdge(edge)
+		fact.Subject = e.nodeDisplayName(edge.Source)
+		fact.Object = e.nodeDisplayName(edge.Target)
+		facts = append(facts, fact)
+	}
+	return facts
+}
+
+func (e *Engine) nodeDisplayName(id string) string {
+	node, ok := e.nodeByID[id]
+	if !ok || strings.TrimSpace(node.Label) == "" {
+		return id
+	}
+	return node.Label
 }
 
 // ImpactResult returns structured reverse-dependency facts for an MCP impact query.

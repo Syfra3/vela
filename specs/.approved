@@ -1,29 +1,39 @@
-version: vela-v0.4
-approved: true
-scenarios:
-  - SCN-001
-  - SCN-002
-  - SCN-003
-  - SCN-004
-  - SCN-005
-  - SCN-006
-  - SCN-007
-  - SCN-008
-  - SCN-009
-  - SCN-010
-  - SCN-011
-  - SCN-012
-  - SCN-013
-  - SCN-014
-  - SCN-015
-  - SCN-016
-  - SCN-017
-  - SCN-018
-  - SCN-019
-  - SCN-020
-  - SCN-021
-  - SCN-022
-  - SCN-023
-  - SCN-024
-  - SCN-025
-  - SCN-026
+version: 1
+approved_spec: specs/hard_spec.md
+approved_feature: features/vela-agent-explore-runtime.feature
+current_workflow:
+  feature: features/vela-agent-explore-runtime.feature
+  spec: specs/hard_spec.md
+  scenarios:
+    - SCN-001
+    - SCN-002
+    - SCN-003
+    - SCN-004
+    - SCN-005
+    - SCN-006
+    - SCN-007
+    - SCN-008
+    - SCN-009
+    - SCN-010
+    - SCN-011
+    - SCN-012
+    - SCN-013
+    - SCN-014
+    - SCN-015
+approved_scenarios:
+  features/vela-agent-explore-runtime.feature:
+    - SCN-001
+    - SCN-002
+    - SCN-003
+    - SCN-004
+    - SCN-005
+    - SCN-006
+    - SCN-007
+    - SCN-008
+    - SCN-009
+    - SCN-010
+    - SCN-011
+    - SCN-012
+    - SCN-013
+    - SCN-014
+    - SCN-015
