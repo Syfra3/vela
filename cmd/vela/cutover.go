@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -224,6 +226,28 @@ func searchCmd() *cobra.Command {
 	return cmd
 }
 
+func exploreCmd() *cobra.Command {
+	var graphFile string
+	var limit int
+
+	cmd := &cobra.Command{
+		Use:   "explore <request>",
+		Short: "Resolve broad requests into graph-backed structural context",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			engine, err := loadEngine(graphFile)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), engine.RenderExplore(args[0], limit))
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: ~/.vela/graph.json)")
+	cmd.Flags().IntVar(&limit, "limit", 5, "Maximum candidate nodes to return")
+	return cmd
+}
+
 func lookupCmd() *cobra.Command {
 	var graphFile string
 	var limit int
@@ -258,6 +282,14 @@ func newBuildCommand(use string, aliases []string, alias bool) *cobra.Command {
 		Short:   "Build graph-truth knowledge graph from a repository",
 		Args:    cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			restoreGeneratedState := func() error { return nil }
+			if use == "update" {
+				var snapshotErr error
+				restoreGeneratedState, snapshotErr = snapshotGeneratedState(args[0], outDir)
+				if snapshotErr != nil {
+					return snapshotErr
+				}
+			}
 			result, err := runBuildService(cmd.Context(), outDir, types.BuildRequest{
 				RepoRoot:  args[0],
 				Languages: languages,
@@ -265,6 +297,9 @@ func newBuildCommand(use string, aliases []string, alias bool) *cobra.Command {
 				Patchers:  patchers,
 			})
 			if err != nil {
+				if restoreErr := restoreGeneratedState(); restoreErr != nil {
+					return fmt.Errorf("%w; restoring previous graph state: %v", err, restoreErr)
+				}
 				return err
 			}
 			if alias {
@@ -292,6 +327,57 @@ func newBuildCommand(use string, aliases []string, alias bool) *cobra.Command {
 	return cmd
 }
 
+type generatedFileSnapshot struct {
+	path    string
+	exists  bool
+	mode    os.FileMode
+	content []byte
+}
+
+func snapshotGeneratedState(repoRoot, outDir string) (func() error, error) {
+	if strings.TrimSpace(outDir) == "" {
+		outDir = filepath.Join(repoRoot, ".vela")
+	}
+	paths := []string{
+		filepath.Join(outDir, "graph.json"),
+		filepath.Join(outDir, "graph.db"),
+		filepath.Join(outDir, "manifest.json"),
+	}
+	snapshots := make([]generatedFileSnapshot, 0, len(paths))
+	for _, path := range paths {
+		snapshot := generatedFileSnapshot{path: path, mode: 0o644}
+		info, err := os.Stat(path)
+		if err == nil {
+			snapshot.exists = true
+			snapshot.mode = info.Mode().Perm()
+			snapshot.content, err = os.ReadFile(path)
+			if err != nil {
+				return nil, fmt.Errorf("snapshot %s: %w", path, err)
+			}
+		} else if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("snapshot %s: %w", path, err)
+		}
+		snapshots = append(snapshots, snapshot)
+	}
+	return func() error {
+		for _, snapshot := range snapshots {
+			if !snapshot.exists {
+				if err := os.Remove(snapshot.path); err != nil && !os.IsNotExist(err) {
+					return err
+				}
+				continue
+			}
+			if err := os.MkdirAll(filepath.Dir(snapshot.path), 0o755); err != nil {
+				return err
+			}
+			if err := os.WriteFile(snapshot.path, snapshot.content, snapshot.mode); err != nil {
+				return err
+			}
+		}
+		return nil
+	}, nil
+}
+
 func graphQueryCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "query",
@@ -310,6 +396,7 @@ func graphQueryCmd() *cobra.Command {
 func newQueryKindCmd(kind types.QueryKind, needsTarget bool) *cobra.Command {
 	var graphFile string
 	var limit int
+	var format string
 	use := string(kind) + " <subject>"
 	if needsTarget {
 		use += " <target>"
@@ -332,6 +419,16 @@ func newQueryKindCmd(kind types.QueryKind, needsTarget bool) *cobra.Command {
 			if needsTarget {
 				req.Target = args[1]
 			}
+			if strings.EqualFold(format, "json") {
+				core, err := coreResultForQueryRequest(engine, req)
+				if err != nil {
+					return err
+				}
+				return json.NewEncoder(cmd.OutOrStdout()).Encode(core)
+			}
+			if format != "" && !strings.EqualFold(format, "text") {
+				return fmt.Errorf("unsupported format %q", format)
+			}
 			result, err := engine.RunRequest(req)
 			if err != nil {
 				return annotateNodeLookupError(err, req.Subject)
@@ -342,7 +439,30 @@ func newQueryKindCmd(kind types.QueryKind, needsTarget bool) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: ~/.vela/graph.json)")
 	cmd.Flags().IntVar(&limit, "limit", types.DefaultQueryLimit, "Maximum related nodes to return")
+	cmd.Flags().StringVar(&format, "format", "text", "Output format: text or json")
 	return cmd
+}
+
+func coreResultForQueryRequest(engine *query.Engine, req types.QueryRequest) (query.Result, error) {
+	queryReq, err := app.NormalizeQueryRequest(app.QueryRequestInput{
+		Kind:    req.Kind,
+		Subject: req.Subject,
+		Target:  req.Target,
+		Limit:   req.Limit,
+	})
+	if err != nil {
+		return query.Result{}, err
+	}
+	switch queryReq.Kind {
+	case types.QueryKindExplain:
+		return engine.ExplainResult(queryReq.Subject), nil
+	case types.QueryKindImpact:
+		return engine.ImpactResult(queryReq.Subject, queryReq.Limit), nil
+	case types.QueryKindPath:
+		return engine.PathResult(queryReq.Subject, queryReq.Target), nil
+	default:
+		return query.Result{}, fmt.Errorf("json format is not available for %s", queryReq.Kind)
+	}
 }
 
 func annotateNodeLookupError(err error, subject string) error {

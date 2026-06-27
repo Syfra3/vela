@@ -6,6 +6,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	graphExport "github.com/Syfra3/vela/internal/export"
+	"github.com/Syfra3/vela/pkg/types"
 )
 
 func writeTestGraph(t *testing.T, dir string) string {
@@ -65,6 +68,281 @@ func TestLoadFromFile(t *testing.T) {
 	if !declaredFound {
 		t.Fatal("expected declared openapi edge in graph")
 	}
+}
+
+// REQ-002 → SCN-003 → TestSCN003_SQLiteGraphDatabaseRequiredForRuntimeQueries
+func TestSCN003_SQLiteGraphDatabaseRequiredForRuntimeQueries(t *testing.T) {
+	// Scenario: SQLite graph database is required for runtime queries.
+	dir := t.TempDir()
+	velaDir := filepath.Join(dir, ".vela")
+	if err := os.Mkdir(velaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := writeTestGraph(t, velaDir)
+
+	_, err := LoadFromFile(path)
+	if err == nil {
+		t.Fatal("LoadFromFile() error = nil, want runtime graph unavailable")
+	}
+	message := err.Error()
+	for _, want := range []string{"runtime graph unavailable", "graph.db", "graph.json", "vela build", "vela update"} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("expected %q in error %q", want, message)
+		}
+	}
+}
+
+// REQ-002 → SCN-003 → TestSCN003_SQLiteRuntimeTruthBeatsDisagreeingJSON
+func TestSCN003_SQLiteRuntimeTruthBeatsDisagreeingJSON(t *testing.T) {
+	// Scenario: SQLite graph database is required for runtime queries.
+	dir := t.TempDir()
+	velaDir := filepath.Join(dir, ".vela")
+	if err := os.Mkdir(velaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	graphJSON := writeTestGraph(t, velaDir)
+
+	if err := graphExport.WriteSQLiteGraphAtomic(&types.Graph{
+		Nodes: []types.Node{
+			{ID: "auth", Label: "AuthService", NodeType: "struct", SourceFile: "auth.go"},
+			{ID: "sqlite-db", Label: "SQLiteDatabase", NodeType: "struct", SourceFile: "sqlite_db.go"},
+		},
+		Edges: []types.Edge{
+			{Source: "auth", Target: "sqlite-db", Relation: "uses", SourceFile: "auth.go"},
+		},
+	}, velaDir); err != nil {
+		t.Fatalf("WriteSQLiteGraphAtomic error: %v", err)
+	}
+
+	eng, err := LoadFromFile(graphJSON)
+	if err != nil {
+		t.Fatalf("LoadFromFile error: %v", err)
+	}
+	result := eng.ExplainResult("AuthService")
+
+	if len(result.Facts) != 1 {
+		t.Fatalf("ExplainResult facts len = %d, want 1 SQLite-backed fact", len(result.Facts))
+	}
+	fact := result.Facts[0]
+	if fact.Object != "sqlite-db" {
+		t.Fatalf("ExplainResult fact object = %q, want SQLite object sqlite-db", fact.Object)
+	}
+	if fact.Object == "db" {
+		t.Fatal("ExplainResult used graph.json truth; want SQLite graph.db truth")
+	}
+}
+
+// REQ-001 → SCN-001 → TestSCN001_ImportantExplainAnswersIncludeProofMetadata
+func TestSCN001_ImportantExplainAnswersIncludeProofMetadata(t *testing.T) {
+	// Scenario: Important answers include proof metadata when evidence is available.
+	eng := newEngine(&types.Graph{
+		Nodes: []types.Node{
+			{ID: "auth", Label: "AuthService", NodeType: "struct", SourceFile: "auth.go"},
+			{ID: "db", Label: "Database", NodeType: "struct", SourceFile: "db.go"},
+		},
+		Edges: []types.Edge{
+			{
+				Source:     "auth",
+				Target:     "db",
+				Relation:   "uses",
+				SourceFile: "auth.go",
+				Metadata: map[string]interface{}{
+					"layer":                    "repo",
+					"evidence_type":            "static-analysis",
+					"evidence_source_artifact": "auth.go",
+					"evidence_confidence":      "extracted",
+				},
+			},
+		},
+		Metadata: map[string]interface{}{"freshness_status": "fresh"},
+	})
+
+	result := eng.ExplainResult("AuthService")
+
+	if result.Status != ResultStatusOK {
+		t.Fatalf("ExplainResult status = %q, want %q", result.Status, ResultStatusOK)
+	}
+	if len(result.Facts) != 1 {
+		t.Fatalf("ExplainResult facts len = %d, want 1", len(result.Facts))
+	}
+	fact := result.Facts[0]
+	if fact.Subject != "auth" || fact.Predicate != "uses" || fact.Object != "db" {
+		t.Fatalf("unexpected graph fact: %#v", fact)
+	}
+	if len(fact.Evidence) != 1 {
+		t.Fatalf("fact evidence len = %d, want 1", len(fact.Evidence))
+	}
+	proof := fact.Evidence[0]
+	if proof.Type != "static-analysis" || proof.SourceArtifact != "auth.go" || proof.Confidence != types.ConfidenceExtracted || proof.Layer != types.LayerRepo {
+		t.Fatalf("unexpected proof metadata: %#v", proof)
+	}
+	if fact.Confidence != types.ConfidenceExtracted {
+		t.Fatalf("fact confidence = %q, want %q", fact.Confidence, types.ConfidenceExtracted)
+	}
+	if result.Freshness.Status != FreshnessFresh {
+		t.Fatalf("freshness status = %q, want %q", result.Freshness.Status, FreshnessFresh)
+	}
+}
+
+// REQ-001/REQ-015 → SCN-002 → TestSCN002_UnsupportedExplainClaimReturnsUnresolvedDiagnostic
+func TestSCN002_UnsupportedExplainClaimReturnsUnresolvedDiagnostic(t *testing.T) {
+	// Scenario: Vela refuses to invent an answer when no graph-backed fact exists.
+	eng := newEngine(&types.Graph{
+		Nodes: []types.Node{
+			{ID: "auth", Label: "AuthService", NodeType: "struct", SourceFile: "auth.go"},
+		},
+		Metadata: map[string]interface{}{"freshness_status": "fresh"},
+	})
+
+	result := eng.ExplainResult("AuthService")
+
+	if result.Status != ResultStatusUnresolved {
+		t.Fatalf("ExplainResult status = %q, want %q", result.Status, ResultStatusUnresolved)
+	}
+	if len(result.Facts) != 0 {
+		t.Fatalf("ExplainResult facts len = %d, want 0 unsupported facts", len(result.Facts))
+	}
+	if len(result.Diagnostics) != 1 {
+		t.Fatalf("ExplainResult diagnostics len = %d, want 1", len(result.Diagnostics))
+	}
+	diagnostic := result.Diagnostics[0]
+	if diagnostic.Code != "NO_GRAPH_BACKED_ANSWER" || !strings.Contains(diagnostic.Message, "no graph-backed answer") {
+		t.Fatalf("unexpected diagnostic: %#v", diagnostic)
+	}
+}
+
+// REQ-010/REQ-015 → SCN-013 → TestSCN013_HigherConfidenceInterfaceEvidenceOutranksConflict
+func TestSCN013_HigherConfidenceInterfaceEvidenceOutranksConflict(t *testing.T) {
+	// Scenario: Higher-confidence evidence outranks conflicting lower-confidence evidence without hiding conflict.
+	eng := newEngine(&types.Graph{
+		Nodes: []types.Node{
+			{ID: "client", Label: "CheckoutClient", NodeType: "service", SourceFile: "client.go"},
+			{ID: "declared-api", Label: "OrdersAPI", NodeType: "service", SourceFile: "openapi.yaml"},
+			{ID: "inferred-api", Label: "OrderServiceGuess", NodeType: "service", SourceFile: "client.go"},
+		},
+		Edges: []types.Edge{
+			{
+				Source:     "client",
+				Target:     "inferred-api",
+				Relation:   "calls",
+				SourceFile: "client.go",
+				Metadata: map[string]interface{}{
+					"interface_name":           "orders-http",
+					"interface_route":          "/orders",
+					"interface_method":         "GET",
+					"interface_provider":       "HttpClientProvider",
+					"claim_status":             "inferred",
+					"layer":                    "repo",
+					"evidence_type":            "http-client",
+					"evidence_source_artifact": "client.go",
+					"evidence_confidence":      "inferred",
+				},
+			},
+			{
+				Source:     "client",
+				Target:     "declared-api",
+				Relation:   "calls",
+				SourceFile: "openapi.yaml",
+				Metadata: map[string]interface{}{
+					"interface_name":           "orders-http",
+					"interface_route":          "/orders",
+					"interface_method":         "GET",
+					"interface_provider":       "OpenAPIProvider",
+					"claim_status":             "declared",
+					"layer":                    "contract",
+					"evidence_type":            "openapi",
+					"evidence_source_artifact": "openapi.yaml",
+					"evidence_confidence":      "declared",
+				},
+			},
+		},
+		Metadata: map[string]interface{}{"freshness_status": "fresh"},
+	})
+
+	result := eng.ExplainResult("CheckoutClient")
+
+	if result.Status != ResultStatusOK {
+		t.Fatalf("ExplainResult status = %q, want %q", result.Status, ResultStatusOK)
+	}
+	if len(result.Facts) != 2 {
+		t.Fatalf("ExplainResult facts len = %d, want 2 preserved facts", len(result.Facts))
+	}
+	primary := result.Facts[0]
+	if primary.Object != "declared-api" || primary.Confidence != types.ConfidenceDeclared {
+		t.Fatalf("primary fact = %#v, want declared fact to outrank inferred conflict", primary)
+	}
+	if got := primary.Metadata["claim_status"]; got != "declared" {
+		t.Fatalf("primary claim_status = %v, want declared", got)
+	}
+	if len(result.Diagnostics) != 1 {
+		t.Fatalf("diagnostics len = %d, want 1 conflict diagnostic", len(result.Diagnostics))
+	}
+	diagnostic := result.Diagnostics[0]
+	if diagnostic.Code != "EVIDENCE_CONFLICT" || !strings.Contains(diagnostic.Message, "inferred") || !strings.Contains(diagnostic.Message, "declared") {
+		t.Fatalf("unexpected conflict diagnostic: %#v", diagnostic)
+	}
+}
+
+// REQ-015 → SCN-026 → TestSCN026_MultipleDiagnosticsPreservedInDegradedExploreResult
+func TestSCN026_MultipleDiagnosticsPreservedInDegradedExploreResult(t *testing.T) {
+	// Scenario: Multiple diagnostics are preserved in degraded results.
+	eng := newEngine(&types.Graph{
+		Nodes: []types.Node{
+			{ID: "auth-service", Label: "auth", NodeType: "service", SourceFile: "services/auth/main.go"},
+			{ID: "auth-client", Label: "auth", NodeType: "client", SourceFile: "clients/auth/client.go"},
+			{ID: "login-handler", Label: "LoginHandler", NodeType: "function", SourceFile: "services/auth/main.go"},
+		},
+		Edges: []types.Edge{
+			{
+				Source:     "auth-service",
+				Target:     "login-handler",
+				Relation:   "defines",
+				SourceFile: "services/auth/main.go",
+				Metadata: map[string]interface{}{
+					"layer":                    "repo",
+					"evidence_type":            "static-analysis",
+					"evidence_source_artifact": "services/auth/main.go",
+					"evidence_confidence":      "extracted",
+				},
+			},
+		},
+		Metadata: map[string]interface{}{
+			"freshness_status":    "stale",
+			"stale_files":         []string{"services/auth/main.go"},
+			"recommended_actions": []string{"vela update", "vela build"},
+		},
+	})
+
+	result := eng.ExploreResult("auth", 5)
+
+	if result.Status != ResultStatusAmbiguous {
+		t.Fatalf("ExploreResult status = %q, want %q", result.Status, ResultStatusAmbiguous)
+	}
+	if !queryDiagnosticContains(result.Diagnostics, "STALE_GRAPH", "services/auth/main.go") {
+		t.Fatalf("diagnostics = %+v, want stale graph diagnostic naming stale file", result.Diagnostics)
+	}
+	if !queryDiagnosticContains(result.Diagnostics, "AMBIGUOUS_SUBJECT", "auth") {
+		t.Fatalf("diagnostics = %+v, want ambiguity diagnostic naming query", result.Diagnostics)
+	}
+	if len(result.Facts) != 1 {
+		t.Fatalf("ExploreResult facts len = %d, want available lower-confidence fact preserved", len(result.Facts))
+	}
+	fact := result.Facts[0]
+	if fact.Confidence != types.ConfidenceExtracted {
+		t.Fatalf("fact confidence = %q, want %q", fact.Confidence, types.ConfidenceExtracted)
+	}
+	if result.Freshness.Status != FreshnessStale {
+		t.Fatalf("freshness status = %q, want stale", result.Freshness.Status)
+	}
+}
+
+func queryDiagnosticContains(diagnostics []Diagnostic, code, text string) bool {
+	for _, diagnostic := range diagnostics {
+		if diagnostic.Code == code && strings.Contains(diagnostic.Message, text) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestExplain_ResolvesCanonicalIDAndShowsEvidence(t *testing.T) {
@@ -171,6 +449,61 @@ func TestPath_DirectEdge(t *testing.T) {
 	}
 	if !strings.Contains(result, "[repo/struct]") {
 		t.Errorf("expected layer-aware path output, got: %q", result)
+	}
+}
+
+// REQ-012/REQ-010 → SCN-017 → TestSCN017_CrossRepoPathIncludesInferredInterfaceBridgeEvidence
+func TestSCN017_CrossRepoPathIncludesInferredInterfaceBridgeEvidence(t *testing.T) {
+	// Scenario: Cross-repo path includes confidence for interface bridge evidence.
+	eng := newEngine(&types.Graph{
+		Nodes: []types.Node{
+			{ID: "repo:billing-ui:symbol:CheckoutPage", Label: "CheckoutPage", NodeType: "symbol", SourceFile: "apps/billing-ui/checkout.ts"},
+			{ID: "interface:orders-http", Label: "Orders HTTP", NodeType: "interface", SourceFile: ".vela/workspace.yaml", Metadata: map[string]interface{}{"layer": "workspace"}},
+			{ID: "repo:orders-api:symbol:CreateOrderHandler", Label: "CreateOrderHandler", NodeType: "symbol", SourceFile: "services/orders-api/handler.go"},
+		},
+		Edges: []types.Edge{
+			{
+				Source:   "repo:billing-ui:symbol:CheckoutPage",
+				Target:   "interface:orders-http",
+				Relation: "calls",
+				Metadata: map[string]interface{}{
+					"interface_name":             "orders-http",
+					"interface_provider":         "HttpClientProvider",
+					"claim_status":               "inferred",
+					"layer":                      "workspace",
+					"evidence_type":              "interface-bridge",
+					"evidence_source_artifact":   "apps/billing-ui/checkout.ts",
+					"evidence_confidence":        "inferred",
+					"bridge_evidence_confidence": "inferred",
+				},
+			},
+			{
+				Source:   "interface:orders-http",
+				Target:   "repo:orders-api:symbol:CreateOrderHandler",
+				Relation: "routes_to",
+				Metadata: map[string]interface{}{
+					"interface_name":             "orders-http",
+					"interface_provider":         "WorkspaceHintsProvider",
+					"claim_status":               "inferred",
+					"layer":                      "workspace",
+					"evidence_type":              "interface-bridge",
+					"evidence_source_artifact":   ".vela/workspace.yaml",
+					"evidence_confidence":        "inferred",
+					"bridge_evidence_confidence": "inferred",
+				},
+			},
+		},
+	})
+
+	result := eng.Path("CheckoutPage", "CreateOrderHandler")
+
+	for _, want := range []string{"CheckoutPage", "Orders HTTP", "CreateOrderHandler", "confidence=inferred", "interface bridge=inferred", "not a declared contract path"} {
+		if !strings.Contains(result, want) {
+			t.Fatalf("expected %q in cross-repo path output, got: %q", want, result)
+		}
+	}
+	if strings.Contains(result, "declared contract path") && !strings.Contains(result, "not a declared contract path") {
+		t.Fatalf("path was presented as declared contract truth: %q", result)
 	}
 }
 

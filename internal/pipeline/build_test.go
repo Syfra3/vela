@@ -2,6 +2,8 @@ package pipeline
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 
 	"github.com/Syfra3/vela/internal/export"
 	igraph "github.com/Syfra3/vela/internal/graph"
+	"github.com/Syfra3/vela/internal/query"
 	"github.com/Syfra3/vela/internal/scip"
 	"github.com/Syfra3/vela/pkg/types"
 )
@@ -32,6 +35,362 @@ func writeTestFile(t *testing.T, path string, body string) {
 	}
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		t.Fatalf("WriteFile(%s) error = %v", path, err)
+	}
+}
+
+// REQ-002/REQ-003 → SCN-004 → TestSCN004_BuildCreatesRuntimeAndGeneratedArtifacts
+func TestSCN004_BuildCreatesRuntimeAndGeneratedArtifacts(t *testing.T) {
+	// Scenario: Build creates runtime and generated graph artifacts with SQLite as truth.
+	repoRoot := t.TempDir()
+	outDir := filepath.Join(repoRoot, ".vela")
+	writeTestFile(t, filepath.Join(repoRoot, "main.go"), "package main\n")
+
+	builder := NewBuilder(Config{
+		Detect: func(string) ([]string, error) {
+			return []string{filepath.Join(repoRoot, "main.go")}, nil
+		},
+		Scanner: &fakeScanner{
+			nodes: []types.Node{{ID: "main", Label: "main", NodeType: "package", SourceFile: "main.go"}},
+			edges: []types.Edge{},
+		},
+		GraphBuilder: igraph.Build,
+		OutDir:       outDir,
+	})
+
+	result, err := builder.Build(context.Background(), types.BuildRequest{RepoRoot: repoRoot})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	for _, path := range []string{
+		filepath.Join(outDir, "graph.db"),
+		filepath.Join(outDir, "graph.json"),
+		filepath.Join(outDir, "manifest.json"),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected build artifact %s: %v", path, err)
+		}
+	}
+	graphDB, err := os.ReadFile(filepath.Join(outDir, "graph.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(graphDB), "SQLite format 3\x00") {
+		t.Fatal("graph.db is not a SQLite runtime store")
+	}
+	if result.GraphPath != filepath.Join(outDir, "graph.json") {
+		t.Fatalf("GraphPath = %q, want generated debug graph.json path", result.GraphPath)
+	}
+	data, err := os.ReadFile(filepath.Join(outDir, "graph.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var generated map[string]any
+	if err := json.Unmarshal(data, &generated); err != nil {
+		t.Fatalf("graph.json is invalid debug JSON: %v", err)
+	}
+}
+
+// REQ-014 → SCN-021 → TestSCN021_SingleRepoSQLiteFixturePersistsQueryableGraphFacts
+func TestSCN021_SingleRepoSQLiteFixturePersistsQueryableGraphFacts(t *testing.T) {
+	// Scenario: Single-repo fixture proves SQLite graph build and symbol dependency queries.
+	repoRoot := t.TempDir()
+	outDir := filepath.Join(repoRoot, ".vela")
+	writeTestFile(t, filepath.Join(repoRoot, "handler.go"), "package fixture\nfunc Handler() { Store() }\n")
+	writeTestFile(t, filepath.Join(repoRoot, "store.go"), "package fixture\nfunc Store() {}\n")
+
+	builder := NewBuilder(Config{
+		Detect: func(string) ([]string, error) {
+			return []string{filepath.Join(repoRoot, "handler.go"), filepath.Join(repoRoot, "store.go")}, nil
+		},
+		Scanner: &fakeScanner{
+			nodes: []types.Node{
+				{ID: "fixture:file:handler.go", Label: "handler.go", NodeType: string(types.NodeTypeFile), SourceFile: "handler.go"},
+				{ID: "fixture:file:store.go", Label: "store.go", NodeType: string(types.NodeTypeFile), SourceFile: "store.go"},
+				{ID: "fixture:handler.go:Handler", Label: "Handler", NodeType: string(types.NodeTypeFunction), SourceFile: "handler.go"},
+				{ID: "fixture:store.go:Store", Label: "Store", NodeType: string(types.NodeTypeFunction), SourceFile: "store.go"},
+			},
+			edges: []types.Edge{
+				{Source: "fixture:file:handler.go", Target: "fixture:handler.go:Handler", Relation: string(types.FactKindContains)},
+				{Source: "fixture:file:store.go", Target: "fixture:store.go:Store", Relation: string(types.FactKindContains)},
+				{Source: "fixture:handler.go:Handler", Target: "fixture:store.go:Store", Relation: string(types.FactKindCalls), Confidence: string(types.ConfidenceExtracted)},
+			},
+		},
+		GraphBuilder: igraph.Build,
+		OutDir:       outDir,
+	})
+
+	if _, err := builder.Build(context.Background(), types.BuildRequest{RepoRoot: repoRoot}); err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	db, err := sql.Open("sqlite", filepath.Join(outDir, "graph.db"))
+	if err != nil {
+		t.Fatalf("Open(graph.db) error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	assertSQLiteScalar(t, db, `SELECT COUNT(*) FROM nodes WHERE canonical_key = 'fixture:handler.go:Handler' AND kind = 'function' AND label = 'Handler'`, 1)
+	assertSQLiteScalar(t, db, `SELECT COUNT(*) FROM edges WHERE from_node_id = 'fixture:handler.go:Handler' AND to_node_id = 'fixture:store.go:Store' AND kind = 'calls'`, 1)
+	assertSQLiteScalar(t, db, `SELECT COUNT(*) FROM pragma_index_list('nodes') WHERE [unique] = 1 AND name = 'nodes_canonical_key_idx'`, 1)
+}
+
+// REQ-009/REQ-010/REQ-015 → SCN-012 → TestSCN012_InterfaceEvidenceFixturePreservesClaimStatuses
+func TestSCN012_InterfaceEvidenceFixturePreservesClaimStatuses(t *testing.T) {
+	// Scenario: Interface evidence fixture preserves declared, extracted, inferred, and ambiguous facts.
+	repoRoot := t.TempDir()
+	outDir := filepath.Join(repoRoot, ".vela")
+	writeTestFile(t, filepath.Join(repoRoot, "main.go"), "package fixture\n")
+
+	nodes := []types.Node{
+		{ID: "service:frontend", Label: "frontend", NodeType: string(types.NodeTypeService)},
+		{ID: "service:billing", Label: "billing", NodeType: string(types.NodeTypeService)},
+	}
+	edges := []types.Edge{
+		interfaceEvidenceEdge("OpenAPIProvider", "declared", "contracts/openapi.yaml"),
+		interfaceEvidenceEdge("ProtoProvider", "declared", "proto/billing.proto"),
+		interfaceEvidenceEdge("FrameworkRoutesProvider", "extracted", "cmd/server/routes.go"),
+		interfaceEvidenceEdge("HttpClientProvider", "extracted", "web/client.ts"),
+		interfaceEvidenceEdge("ManifestProvider", "inferred", "package.json"),
+		interfaceEvidenceEdge("WorkspaceHintsProvider", "declared_hint", ".vela/workspace.yaml"),
+		interfaceEvidenceEdge("NamingHeuristicsProvider", "ambiguous", "services/billing"),
+	}
+
+	builder := NewBuilder(Config{
+		Detect: func(string) ([]string, error) {
+			return []string{filepath.Join(repoRoot, "main.go")}, nil
+		},
+		Scanner:      &fakeScanner{nodes: nodes, edges: edges},
+		GraphBuilder: igraph.Build,
+		OutDir:       outDir,
+	})
+
+	if _, err := builder.Build(context.Background(), types.BuildRequest{RepoRoot: repoRoot}); err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+
+	db, err := sql.Open("sqlite", filepath.Join(outDir, "graph.db"))
+	if err != nil {
+		t.Fatalf("Open(graph.db) error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	assertInterfaceEvidenceStatus(t, db, "OpenAPIProvider", "declared")
+	assertInterfaceEvidenceStatus(t, db, "ProtoProvider", "declared")
+	assertInterfaceEvidenceStatus(t, db, "FrameworkRoutesProvider", "extracted")
+	assertInterfaceEvidenceStatus(t, db, "HttpClientProvider", "extracted")
+	assertInterfaceEvidenceStatus(t, db, "ManifestProvider", "inferred")
+	assertInterfaceEvidenceStatus(t, db, "WorkspaceHintsProvider", "declared_hint")
+	assertInterfaceEvidenceStatus(t, db, "NamingHeuristicsProvider", "ambiguous")
+}
+
+// REQ-011 → SCN-014 → TestSCN014_WorkspaceYAMLDeclaresMultiCodebaseTopology
+func TestSCN014_WorkspaceYAMLDeclaresMultiCodebaseTopology(t *testing.T) {
+	// Scenario: Workspace YAML declares multi-codebase topology.
+	repoRoot := t.TempDir()
+	outDir := filepath.Join(repoRoot, ".vela")
+	writeTestFile(t, filepath.Join(repoRoot, "main.go"), "package fixture\n")
+	writeTestFile(t, filepath.Join(repoRoot, ".vela", "workspace.yaml"), `organization:
+  name: acme
+repositories:
+  - name: billing-api
+    services:
+      - name: billing
+        kind: api
+interfaces:
+  - name: billing-http
+    service: billing
+    kind: http
+known_links:
+  - from: checkout
+    to: billing
+    interface: billing-http
+`)
+
+	builder := NewBuilder(Config{
+		Detect: func(string) ([]string, error) {
+			return []string{filepath.Join(repoRoot, "main.go")}, nil
+		},
+		Scanner:      &fakeScanner{},
+		GraphBuilder: igraph.Build,
+		OutDir:       outDir,
+	})
+
+	result, err := builder.Build(context.Background(), types.BuildRequest{RepoRoot: repoRoot})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	assertGraphHasWorkspaceNode(t, result.Graph, "workspace:repo:billing-api", "repo")
+	assertGraphHasWorkspaceNode(t, result.Graph, "workspace:service:billing", "service")
+	assertGraphHasWorkspaceNode(t, result.Graph, "workspace:interface:billing-http", "interface")
+	assertGraphHasWorkspaceEdge(t, result.Graph, "workspace:repo:billing-api", "billing", "exposes")
+	assertGraphHasWorkspaceEdge(t, result.Graph, "workspace:service:billing", "billing-http", "exposes")
+	assertGraphHasWorkspaceEdge(t, result.Graph, "workspace:service:checkout", "billing", "uses")
+
+	db, err := sql.Open("sqlite", filepath.Join(outDir, "graph.db"))
+	if err != nil {
+		t.Fatalf("Open(graph.db) error = %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	assertSQLiteScalar(t, db, `SELECT COUNT(*) FROM workspace_facts WHERE fact_kind = 'exposes' AND subject_key = 'workspace:repo:billing-api' AND object_key = 'workspace:service:billing' AND confidence = 'declared_hint' AND source_id = '.vela/workspace.yaml'`, 1)
+	assertSQLiteScalar(t, db, `SELECT COUNT(*) FROM workspace_facts WHERE fact_kind = 'uses' AND subject_key = 'workspace:service:checkout' AND object_key = 'workspace:service:billing' AND confidence = 'declared_hint' AND source_id = '.vela/workspace.yaml'`, 1)
+}
+
+// REQ-011/REQ-015 → SCN-015 → TestSCN015_InvalidWorkspaceYAMLReturnsValidationDiagnostic
+func TestSCN015_InvalidWorkspaceYAMLReturnsValidationDiagnostic(t *testing.T) {
+	// Scenario: Invalid workspace YAML fails with actionable validation diagnostics.
+	repoRoot := t.TempDir()
+	outDir := filepath.Join(repoRoot, ".vela")
+	writeTestFile(t, filepath.Join(repoRoot, "main.go"), "package fixture\n")
+	writeTestFile(t, filepath.Join(repoRoot, ".vela", "workspace.yaml"), `organization:
+  name: acme
+repositories:
+  - services:
+      - name: billing
+        kind: api
+`)
+
+	builder := NewBuilder(Config{
+		Detect: func(string) ([]string, error) {
+			return []string{filepath.Join(repoRoot, "main.go")}, nil
+		},
+		Scanner:      &fakeScanner{},
+		GraphBuilder: igraph.Build,
+		OutDir:       outDir,
+	})
+
+	_, err := builder.Build(context.Background(), types.BuildRequest{RepoRoot: repoRoot})
+	if err == nil {
+		t.Fatal("Build() error = nil, want workspace validation error")
+	}
+	if got := err.Error(); !strings.Contains(got, "workspace validation") || !strings.Contains(got, ".vela/workspace.yaml repositories[0].name") {
+		t.Fatalf("Build() error = %q, want actionable repositories[0].name validation diagnostic", got)
+	}
+	if _, statErr := os.Stat(filepath.Join(outDir, "graph.db")); !os.IsNotExist(statErr) {
+		t.Fatalf("graph.db stat error = %v, want not exist after invalid topology", statErr)
+	}
+}
+
+// REQ-014 → SCN-022 → TestSCN022_MultiRepoFixtureRoutesThroughDeclaredWorkspaceTopology
+func TestSCN022_MultiRepoFixtureRoutesThroughDeclaredWorkspaceTopology(t *testing.T) {
+	// Scenario: Multi-repo fixture proves declared workspace routing.
+	repoRoot := t.TempDir()
+	outDir := filepath.Join(repoRoot, ".vela")
+	writeTestFile(t, filepath.Join(repoRoot, "main.go"), "package fixture\n")
+	writeTestFile(t, filepath.Join(repoRoot, ".vela", "workspace.yaml"), `organization:
+  name: acme
+repositories:
+  - name: billing-api
+    services:
+      - name: billing
+        kind: api
+  - name: checkout-web
+    services:
+      - name: checkout
+        kind: web
+interfaces:
+  - name: billing-http
+    service: billing
+    kind: http
+known_links:
+  - from: checkout
+    to: billing
+    interface: billing-http
+`)
+
+	builder := NewBuilder(Config{
+		Detect: func(string) ([]string, error) {
+			return []string{filepath.Join(repoRoot, "main.go")}, nil
+		},
+		Scanner:      &fakeScanner{},
+		GraphBuilder: igraph.Build,
+		OutDir:       outDir,
+	})
+
+	result, err := builder.Build(context.Background(), types.BuildRequest{RepoRoot: repoRoot})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	engine, err := query.LoadFromFile(result.GraphPath)
+	if err != nil {
+		t.Fatalf("LoadFromFile(%s) error = %v", result.GraphPath, err)
+	}
+
+	output := engine.RenderExplore("checkout billing", 5)
+	for _, want := range []string{
+		"Workspace routes for \"checkout billing\":",
+		"billing-api score=",
+		"checkout-web score=",
+		"billing-api [workspace/repo] --[exposes]--> billing [workspace/service]",
+		"checkout-web [workspace/repo] --[exposes]--> checkout [workspace/service]",
+		"checkout [workspace/service] --[uses]--> billing [workspace/service]",
+		"artifact=.vela/workspace.yaml",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected explore output to contain %q, got %q", want, output)
+		}
+	}
+}
+
+func assertGraphHasWorkspaceNode(t *testing.T, g *types.Graph, id, kind string) {
+	t.Helper()
+	for _, node := range g.Nodes {
+		if node.ID == id && node.NodeType == kind && node.SourceFile == ".vela/workspace.yaml" && node.Metadata["layer"] == "workspace" && node.Metadata["evidence_type"] == "routing" {
+			return
+		}
+	}
+	t.Fatalf("workspace node %s/%s with routing provenance not found", id, kind)
+}
+
+func assertGraphHasWorkspaceEdge(t *testing.T, g *types.Graph, source, target, relation string) {
+	t.Helper()
+	for _, edge := range g.Edges {
+		if edge.Source == source && edge.Target == target && edge.Relation == relation && edge.SourceFile == ".vela/workspace.yaml" && edge.Metadata["layer"] == "workspace" && edge.Metadata["evidence_type"] == "routing" {
+			return
+		}
+	}
+	t.Fatalf("workspace edge %s -[%s]-> %s with routing provenance not found", source, relation, target)
+}
+
+func interfaceEvidenceEdge(provider, claimStatus, sourceArtifact string) types.Edge {
+	return types.Edge{
+		Source:     "service:frontend",
+		Target:     "service:billing",
+		Relation:   "interface_fact",
+		SourceFile: sourceArtifact,
+		Metadata: map[string]interface{}{
+			"interface_provider":       provider,
+			"interface_kind":           "http",
+			"interface_name":           provider + " billing link",
+			"interface_route":          "/billing",
+			"interface_method":         "GET",
+			"evidence_confidence":      claimStatus,
+			"claim_status":             claimStatus,
+			"evidence_source_artifact": sourceArtifact,
+		},
+	}
+}
+
+func assertInterfaceEvidenceStatus(t *testing.T, db *sql.DB, provider, wantStatus string) {
+	t.Helper()
+	var got string
+	err := db.QueryRow(`SELECT claim_status FROM interface_facts WHERE provider = ?`, provider).Scan(&got)
+	if err != nil {
+		t.Fatalf("interface fact provider %s missing: %v", provider, err)
+	}
+	if got != wantStatus {
+		t.Fatalf("interface fact provider %s claim_status = %q, want %q", provider, got, wantStatus)
+	}
+}
+
+func assertSQLiteScalar(t *testing.T, db *sql.DB, query string, want int) {
+	t.Helper()
+	var got int
+	if err := db.QueryRow(query).Scan(&got); err != nil {
+		t.Fatalf("QueryRow(%q) error = %v", query, err)
+	}
+	if got != want {
+		t.Fatalf("QueryRow(%q) = %d, want %d", query, got, want)
 	}
 }
 

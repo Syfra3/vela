@@ -48,27 +48,17 @@ func New(dir string, exts []string, handler Handler) (*Watcher, error) {
 // Run starts the watch loop until stop is closed.
 func (w *Watcher) Run(stop <-chan struct{}) error {
 	defer w.fw.Close()
-	pending := make(map[string]struct{})
-	var timer *time.Timer
-	flush := func() {
-		if len(pending) == 0 {
-			return
-		}
-		changed := make([]string, 0, len(pending))
-		for f := range pending {
-			changed = append(changed, f)
-		}
-		pending = make(map[string]struct{})
+	debouncer := NewDebouncer(debounceDelay, func(changed []string) error {
 		if err := w.handler(changed); err != nil {
 			fmt.Fprintf(os.Stderr, "[watch] handler error: %v\n", err)
+			return err
 		}
-	}
+		return nil
+	})
+	defer debouncer.Stop()
 	for {
 		select {
 		case <-stop:
-			if timer != nil {
-				timer.Stop()
-			}
 			return nil
 		case event, ok := <-w.fw.Events:
 			if !ok {
@@ -78,11 +68,7 @@ func (w *Watcher) Run(stop <-chan struct{}) error {
 				continue
 			}
 			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
-				pending[event.Name] = struct{}{}
-				if timer != nil {
-					timer.Stop()
-				}
-				timer = time.AfterFunc(debounceDelay, flush)
+				debouncer.Trigger(event.Name)
 			}
 			if event.Has(fsnotify.Create) {
 				if info, err := os.Stat(event.Name); err == nil && info.IsDir() {

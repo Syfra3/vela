@@ -46,11 +46,73 @@ func NewServer(engine *query.Engine) *server.MCPServer {
 }
 
 func registerTools(srv *server.MCPServer, engine *query.Engine) {
+	registerExploreTool(srv, engine)
+	registerLookupTool(srv, engine)
 	registerQueryTool(srv, engine, "vela_dependencies", types.QueryKindDependencies, false)
 	registerQueryTool(srv, engine, "vela_reverse_dependencies", types.QueryKindReverseDependencies, false)
 	registerQueryTool(srv, engine, "vela_impact", types.QueryKindImpact, false)
 	registerQueryTool(srv, engine, "vela_path", types.QueryKindPath, true)
 	registerQueryTool(srv, engine, "vela_explain", types.QueryKindExplain, false)
+	registerStatusTool(srv, engine)
+}
+
+func registerExploreTool(srv *server.MCPServer, engine *query.Engine) {
+	srv.AddTool(markmcp.NewTool("vela_explore",
+		markmcp.WithDescription("Resolve broad graph context requests into graph-backed candidates."),
+		markmcp.WithReadOnlyHintAnnotation(true),
+		markmcp.WithString("query", markmcp.Required(), markmcp.Description("Natural-language request to resolve")),
+		markmcp.WithNumber("limit", markmcp.Description("Maximum candidates to include")),
+	), func(ctx context.Context, req markmcp.CallToolRequest) (*markmcp.CallToolResult, error) {
+		return handleExploreTool(engine)(ctx, req)
+	})
+}
+
+func handleExploreTool(engine *query.Engine) server.ToolHandlerFunc {
+	return func(ctx context.Context, req markmcp.CallToolRequest) (*markmcp.CallToolResult, error) {
+		_ = ctx
+		input := strings.TrimSpace(req.GetString("query", ""))
+		if input == "" {
+			return markmcp.NewToolResultStructuredOnly(engine.DiagnosticResult("explore", "VALIDATION_ERROR", "query is required")), nil
+		}
+		return markmcp.NewToolResultStructuredOnly(engine.ExploreResult(input, req.GetInt("limit", types.DefaultQueryLimit))), nil
+	}
+}
+
+func registerLookupTool(srv *server.MCPServer, engine *query.Engine) {
+	srv.AddTool(markmcp.NewTool("vela_lookup",
+		markmcp.WithDescription("Resolve a term into exact graph node candidates."),
+		markmcp.WithReadOnlyHintAnnotation(true),
+		markmcp.WithString("term", markmcp.Required(), markmcp.Description("Term to resolve")),
+		markmcp.WithNumber("limit", markmcp.Description("Maximum candidates to include")),
+	), func(ctx context.Context, req markmcp.CallToolRequest) (*markmcp.CallToolResult, error) {
+		return handleLookupTool(engine)(ctx, req)
+	})
+}
+
+func handleLookupTool(engine *query.Engine) server.ToolHandlerFunc {
+	return func(ctx context.Context, req markmcp.CallToolRequest) (*markmcp.CallToolResult, error) {
+		_ = ctx
+		term := strings.TrimSpace(req.GetString("term", ""))
+		if term == "" {
+			return markmcp.NewToolResultStructuredOnly(engine.DiagnosticResult("lookup", "VALIDATION_ERROR", "term is required")), nil
+		}
+		return markmcp.NewToolResultStructuredOnly(engine.LookupResult(term, req.GetInt("limit", types.DefaultQueryLimit))), nil
+	}
+}
+
+func registerStatusTool(srv *server.MCPServer, engine *query.Engine) {
+	srv.AddTool(markmcp.NewTool("vela_status",
+		markmcp.WithDescription("Report Vela runtime graph status."),
+		markmcp.WithReadOnlyHintAnnotation(true),
+	), handleStatusTool(engine))
+}
+
+func handleStatusTool(engine *query.Engine) server.ToolHandlerFunc {
+	return func(ctx context.Context, req markmcp.CallToolRequest) (*markmcp.CallToolResult, error) {
+		_ = ctx
+		_ = req
+		return markmcp.NewToolResultStructuredOnly(engine.StatusResult()), nil
+	}
 }
 
 func registerQueryTool(srv *server.MCPServer, engine *query.Engine, name string, kind types.QueryKind, needsTarget bool) {
@@ -76,11 +138,19 @@ func handleQueryTool(engine *query.Engine, kind string) server.ToolHandlerFunc {
 			Limit:   req.GetInt("limit", types.DefaultQueryLimit),
 		})
 		if err != nil {
-			return markmcp.NewToolResultError(err.Error()), nil
+			return markmcp.NewToolResultStructuredOnly(engine.DiagnosticResult(kind, "VALIDATION_ERROR", err.Error())), nil
+		}
+		switch queryReq.Kind {
+		case types.QueryKindExplain:
+			return markmcp.NewToolResultStructuredOnly(engine.ExplainResult(queryReq.Subject)), nil
+		case types.QueryKindImpact:
+			return markmcp.NewToolResultStructuredOnly(engine.ImpactResult(queryReq.Subject, queryReq.Limit)), nil
+		case types.QueryKindPath:
+			return markmcp.NewToolResultStructuredOnly(engine.PathResult(queryReq.Subject, queryReq.Target)), nil
 		}
 		output, err := engine.RunRequest(queryReq)
 		if err != nil {
-			return markmcp.NewToolResultError(err.Error()), nil
+			return markmcp.NewToolResultStructuredOnly(engine.DiagnosticResult(kind, "QUERY_ERROR", err.Error())), nil
 		}
 		return markmcp.NewToolResultText(output), nil
 	}

@@ -19,6 +19,7 @@ import (
 	igraph "github.com/Syfra3/vela/internal/graph"
 	"github.com/Syfra3/vela/internal/scip"
 	"github.com/Syfra3/vela/pkg/types"
+	"gopkg.in/yaml.v3"
 )
 
 var ErrUnknownPatcher = errors.New("unknown pipeline patcher")
@@ -179,10 +180,17 @@ func (b *Builder) Build(ctx context.Context, req types.BuildRequest) (Result, er
 			if err := b.persist(cached.Graph, outDir); err != nil {
 				return Result{}, fmt.Errorf("persist stage: %w", err)
 			}
+			if err := export.WriteSQLiteGraphAtomic(cached.Graph, outDir); err != nil {
+				return Result{}, fmt.Errorf("persist runtime graph: %w", err)
+			}
 			manifest.GeneratedAt = time.Now().UTC()
 			manifest.BuildMode = buildModeDeletedOnly
 			if err := export.WriteManifestAtomic(manifest, outDir); err != nil {
 				return Result{}, fmt.Errorf("persist manifest: %w", err)
+			}
+		} else if cached.Graph != nil {
+			if err := ensureSQLiteRuntime(cached.Graph, outDir); err != nil {
+				return Result{}, err
 			}
 		}
 		return cached, nil
@@ -217,6 +225,12 @@ func (b *Builder) Build(ctx context.Context, req types.BuildRequest) (Result, er
 	b.emit(types.BuildStageMerge, 0, "starting merge stage")
 	nodes, edges = MergeFacts(nodes, edges, facts)
 	edges = append(edges, projectFileDependencyEdges(nodes, edges)...)
+	workspaceNodes, workspaceEdges, err := loadWorkspaceYAMLTopology(req.RepoRoot)
+	if err != nil {
+		return Result{}, fmt.Errorf("workspace topology stage: %w", err)
+	}
+	nodes = append(nodes, workspaceNodes...)
+	edges = append(edges, workspaceEdges...)
 	graph, err := b.graphBuilder(nodes, edges)
 	if err != nil {
 		return Result{}, fmt.Errorf("merge stage: %w", err)
@@ -234,6 +248,9 @@ func (b *Builder) Build(ctx context.Context, req types.BuildRequest) (Result, er
 	b.emit(types.BuildStagePersist, 0, "starting persist stage")
 	if err := b.persist(tg, outDir); err != nil {
 		return Result{}, fmt.Errorf("persist stage: %w", err)
+	}
+	if err := export.WriteSQLiteGraphAtomic(tg, outDir); err != nil {
+		return Result{}, fmt.Errorf("persist runtime graph: %w", err)
 	}
 	manifest.GeneratedAt = time.Now().UTC()
 	manifest.BuildMode = buildModeFullRebuild
@@ -258,6 +275,215 @@ func (b *Builder) Build(ctx context.Context, req types.BuildRequest) (Result, er
 			{Stage: types.BuildStagePersist, Count: 1},
 		},
 	}, nil
+}
+
+func ensureSQLiteRuntime(g *types.Graph, outDir string) error {
+	graphDBPath := filepath.Join(outDir, "graph.db")
+	if info, err := os.Stat(graphDBPath); err == nil && !info.IsDir() && info.Size() > 0 {
+		return nil
+	} else if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("inspect runtime graph: %w", err)
+	}
+	if err := export.WriteSQLiteGraphAtomic(g, outDir); err != nil {
+		return fmt.Errorf("persist runtime graph: %w", err)
+	}
+	return nil
+}
+
+const workspaceYAMLSource = ".vela/workspace.yaml"
+const workspaceYAMLConfidence = "declared_hint"
+
+type workspaceYAMLTopology struct {
+	Organization workspaceYAMLOrganization `yaml:"organization"`
+	Repositories []workspaceYAMLRepository `yaml:"repositories"`
+	Interfaces   []workspaceYAMLInterface  `yaml:"interfaces"`
+	KnownLinks   []workspaceYAMLKnownLink  `yaml:"known_links"`
+}
+
+type workspaceYAMLOrganization struct {
+	Name string `yaml:"name"`
+}
+
+type workspaceYAMLRepository struct {
+	Name     string                 `yaml:"name"`
+	Services []workspaceYAMLService `yaml:"services"`
+}
+
+type workspaceYAMLService struct {
+	Name string `yaml:"name"`
+	Kind string `yaml:"kind"`
+}
+
+type workspaceYAMLInterface struct {
+	Name    string `yaml:"name"`
+	Service string `yaml:"service"`
+	Kind    string `yaml:"kind"`
+}
+
+type workspaceYAMLKnownLink struct {
+	From      string `yaml:"from"`
+	To        string `yaml:"to"`
+	Interface string `yaml:"interface"`
+}
+
+func loadWorkspaceYAMLTopology(repoRoot string) ([]types.Node, []types.Edge, error) {
+	path := filepath.Join(repoRoot, workspaceYAMLSource)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil, nil
+		}
+		return nil, nil, err
+	}
+	var topology workspaceYAMLTopology
+	if err := yaml.Unmarshal(data, &topology); err != nil {
+		return nil, nil, fmt.Errorf("parse %s: %w", workspaceYAMLSource, err)
+	}
+	if err := validateWorkspaceYAMLTopology(topology); err != nil {
+		return nil, nil, err
+	}
+
+	b := workspaceTopologyBuilder{nodes: map[string]types.Node{}}
+	orgName := strings.TrimSpace(topology.Organization.Name)
+	if orgName != "" {
+		b.addNode(workspaceOrganizationNodeID(orgName), orgName, string(types.NodeTypeOrganization), nil)
+	}
+	for _, repo := range topology.Repositories {
+		repoName := strings.TrimSpace(repo.Name)
+		if repoName == "" {
+			continue
+		}
+		repoID := igraph.WorkspaceRepoID(repoName)
+		b.addNode(repoID, repoName, string(types.NodeTypeRepo), nil)
+		if orgName != "" {
+			b.addEdge(workspaceOrganizationNodeID(orgName), repoID, "contains", nil)
+		}
+		for _, service := range repo.Services {
+			serviceName := strings.TrimSpace(service.Name)
+			if serviceName == "" {
+				continue
+			}
+			serviceID := igraph.WorkspaceServiceID(serviceName)
+			b.addNode(serviceID, serviceName, string(types.NodeTypeService), map[string]interface{}{"service_kind": strings.TrimSpace(service.Kind)})
+			b.addEdge(repoID, serviceID, igraph.WorkspaceRelExposes, map[string]interface{}{"service_kind": strings.TrimSpace(service.Kind)})
+		}
+	}
+	for _, iface := range topology.Interfaces {
+		name := strings.TrimSpace(iface.Name)
+		if name == "" {
+			continue
+		}
+		interfaceID := workspaceInterfaceNodeID(name)
+		b.addNode(interfaceID, name, string(types.NodeTypeInterface), map[string]interface{}{"interface_kind": strings.TrimSpace(iface.Kind)})
+		if serviceName := strings.TrimSpace(iface.Service); serviceName != "" {
+			b.addEdge(igraph.WorkspaceServiceID(serviceName), interfaceID, "exposes", map[string]interface{}{"interface_kind": strings.TrimSpace(iface.Kind)})
+		}
+	}
+	for _, link := range topology.KnownLinks {
+		from := strings.TrimSpace(link.From)
+		to := strings.TrimSpace(link.To)
+		if from == "" || to == "" {
+			continue
+		}
+		b.addNode(igraph.WorkspaceServiceID(from), from, string(types.NodeTypeService), nil)
+		b.addNode(igraph.WorkspaceServiceID(to), to, string(types.NodeTypeService), nil)
+		b.addEdge(igraph.WorkspaceServiceID(from), igraph.WorkspaceServiceID(to), "uses", map[string]interface{}{"interface": strings.TrimSpace(link.Interface)})
+	}
+	return b.materialize(), b.edges, nil
+}
+
+func validateWorkspaceYAMLTopology(topology workspaceYAMLTopology) error {
+	for repoIndex, repo := range topology.Repositories {
+		if strings.TrimSpace(repo.Name) == "" {
+			return workspaceYAMLValidationError(fmt.Sprintf("repositories[%d].name", repoIndex), "required")
+		}
+		for serviceIndex, service := range repo.Services {
+			if strings.TrimSpace(service.Name) == "" {
+				return workspaceYAMLValidationError(fmt.Sprintf("repositories[%d].services[%d].name", repoIndex, serviceIndex), "required")
+			}
+		}
+	}
+	for interfaceIndex, iface := range topology.Interfaces {
+		if strings.TrimSpace(iface.Name) == "" {
+			return workspaceYAMLValidationError(fmt.Sprintf("interfaces[%d].name", interfaceIndex), "required")
+		}
+	}
+	for linkIndex, link := range topology.KnownLinks {
+		if strings.TrimSpace(link.From) == "" {
+			return workspaceYAMLValidationError(fmt.Sprintf("known_links[%d].from", linkIndex), "required")
+		}
+		if strings.TrimSpace(link.To) == "" {
+			return workspaceYAMLValidationError(fmt.Sprintf("known_links[%d].to", linkIndex), "required")
+		}
+	}
+	return nil
+}
+
+func workspaceYAMLValidationError(field, reason string) error {
+	return fmt.Errorf("workspace validation: %s %s %s", workspaceYAMLSource, field, reason)
+}
+
+type workspaceTopologyBuilder struct {
+	nodes map[string]types.Node
+	edges []types.Edge
+}
+
+func (b *workspaceTopologyBuilder) addNode(id, label, kind string, metadata map[string]interface{}) {
+	if existing, ok := b.nodes[id]; ok {
+		if existing.Label == "" {
+			existing.Label = label
+		}
+		b.nodes[id] = existing
+		return
+	}
+	md := workspaceTopologyMetadata()
+	for key, value := range metadata {
+		if value != "" {
+			md[key] = value
+		}
+	}
+	b.nodes[id] = types.Node{ID: id, Label: label, NodeType: kind, SourceFile: workspaceYAMLSource, Metadata: md}
+}
+
+func (b *workspaceTopologyBuilder) addEdge(source, target, relation string, metadata map[string]interface{}) {
+	md := workspaceTopologyMetadata()
+	for key, value := range metadata {
+		if value != "" {
+			md[key] = value
+		}
+	}
+	b.edges = append(b.edges, types.Edge{Source: source, Target: target, Relation: relation, Confidence: workspaceYAMLConfidence, SourceFile: workspaceYAMLSource, Metadata: md})
+}
+
+func (b *workspaceTopologyBuilder) materialize() []types.Node {
+	ids := make([]string, 0, len(b.nodes))
+	for id := range b.nodes {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	nodes := make([]types.Node, 0, len(ids))
+	for _, id := range ids {
+		nodes = append(nodes, b.nodes[id])
+	}
+	return nodes
+}
+
+func workspaceTopologyMetadata() map[string]interface{} {
+	return map[string]interface{}{
+		"layer":                    string(types.LayerWorkspace),
+		"evidence_type":            "routing",
+		"evidence_confidence":      workspaceYAMLConfidence,
+		"evidence_source_artifact": workspaceYAMLSource,
+		"claim_status":             workspaceYAMLConfidence,
+	}
+}
+
+func workspaceOrganizationNodeID(name string) string {
+	return "workspace:organization:" + strings.ToLower(name)
+}
+
+func workspaceInterfaceNodeID(name string) string {
+	return "workspace:interface:" + strings.ToLower(name)
 }
 
 func clusteringWarning(err error) string {

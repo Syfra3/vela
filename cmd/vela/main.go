@@ -59,9 +59,13 @@ from the persisted graph output.`,
 	root.AddCommand(hooksCmd())
 	root.AddCommand(extractAliasCmd())
 	root.AddCommand(benchCmd())
+	root.AddCommand(exploreCmd())
 	root.AddCommand(lookupCmd())
 	root.AddCommand(searchCmd())
 	root.AddCommand(graphQueryCmd())
+	root.AddCommand(newQueryKindCmd(types.QueryKindExplain, false))
+	root.AddCommand(newQueryKindCmd(types.QueryKindImpact, false))
+	root.AddCommand(newQueryKindCmd(types.QueryKindPath, true))
 	root.AddCommand(serveCmd())
 	root.AddCommand(versionCmd())
 	return root
@@ -120,10 +124,15 @@ var loadEngine = func(graphFlag string) (*query.Engine, error) {
 	return query.LoadFromFile(graphFlag)
 }
 
+var serveMCPStdio = func(srv *mcpserver.MCPServer) error {
+	return mcpserver.ServeStdio(srv)
+}
+
 func serveCmd() *cobra.Command {
 	var graphFile string
 	var port int
 	var httpMode bool
+	var mcpMode bool
 
 	cmd := &cobra.Command{
 		Use:   "serve [graph-file]",
@@ -133,12 +142,15 @@ func serveCmd() *cobra.Command {
 			if len(args) > 0 {
 				graphFile = args[0]
 			}
+			if httpMode && mcpMode {
+				return fmt.Errorf("--mcp and --http are mutually exclusive")
+			}
 			eng, err := loadEngine(graphFile)
 			if err != nil {
 				return fmt.Errorf("loading graph: %w", err)
 			}
-			if !httpMode {
-				return mcpserver.ServeStdio(vmcp.NewServer(eng))
+			if mcpMode || !httpMode {
+				return serveMCPStdio(vmcp.NewServer(eng))
 			}
 			srv := server.New(eng, port)
 			ctx, cancel := context.WithCancel(context.Background())
@@ -147,6 +159,7 @@ func serveCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: ~/.vela/graph.json)")
+	cmd.Flags().BoolVar(&mcpMode, "mcp", false, "Serve stdio MCP tools")
 	cmd.Flags().BoolVar(&httpMode, "http", false, "Serve HTTP endpoints instead of stdio MCP")
 	cmd.Flags().IntVar(&port, "port", 7700, "Port to listen on")
 	return cmd

@@ -223,6 +223,15 @@ func printBenchReport(snapshot igraph.StatusSnapshot, baselinePath string) {
 	} else {
 		fmt.Printf("  manifest: missing\n")
 	}
+	if snapshot.Freshness.Status != "" {
+		fmt.Printf("  freshness: %s\n", snapshot.Freshness.Status)
+	}
+	if len(snapshot.Freshness.StaleFiles) > 0 {
+		fmt.Printf("  stale files: %s\n", strings.Join(snapshot.Freshness.StaleFiles, ", "))
+	}
+	if len(snapshot.Freshness.RecommendedActions) > 0 {
+		fmt.Printf("  recommended: %s\n", strings.Join(snapshot.Freshness.RecommendedActions, ", "))
+	}
 	if snapshot.Freshness.ReportPresent {
 		fmt.Printf("  report: present\n")
 	} else {
