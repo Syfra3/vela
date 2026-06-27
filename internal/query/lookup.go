@@ -7,6 +7,7 @@ import (
 	"strings"
 	"unicode"
 
+	igraph "github.com/Syfra3/vela/internal/graph"
 	"github.com/Syfra3/vela/pkg/types"
 )
 
@@ -86,6 +87,169 @@ func (e *Engine) RenderLookup(term string, limit int) string {
 	lines = append(lines, "", "Next steps:")
 	lines = append(lines, fmt.Sprintf("- vela search \"explain %s\"", best))
 	lines = append(lines, fmt.Sprintf("- vela search \"who uses %s\"", best))
+	return strings.Join(lines, "\n")
+}
+
+// RenderExplore resolves broad natural language to candidate graph subjects and
+// cites only graph relationships as proof for the returned context.
+func (e *Engine) RenderExplore(request string, limit int) string {
+	if routed := e.renderRouteFirstExplore(request, limit); routed != "" {
+		return routed
+	}
+
+	results := e.Lookup(request, limit)
+	if len(results) == 0 {
+		return fmt.Sprintf("No graph-backed candidates found for %q.", request)
+	}
+	if len(results) > 1 {
+		return renderAmbiguousExplore(request, results)
+	}
+
+	lines := []string{fmt.Sprintf("Resolved candidates for %q:", request), ""}
+	candidateIDs := make(map[string]struct{}, len(results))
+	for i, candidate := range results {
+		node := candidate.Node
+		candidateIDs[node.ID] = struct{}{}
+		lines = append(lines, fmt.Sprintf("%d. %s", i+1, describeNode(node)))
+		lines = append(lines, fmt.Sprintf("   id: %s", node.ID))
+	}
+
+	facts := make([]string, 0)
+	seen := map[string]struct{}{}
+	for _, edge := range e.graph.Edges {
+		if _, ok := candidateIDs[edge.Source]; !ok {
+			if _, ok := candidateIDs[edge.Target]; !ok {
+				continue
+			}
+		}
+		fact := e.formatExplainEdge(edge)
+		if _, ok := seen[fact]; ok {
+			continue
+		}
+		seen[fact] = struct{}{}
+		facts = append(facts, fact)
+	}
+
+	lines = append(lines, "", "Graph facts used:")
+	if len(facts) == 0 {
+		lines = append(lines, "  none yet; choose a candidate and run a structural query")
+	} else {
+		for _, fact := range facts {
+			lines = append(lines, "  "+fact)
+		}
+	}
+	lines = append(lines, "", "Free-text matching is candidate discovery only, not proof.")
+	return strings.Join(lines, "\n")
+}
+
+func (e *Engine) renderRouteFirstExplore(request string, limit int) string {
+	if e == nil || e.graph == nil {
+		return ""
+	}
+	workspace := igraph.LoadWorkspace(e.graph.Nodes, e.graph.Edges)
+	routes := workspace.SelectRepos(routeTokens(request), limit)
+	if len(routes) == 0 {
+		return ""
+	}
+
+	lines := []string{fmt.Sprintf("Workspace routes for %q:", request)}
+	if len(routes) > 1 {
+		lines = append(lines, "Route ambiguity: multiple workspace routes match; refine the route before making a strong cross-repo claim.")
+	}
+	for _, route := range routes {
+		line := fmt.Sprintf("  %s score=%.2f", route.Repo, route.Score)
+		if len(route.Reasons) > 0 {
+			line += " reasons=" + strings.Join(route.Reasons, ",")
+		}
+		lines = append(lines, line)
+	}
+
+	lines = append(lines, "", "Workspace routing facts:")
+	for _, fact := range e.workspaceRoutingFacts(routes) {
+		lines = append(lines, "  "+fact)
+	}
+	lines = append(lines, "Selected workspace routes are routing/topology truth, not deep code truth.")
+
+	deep := e.deepLookupCandidates(request, limit)
+	lines = append(lines, "", "Deep graph retrieval candidates:")
+	if len(deep) == 0 {
+		lines = append(lines, "  none yet; route is known but deep graph candidates were not resolved")
+	} else {
+		for i, candidate := range deep {
+			node := candidate.Node
+			lines = append(lines, fmt.Sprintf("%d. %s", i+1, describeNode(node)))
+			lines = append(lines, fmt.Sprintf("   id: %s", node.ID))
+			if file := strings.TrimSpace(node.SourceFile); file != "" {
+				lines = append(lines, fmt.Sprintf("   file: %s", file))
+			}
+		}
+	}
+	lines = append(lines, "", "Free-text matching is candidate discovery only, not proof.")
+	return strings.Join(lines, "\n")
+}
+
+func (e *Engine) workspaceRoutingFacts(routes []igraph.RepoRouteHit) []string {
+	routeRepos := make(map[string]struct{}, len(routes))
+	for _, route := range routes {
+		routeRepos[igraph.WorkspaceRepoID(route.Repo)] = struct{}{}
+	}
+	routeServices := make(map[string]struct{})
+	for _, edge := range e.graph.Edges {
+		if edge.Metadata["layer"] != string(types.LayerWorkspace) {
+			continue
+		}
+		if _, ok := routeRepos[edge.Source]; ok && edge.Relation == igraph.WorkspaceRelExposes {
+			routeServices[edge.Target] = struct{}{}
+		}
+	}
+	seen := map[string]struct{}{}
+	facts := make([]string, 0)
+	for _, edge := range e.graph.Edges {
+		if edge.Metadata["layer"] != string(types.LayerWorkspace) {
+			continue
+		}
+		_, sourceRepo := routeRepos[edge.Source]
+		_, sourceService := routeServices[edge.Source]
+		_, targetService := routeServices[edge.Target]
+		if !sourceRepo && !(sourceService && targetService) {
+			continue
+		}
+		fact := e.formatExplainEdge(edge)
+		if _, ok := seen[fact]; ok {
+			continue
+		}
+		seen[fact] = struct{}{}
+		facts = append(facts, fact)
+	}
+	if len(facts) == 0 {
+		return []string{"none"}
+	}
+	return facts
+}
+
+func (e *Engine) deepLookupCandidates(request string, limit int) []LookupCandidate {
+	results := e.Lookup(request, limit)
+	deep := make([]LookupCandidate, 0, len(results))
+	for _, candidate := range results {
+		if nodeLayer(candidate.Node) == types.LayerWorkspace {
+			continue
+		}
+		deep = append(deep, candidate)
+	}
+	return deep
+}
+
+func renderAmbiguousExplore(request string, results []LookupCandidate) string {
+	lines := []string{fmt.Sprintf("Ambiguous explore query for %q", request), "", "Candidate nodes:"}
+	for i, candidate := range results {
+		node := candidate.Node
+		lines = append(lines, fmt.Sprintf("%d. %s", i+1, describeNode(node)))
+		lines = append(lines, fmt.Sprintf("   id: %s", node.ID))
+		if file := strings.TrimSpace(node.SourceFile); file != "" {
+			lines = append(lines, fmt.Sprintf("   file: %s", file))
+		}
+	}
+	lines = append(lines, "", fmt.Sprintf("Refine the request or run `vela lookup %q` before asking for a strong graph claim.", request))
 	return strings.Join(lines, "\n")
 }
 

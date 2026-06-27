@@ -233,6 +233,9 @@ func (s BuildService) runMultiRepo(
 	if err := export.WriteJSONAtomic(aggregate, outDir); err != nil {
 		return BuildResult{}, fmt.Errorf("persist aggregate graph: %w", err)
 	}
+	if err := export.WriteSQLiteGraphAtomic(aggregate, outDir); err != nil {
+		return BuildResult{}, fmt.Errorf("persist aggregate runtime graph: %w", err)
+	}
 	buildResult.GraphPath = filepath.Join(outDir, "graph.json")
 	buildResult.HTMLPath = filepath.Join(outDir, "graph.html")
 	buildResult.ReportPath = filepath.Join(outDir, "GRAPH_REPORT.md")

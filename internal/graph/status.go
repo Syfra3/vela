@@ -1,6 +1,8 @@
 package graph
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -15,15 +17,18 @@ import (
 )
 
 type FreshnessStats struct {
-	GraphPath         string
-	ManifestPath      string
-	ReportPath        string
-	GraphUpdatedAt    time.Time
-	ManifestUpdatedAt time.Time
-	ManifestPresent   bool
-	ReportPresent     bool
-	TrackedFiles      int
-	BuildMode         string
+	GraphPath          string
+	ManifestPath       string
+	ReportPath         string
+	GraphUpdatedAt     time.Time
+	ManifestUpdatedAt  time.Time
+	ManifestPresent    bool
+	ReportPresent      bool
+	TrackedFiles       int
+	BuildMode          string
+	Status             string
+	StaleFiles         []string
+	RecommendedActions []string
 }
 
 type ProjectStatus struct {
@@ -156,15 +161,52 @@ func loadFreshnessStats(graphPath string) FreshnessStats {
 		if manifest, loadErr := loadManifest(fresh.ManifestPath); loadErr == nil {
 			fresh.TrackedFiles = len(manifest.Files)
 			fresh.BuildMode = manifest.BuildMode
+			fresh.StaleFiles = staleManifestFiles(manifest)
+			if len(fresh.StaleFiles) > 0 {
+				fresh.Status = "stale"
+				fresh.RecommendedActions = []string{"vela update", "vela build"}
+			} else {
+				fresh.Status = "fresh"
+			}
 			if fresh.ManifestUpdatedAt.IsZero() && !manifest.GeneratedAt.IsZero() {
 				fresh.ManifestUpdatedAt = manifest.GeneratedAt.UTC()
 			}
 		}
+	} else {
+		fresh.Status = "unknown"
+		fresh.RecommendedActions = []string{"vela build"}
 	}
 	if _, err := os.Stat(fresh.ReportPath); err == nil {
 		fresh.ReportPresent = true
 	}
 	return fresh
+}
+
+func staleManifestFiles(manifest *types.Manifest) []string {
+	if manifest == nil || strings.TrimSpace(manifest.RepoRoot) == "" {
+		return nil
+	}
+	var stale []string
+	for _, file := range manifest.Files {
+		if strings.TrimSpace(file.Path) == "" || strings.TrimSpace(file.SHA256) == "" {
+			continue
+		}
+		currentHash, err := fileHash(filepath.Join(manifest.RepoRoot, filepath.FromSlash(file.Path)))
+		if err != nil || currentHash != file.SHA256 {
+			stale = append(stale, file.Path)
+		}
+	}
+	sort.Strings(stale)
+	return stale
+}
+
+func fileHash(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func loadRepoSnapshot(graphPath string, topN int) (StatusSnapshot, string) {

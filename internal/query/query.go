@@ -1,6 +1,9 @@
 package query
 
 import (
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -13,6 +16,7 @@ import (
 	"gonum.org/v1/gonum/graph/simple"
 
 	"github.com/Syfra3/vela/pkg/types"
+	_ "modernc.org/sqlite"
 )
 
 // Engine wraps a loaded graph and answers queries against it.
@@ -44,8 +48,22 @@ type GraphStats struct {
 	ConfidenceTypes map[string]int
 }
 
-// LoadFromFile reads graph.json and constructs a query Engine.
+// LoadFromFile opens a runtime query graph. Repo-local .vela/graph.json paths
+// locate the sibling v0.4 SQLite runtime store; graph.json remains export/debug
+// context and is not used as query truth.
 func LoadFromFile(graphPath string) (*Engine, error) {
+	if graphDBPath, ok, err := runtimeGraphDBPath(graphPath); err != nil {
+		return nil, err
+	} else if ok {
+		eng, err := loadFromSQLite(graphDBPath)
+		if err != nil {
+			return nil, err
+		}
+		eng.graphPath = graphDBPath
+		eng.attachManifestFreshness(graphDBPath)
+		return eng, nil
+	}
+
 	data, err := os.ReadFile(graphPath)
 	if err != nil {
 		return nil, fmt.Errorf("reading %s: %w", graphPath, err)
@@ -110,6 +128,171 @@ func LoadFromFile(graphPath string) (*Engine, error) {
 	eng := newEngine(g)
 	eng.graphPath = graphPath
 	return eng, nil
+}
+
+func requireRuntimeGraphDB(graphPath string) error {
+	_, _, err := runtimeGraphDBPath(graphPath)
+	return err
+}
+
+func runtimeGraphDBPath(graphPath string) (string, bool, error) {
+	if filepath.Base(graphPath) != "graph.json" || filepath.Base(filepath.Dir(graphPath)) != ".vela" {
+		return "", false, nil
+	}
+
+	graphDBPath := filepath.Join(filepath.Dir(graphPath), "graph.db")
+	if _, err := os.Stat(graphDBPath); err == nil {
+		return graphDBPath, true, nil
+	} else if !os.IsNotExist(err) {
+		return graphDBPath, true, fmt.Errorf("runtime graph unavailable: cannot inspect %s: %w; run `vela build` or `vela update`", graphDBPath, err)
+	}
+
+	return graphDBPath, true, fmt.Errorf("runtime graph unavailable: %s is required for runtime queries; %s is export/debug only and will not be used as query truth; run `vela build` or `vela update`", graphDBPath, graphPath)
+}
+
+func loadFromSQLite(graphDBPath string) (*Engine, error) {
+	db, err := sql.Open("sqlite", graphDBPath)
+	if err != nil {
+		return nil, fmt.Errorf("runtime graph unavailable: cannot open %s: %w; run `vela build` or `vela update`", graphDBPath, err)
+	}
+	defer db.Close()
+
+	g, err := readSQLiteGraph(db)
+	if err != nil {
+		return nil, fmt.Errorf("runtime graph unavailable: cannot read %s: %w; run `vela build` or `vela update`", graphDBPath, err)
+	}
+	return newEngine(g), nil
+}
+
+func (e *Engine) attachManifestFreshness(graphDBPath string) {
+	if e == nil || e.graph == nil {
+		return
+	}
+	if e.graph.Metadata == nil {
+		e.graph.Metadata = make(map[string]interface{})
+	}
+	manifestPath := filepath.Join(filepath.Dir(graphDBPath), "manifest.json")
+	manifest, err := loadRuntimeManifest(manifestPath)
+	if err != nil {
+		e.graph.Metadata["freshness_status"] = string(FreshnessUnknown)
+		e.graph.Metadata["recommended_actions"] = []string{"vela build"}
+		return
+	}
+	stale := staleRuntimeManifestFiles(manifest)
+	if len(stale) > 0 {
+		e.graph.Metadata["freshness_status"] = string(FreshnessStale)
+		e.graph.Metadata["stale_files"] = stale
+		e.graph.Metadata["recommended_actions"] = []string{"vela update", "vela build"}
+		return
+	}
+	e.graph.Metadata["freshness_status"] = string(FreshnessFresh)
+}
+
+func loadRuntimeManifest(path string) (*types.Manifest, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var manifest types.Manifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		return nil, err
+	}
+	return &manifest, nil
+}
+
+func staleRuntimeManifestFiles(manifest *types.Manifest) []string {
+	if manifest == nil || strings.TrimSpace(manifest.RepoRoot) == "" {
+		return nil
+	}
+	var stale []string
+	for _, file := range manifest.Files {
+		if strings.TrimSpace(file.Path) == "" || strings.TrimSpace(file.SHA256) == "" {
+			continue
+		}
+		currentHash, err := runtimeFileHash(filepath.Join(manifest.RepoRoot, filepath.FromSlash(file.Path)))
+		if err != nil || currentHash != file.SHA256 {
+			stale = append(stale, file.Path)
+		}
+	}
+	sort.Strings(stale)
+	return stale
+}
+
+func runtimeFileHash(path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
+func readSQLiteGraph(db *sql.DB) (*types.Graph, error) {
+	nodes, err := readSQLiteNodes(db)
+	if err != nil {
+		return nil, err
+	}
+	edges, err := readSQLiteEdges(db)
+	if err != nil {
+		return nil, err
+	}
+	return &types.Graph{Nodes: nodes, Edges: edges}, nil
+}
+
+func readSQLiteNodes(db *sql.DB) ([]types.Node, error) {
+	rows, err := db.Query(`SELECT id, kind, label, COALESCE(file_path, ''), COALESCE(metadata_json, '{}') FROM nodes ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("querying runtime nodes: %w", err)
+	}
+	defer rows.Close()
+
+	var nodes []types.Node
+	for rows.Next() {
+		var node types.Node
+		var metadataJSON string
+		if err := rows.Scan(&node.ID, &node.NodeType, &node.Label, &node.SourceFile, &metadataJSON); err != nil {
+			return nil, fmt.Errorf("scanning runtime node: %w", err)
+		}
+		node.Metadata = make(map[string]interface{})
+		if metadataJSON != "" {
+			if err := json.Unmarshal([]byte(metadataJSON), &node.Metadata); err != nil {
+				return nil, fmt.Errorf("parsing runtime node metadata for %s: %w", node.ID, err)
+			}
+		}
+		nodes = append(nodes, node)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating runtime nodes: %w", err)
+	}
+	return nodes, nil
+}
+
+func readSQLiteEdges(db *sql.DB) ([]types.Edge, error) {
+	rows, err := db.Query(`SELECT from_node_id, to_node_id, kind, COALESCE(confidence, ''), COALESCE(metadata_json, '{}') FROM edges ORDER BY id`)
+	if err != nil {
+		return nil, fmt.Errorf("querying runtime edges: %w", err)
+	}
+	defer rows.Close()
+
+	var edges []types.Edge
+	for rows.Next() {
+		var edge types.Edge
+		var metadataJSON string
+		if err := rows.Scan(&edge.Source, &edge.Target, &edge.Relation, &edge.Confidence, &metadataJSON); err != nil {
+			return nil, fmt.Errorf("scanning runtime edge: %w", err)
+		}
+		edge.Metadata = make(map[string]interface{})
+		if metadataJSON != "" {
+			if err := json.Unmarshal([]byte(metadataJSON), &edge.Metadata); err != nil {
+				return nil, fmt.Errorf("parsing runtime edge metadata for %s -> %s: %w", edge.Source, edge.Target, err)
+			}
+		}
+		edges = append(edges, edge)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating runtime edges: %w", err)
+	}
+	return edges, nil
 }
 
 // newEngine builds indexes from a types.Graph.
@@ -317,8 +500,10 @@ func (e *Engine) Path(fromLabel, toLabel string) string {
 	}
 
 	labels := make([]string, len(nodes))
+	pathIDs := make([]string, len(nodes))
 	for i, n := range nodes {
 		if nodeID, ok := e.intToID[n.ID()]; ok {
+			pathIDs[i] = nodeID
 			if node, ok2 := e.nodeByID[nodeID]; ok2 {
 				labels[i] = describeNode(node)
 			} else {
@@ -326,7 +511,60 @@ func (e *Engine) Path(fromLabel, toLabel string) string {
 			}
 		}
 	}
-	return strings.Join(labels, " → ")
+	return e.renderPathWithEvidence(pathIDs, labels)
+}
+
+func (e *Engine) renderPathWithEvidence(pathIDs, labels []string) string {
+	pathText := strings.Join(labels, " → ")
+	if len(pathIDs) < 2 {
+		return pathText
+	}
+
+	var evidenceLines []string
+	inferredBridge := false
+	for i := 0; i < len(pathIDs)-1; i++ {
+		edge, ok := e.edgeBetween(pathIDs[i], pathIDs[i+1])
+		if !ok {
+			continue
+		}
+		ev := types.EdgeEvidence(edge)
+		parts := make([]string, 0, 2)
+		if ev.Confidence != "" {
+			parts = append(parts, "confidence="+string(ev.Confidence))
+		}
+		if bridgeConfidence := metadataValue(edge.Metadata, "bridge_evidence_confidence"); bridgeConfidence != "" {
+			parts = append(parts, "interface bridge="+bridgeConfidence)
+			if bridgeConfidence == string(types.ConfidenceInferred) {
+				inferredBridge = true
+			}
+		} else if metadataValue(edge.Metadata, "interface_provider") != "" && ev.Confidence != "" {
+			parts = append(parts, "interface bridge="+string(ev.Confidence))
+			if ev.Confidence == types.ConfidenceInferred {
+				inferredBridge = true
+			}
+		}
+		if len(parts) == 0 {
+			continue
+		}
+		evidenceLines = append(evidenceLines, fmt.Sprintf("%s --[%s]--> %s {%s}", labels[i], edge.Relation, labels[i+1], strings.Join(parts, ", ")))
+	}
+	if len(evidenceLines) == 0 {
+		return pathText
+	}
+	pathText += "\nPath evidence:\n  " + strings.Join(evidenceLines, "\n  ")
+	if inferredBridge {
+		pathText += "\nqualification: inferred interface bridge; not a declared contract path"
+	}
+	return pathText
+}
+
+func (e *Engine) edgeBetween(source, target string) (types.Edge, bool) {
+	for _, edge := range e.graph.Edges {
+		if edge.Source == source && edge.Target == target {
+			return edge, true
+		}
+	}
+	return types.Edge{}, false
 }
 
 func degradedNoPathMessage(fromLabel, toLabel, reason string) string {

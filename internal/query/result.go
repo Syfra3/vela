@@ -1,0 +1,394 @@
+package query
+
+import (
+	"fmt"
+	"sort"
+	"strings"
+
+	"github.com/Syfra3/vela/pkg/types"
+)
+
+// ResultStatus classifies the shared core query result before adapter rendering.
+type ResultStatus string
+
+const (
+	ResultStatusOK         ResultStatus = "ok"
+	ResultStatusAmbiguous  ResultStatus = "ambiguous"
+	ResultStatusUnresolved ResultStatus = "unresolved"
+	ResultStatusError      ResultStatus = "error"
+)
+
+// FreshnessStatus qualifies the runtime graph state used by a result.
+type FreshnessStatus string
+
+const (
+	FreshnessUnknown FreshnessStatus = "unknown"
+	FreshnessFresh   FreshnessStatus = "fresh"
+	FreshnessStale   FreshnessStatus = "stale"
+)
+
+// Result is the minimal adapter-independent envelope for graph-backed answers.
+type Result struct {
+	SchemaVersion    string           `json:"schema_version"`
+	QueryKind        string           `json:"query_kind"`
+	Status           ResultStatus     `json:"status"`
+	ResolvedSubjects []Subject        `json:"resolved_subjects,omitempty"`
+	Facts            []Fact           `json:"facts,omitempty"`
+	Evidence         []types.Evidence `json:"evidence,omitempty"`
+	Confidence       types.Confidence `json:"confidence,omitempty"`
+	Freshness        Freshness        `json:"freshness"`
+	Diagnostics      []Diagnostic     `json:"diagnostics,omitempty"`
+}
+
+// Subject is a resolved graph subject included in a shared Result.
+type Subject struct {
+	ID    string `json:"id"`
+	Label string `json:"label,omitempty"`
+	Kind  string `json:"kind,omitempty"`
+}
+
+// Fact is a graph-backed claim used by a query answer.
+type Fact struct {
+	Subject    string           `json:"subject"`
+	Predicate  string           `json:"predicate"`
+	Object     string           `json:"object"`
+	Evidence   []types.Evidence `json:"evidence,omitempty"`
+	Confidence types.Confidence `json:"confidence,omitempty"`
+	Source     string           `json:"source,omitempty"`
+	Layer      types.Layer      `json:"layer,omitempty"`
+	Metadata   map[string]any   `json:"metadata,omitempty"`
+}
+
+// Freshness describes whether graph data used by a Result is fresh enough to trust.
+type Freshness struct {
+	Status             FreshnessStatus `json:"status"`
+	StaleFiles         []string        `json:"stale_files,omitempty"`
+	RecommendedActions []string        `json:"recommended_actions,omitempty"`
+}
+
+// Diagnostic carries structured warnings or errors without hiding available facts.
+type Diagnostic struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+// StatusResult returns structured runtime graph status for adapter responses.
+func (e *Engine) StatusResult() Result {
+	return Result{
+		SchemaVersion: "vela.query.v1",
+		QueryKind:     "status",
+		Status:        ResultStatusOK,
+		Freshness:     e.Freshness(),
+	}
+}
+
+// DiagnosticResult returns structured adapter diagnostics when a tool cannot run.
+func (e *Engine) DiagnosticResult(kind, code, message string) Result {
+	return Result{
+		SchemaVersion: "vela.query.v1",
+		QueryKind:     strings.TrimSpace(kind),
+		Status:        ResultStatusError,
+		Freshness:     e.Freshness(),
+		Diagnostics:   []Diagnostic{{Code: code, Message: message}},
+	}
+}
+
+// LookupResult returns structured candidate resolution data for MCP agents.
+func (e *Engine) LookupResult(term string, limit int) Result {
+	result := Result{SchemaVersion: "vela.query.v1", QueryKind: "lookup", Status: ResultStatusOK, Freshness: e.Freshness()}
+	for _, candidate := range e.Lookup(term, limit) {
+		result.ResolvedSubjects = append(result.ResolvedSubjects, subjectFromNode(candidate.Node))
+	}
+	if len(result.ResolvedSubjects) == 0 {
+		result.Status = ResultStatusUnresolved
+		result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "NO_LOOKUP_CANDIDATES", Message: "no graph-backed lookup candidates were available"})
+	}
+	return result
+}
+
+// ExploreResult returns structured broad-request resolution data for MCP agents.
+func (e *Engine) ExploreResult(request string, limit int) Result {
+	result := Result{SchemaVersion: "vela.query.v1", QueryKind: "explore", Status: ResultStatusOK, Freshness: e.Freshness()}
+	results := e.Lookup(request, limit)
+	nodeSet := make(map[string]bool, len(results))
+	for _, candidate := range results {
+		result.ResolvedSubjects = append(result.ResolvedSubjects, subjectFromNode(candidate.Node))
+		nodeSet[candidate.Node.ID] = true
+	}
+	if len(results) == 0 {
+		result.Status = ResultStatusUnresolved
+		result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "NO_GRAPH_BACKED_CANDIDATES", Message: "no graph-backed candidates were available for the request"})
+		appendFreshnessDiagnostics(&result)
+		return result
+	}
+	result.Facts = e.factsForNodeSet(nodeSet)
+	if len(results) == 1 {
+		appendFreshnessDiagnostics(&result)
+		return result
+	}
+	result.Status = ResultStatusAmbiguous
+	result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "AMBIGUOUS_SUBJECT", Message: fmt.Sprintf("ambiguous subject resolution for %q; refine the request or run `vela lookup`", request)})
+	appendFreshnessDiagnostics(&result)
+	return result
+}
+
+// ImpactResult returns structured reverse-dependency facts for an MCP impact query.
+func (e *Engine) ImpactResult(subject string, limit int) Result {
+	result := Result{SchemaVersion: "vela.query.v1", QueryKind: "impact", Status: ResultStatusOK, Freshness: e.Freshness()}
+	nodeIDs := e.resolveNodeIDs(subject)
+	if len(nodeIDs) == 0 {
+		result.Status = ResultStatusUnresolved
+		result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "SUBJECT_NOT_FOUND", Message: "node not found"})
+		return result
+	}
+	for _, id := range nodeIDs {
+		if node, ok := e.nodeByID[id]; ok {
+			result.ResolvedSubjects = append(result.ResolvedSubjects, subjectFromNode(node))
+		}
+	}
+	nodeSet := make(map[string]bool, len(nodeIDs))
+	for _, id := range nodeIDs {
+		nodeSet[id] = true
+	}
+	for _, edge := range e.graph.Edges {
+		if nodeSet[edge.Target] {
+			result.Facts = append(result.Facts, factFromEdge(edge))
+		}
+		if limit > 0 && len(result.Facts) >= limit {
+			break
+		}
+	}
+	if len(result.Facts) == 0 {
+		result.Status = ResultStatusUnresolved
+		result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "NO_IMPACT_FACTS", Message: "no graph-backed impact facts were available"})
+	}
+	return result
+}
+
+// PathResult returns structured endpoint and path facts for an MCP path query.
+func (e *Engine) PathResult(from, to string) Result {
+	result := Result{SchemaVersion: "vela.query.v1", QueryKind: "path", Status: ResultStatusOK, Freshness: e.Freshness()}
+	fromInt, fromOK := e.resolveToInt(from)
+	toInt, toOK := e.resolveToInt(to)
+	if !fromOK || !toOK {
+		result.Status = ResultStatusUnresolved
+		result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "PATH_ENDPOINT_NOT_FOUND", Message: "one or more path endpoints were not found"})
+		return result
+	}
+	fromID := e.intToID[fromInt]
+	toID := e.intToID[toInt]
+	for _, id := range []string{fromID, toID} {
+		if node, ok := e.nodeByID[id]; ok {
+			result.ResolvedSubjects = append(result.ResolvedSubjects, subjectFromNode(node))
+		}
+	}
+	if edge, ok := e.edgeBetween(fromID, toID); ok {
+		result.Facts = append(result.Facts, factFromEdge(edge))
+		return result
+	}
+	result.Status = ResultStatusUnresolved
+	result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "NO_GRAPH_BACKED_PATH", Message: "no graph-backed path was available"})
+	return result
+}
+
+// ExplainResult returns a shared core result for explain answers with proof metadata.
+func (e *Engine) ExplainResult(label string) Result {
+	result := Result{
+		SchemaVersion: "vela.query.v1",
+		QueryKind:     "explain",
+		Status:        ResultStatusOK,
+		Freshness:     e.Freshness(),
+	}
+
+	nodeIDs := e.resolveNodeIDs(label)
+	if len(nodeIDs) == 0 {
+		result.Status = ResultStatusUnresolved
+		result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "SUBJECT_NOT_FOUND", Message: "node not found"})
+		return result
+	}
+
+	nodeSet := make(map[string]bool, len(nodeIDs))
+	for _, id := range nodeIDs {
+		nodeSet[id] = true
+		if node, ok := e.nodeByID[id]; ok {
+			result.ResolvedSubjects = append(result.ResolvedSubjects, Subject{ID: node.ID, Label: node.Label, Kind: node.NodeType})
+		}
+	}
+
+	for _, edge := range e.graph.Edges {
+		if !nodeSet[edge.Source] && !nodeSet[edge.Target] {
+			continue
+		}
+		evidence := types.EdgeEvidence(edge)
+		fact := Fact{
+			Subject:    edge.Source,
+			Predicate:  edge.Relation,
+			Object:     edge.Target,
+			Confidence: evidence.Confidence,
+			Source:     evidence.SourceArtifact,
+			Layer:      evidence.Layer,
+			Metadata:   edge.Metadata,
+		}
+		if hasEvidence(evidence) {
+			fact.Evidence = []types.Evidence{evidence}
+			result.Evidence = append(result.Evidence, evidence)
+		}
+		if result.Confidence == "" {
+			result.Confidence = evidence.Confidence
+		}
+		result.Facts = append(result.Facts, fact)
+	}
+	if len(result.Facts) == 0 {
+		result.Status = ResultStatusUnresolved
+		result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "NO_GRAPH_BACKED_ANSWER", Message: "no graph-backed answer was available for the requested claim"})
+	} else {
+		rankInterfaceConflicts(&result)
+	}
+	appendFreshnessDiagnostics(&result)
+
+	return result
+}
+
+func appendFreshnessDiagnostics(result *Result) {
+	if result == nil || result.Freshness.Status != FreshnessStale {
+		return
+	}
+	message := "runtime graph is stale; run `vela update` or `vela build`"
+	if len(result.Freshness.StaleFiles) > 0 {
+		message = fmt.Sprintf("runtime graph is stale for %s; run `vela update` or `vela build`", strings.Join(result.Freshness.StaleFiles, ", "))
+	}
+	result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "STALE_GRAPH", Message: message})
+}
+
+func (e *Engine) factsForNodeSet(nodeSet map[string]bool) []Fact {
+	var facts []Fact
+	for _, edge := range e.graph.Edges {
+		if !nodeSet[edge.Source] && !nodeSet[edge.Target] {
+			continue
+		}
+		facts = append(facts, factFromEdge(edge))
+	}
+	return facts
+}
+
+func subjectFromNode(node types.Node) Subject {
+	return Subject{ID: node.ID, Label: node.Label, Kind: node.NodeType}
+}
+
+func factFromEdge(edge types.Edge) Fact {
+	evidence := types.EdgeEvidence(edge)
+	fact := Fact{Subject: edge.Source, Predicate: edge.Relation, Object: edge.Target, Confidence: evidence.Confidence, Source: evidence.SourceArtifact, Layer: evidence.Layer, Metadata: edge.Metadata}
+	if hasEvidence(evidence) {
+		fact.Evidence = []types.Evidence{evidence}
+	}
+	return fact
+}
+
+func rankInterfaceConflicts(result *Result) {
+	if result == nil || len(result.Facts) < 2 {
+		return
+	}
+
+	type groupedFact struct {
+		index int
+		fact  Fact
+	}
+	groups := make(map[string][]groupedFact)
+	for i, fact := range result.Facts {
+		key := interfaceConflictKey(fact)
+		if key == "" {
+			continue
+		}
+		groups[key] = append(groups[key], groupedFact{index: i, fact: fact})
+	}
+
+	for _, group := range groups {
+		if len(group) < 2 {
+			continue
+		}
+		best := group[0].fact
+		for _, candidate := range group[1:] {
+			if factWeight(candidate.fact) > factWeight(best) {
+				best = candidate.fact
+			}
+		}
+		for _, candidate := range group {
+			if candidate.fact.Object == best.Object {
+				continue
+			}
+			result.Diagnostics = append(result.Diagnostics, Diagnostic{
+				Code:    "EVIDENCE_CONFLICT",
+				Message: fmt.Sprintf("%s interface evidence outranks conflicting %s evidence for %s", claimStatus(best), claimStatus(candidate.fact), interfaceName(best)),
+			})
+			break
+		}
+	}
+
+	sort.SliceStable(result.Facts, func(i, j int) bool {
+		return factWeight(result.Facts[i]) > factWeight(result.Facts[j])
+	})
+	result.Confidence = result.Facts[0].Confidence
+}
+
+func interfaceConflictKey(fact Fact) string {
+	if fact.Metadata == nil || metadataValue(fact.Metadata, "interface_provider") == "" {
+		return ""
+	}
+	name := interfaceName(fact)
+	if name == "" {
+		return ""
+	}
+	return fact.Subject + "|" + fact.Predicate + "|" + name + "|" + metadataValue(fact.Metadata, "interface_route") + "|" + metadataValue(fact.Metadata, "interface_method")
+}
+
+func interfaceName(fact Fact) string {
+	if fact.Metadata == nil {
+		return "interface relationship"
+	}
+	if name := metadataValue(fact.Metadata, "interface_name"); name != "" {
+		return name
+	}
+	return "interface relationship"
+}
+
+func claimStatus(fact Fact) string {
+	if fact.Metadata == nil {
+		return string(fact.Confidence)
+	}
+	if status := metadataValue(fact.Metadata, "claim_status"); status != "" {
+		return status
+	}
+	return string(fact.Confidence)
+}
+
+func metadataValue(metadata map[string]any, key string) string {
+	if value, ok := metadata[key].(string); ok {
+		return value
+	}
+	return ""
+}
+
+func factWeight(fact Fact) float64 {
+	return types.Evidence{Confidence: fact.Confidence}.Weight()
+}
+
+// Freshness reports the runtime graph freshness state attached at load time.
+func (e *Engine) Freshness() Freshness {
+	if e == nil || e.graph == nil || e.graph.Metadata == nil {
+		return Freshness{Status: FreshnessUnknown}
+	}
+	freshness := Freshness{Status: FreshnessUnknown}
+	if status, ok := e.graph.Metadata["freshness_status"].(string); ok {
+		switch FreshnessStatus(status) {
+		case FreshnessFresh, FreshnessStale:
+			freshness.Status = FreshnessStatus(status)
+		}
+	}
+	freshness.StaleFiles = metadataStringSlice(e.graph.Metadata["stale_files"])
+	freshness.RecommendedActions = metadataStringSlice(e.graph.Metadata["recommended_actions"])
+	return freshness
+}
+
+func hasEvidence(evidence types.Evidence) bool {
+	return evidence.Layer != "" || evidence.Type != "" || evidence.SourceArtifact != "" || evidence.Confidence != "" || evidence.Verification != "" || evidence.Score != 0
+}
