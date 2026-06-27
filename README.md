@@ -34,6 +34,12 @@ make verify
 # Extract knowledge graph from a folder
 ./vela extract ./my-repo
 
+# Query an extracted graph
+vela search --graph "./examples/wallet-service/.vela/graph.json" "explain Transaction"
+vela search --graph "./examples/wallet-service/.vela/graph.json" "who uses Transaction"
+vela search --graph "./examples/api-service/.vela/graph.json" "impact of OrderStatusDto"
+vela search --graph "./examples/mobile-app/.vela/graph.json" "who uses OrderListScreen"
+
 # Start interactive TUI to monitor extraction
 ./vela extract ./my-repo --tui
 
@@ -153,7 +159,7 @@ Use it when you already know the exact node label, file path, type, interface, D
 If you do not know the exact node yet, use `vela lookup <term>` first.
 
 ```bash
-/home/geen/Documents/personal/vela/bin/vela lookup --graph "/home/geen/Documents/glim/glim-wallet-wrapper-microservice/.vela/graph.json" "transaction"
+vela lookup --graph "./examples/wallet-service/.vela/graph.json" "transaction"
 ```
 
 Valid query forms:
@@ -173,19 +179,19 @@ Valid query forms:
 Examples:
 
 ```bash
-/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-wallet-wrapper-microservice/.vela/graph.json" "explain Transaction"
-/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-wallet-wrapper-microservice/.vela/graph.json" "who uses Transaction"
-/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-wallet-wrapper-microservice/.vela/graph.json" "what does Transaction depend on"
-/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-common-api/.vela/graph.json" "impact of MovementStatusDto"
-/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-wallet-wrapper-microservice/.vela/graph.json" "path TransactionController -> TransactionMapper"
+vela search --graph "./examples/wallet-service/.vela/graph.json" "explain Transaction"
+vela search --graph "./examples/wallet-service/.vela/graph.json" "who uses Transaction"
+vela search --graph "./examples/wallet-service/.vela/graph.json" "what does Transaction depend on"
+vela search --graph "./examples/wallet-service/.vela/graph.json" "impact of MovementStatusDto"
+vela search --graph "./examples/wallet-service/.vela/graph.json" "path TransactionController -> TransactionMapper"
 ```
 
 Bad examples:
 
 ```bash
-/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-wallet/.vela/graph.json" "movement status mobile app dto contract"
-/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-common-api/.vela/graph.json" "billing"
-/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-wallet/.vela/graph.json" "print the movement extract"
+vela search --graph "./examples/wallet-service/.vela/graph.json" "movement status mobile app dto contract"
+vela search --graph "./examples/wallet-service/.vela/graph.json" "billing"
+vela search --graph "./examples/wallet-service/.vela/graph.json" "print the movement extract"
 ```
 
 Those fail because `search` only accepts structural query forms. Broad feature requests need discovery first.
@@ -202,16 +208,16 @@ Use this workflow instead:
 4. Run `vela search` on those exact nodes.
 5. Build the plan from producer, contract, consumer, and rollout risk.
 
-Example workflow for a Glim feature:
+Example workflow for a feature:
 
 1. Find candidate nodes such as `Transaction`, `TransactionMapper`, `MovementStatusDto`, or `MovementListScreen`.
 2. Then run structural queries like:
 
 ```bash
-/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-wallet-wrapper-microservice/.vela/graph.json" "explain Transaction"
-/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-wallet-wrapper-microservice/.vela/graph.json" "who uses Transaction"
-/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-common-api/.vela/graph.json" "impact of MovementStatusDto"
-/home/geen/Documents/personal/vela/bin/vela search --graph "/home/geen/Documents/glim/glim-wallet/.vela/graph.json" "who uses MovementListScreen"
+vela search --graph "./examples/wallet-service/.vela/graph.json" "explain Transaction"
+vela search --graph "./examples/wallet-service/.vela/graph.json" "who uses Transaction"
+vela search --graph "./examples/wallet-service/.vela/graph.json" "impact of MovementStatusDto"
+vela search --graph "./examples/wallet-service/.vela/graph.json" "who uses MovementListScreen"
 ```
 
 This tells you:
@@ -385,14 +391,6 @@ vela/
 ├── LICENSE
 └── README.md
 ```
-
-## Development Status
-
-- [ ] Phase 0: PoC (file detect + Go AST parsing + basic graph)
-- [ ] Phase 1: Multi-language extraction + LLM client interface
-- [ ] Phase 2: Community detection + analysis + exports
-- [ ] Phase 3: Bubbletea TUI with progress tracking
-- [ ] Phase 4: Advanced features (watch, incremental updates)
 
 ## License
 
