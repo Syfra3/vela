@@ -22,9 +22,16 @@ scenarios:
   - SCN-013
   - SCN-014
   - SCN-015
+  - SCN-016
+  - SCN-017
+  - SCN-018
+  - SCN-019
+  - SCN-020
+  - SCN-021
 
 completion_notes:
-  - SCN-001 through SCN-015 are implemented for the Vela agent explore runtime workflow.
+  - SCN-001 through SCN-021 are implemented for the Vela agent explore runtime workflow.
+  - SCN-016 through SCN-021 add the TUI coding-agent installer wizard for OpenCode and Claude Code.
   - Approval evidence is recorded in `specs/.approved` for `features/vela-agent-explore-runtime.feature`.
   - No new runtime behavior is introduced by this marker; it only restores Bob review precondition evidence.
 

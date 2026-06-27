@@ -20,6 +20,12 @@ current_workflow:
     - SCN-013
     - SCN-014
     - SCN-015
+    - SCN-016
+    - SCN-017
+    - SCN-018
+    - SCN-019
+    - SCN-020
+    - SCN-021
 approved_scenarios:
   features/vela-agent-explore-runtime.feature:
     - SCN-001
@@ -37,3 +43,9 @@ approved_scenarios:
     - SCN-013
     - SCN-014
     - SCN-015
+    - SCN-016
+    - SCN-017
+    - SCN-018
+    - SCN-019
+    - SCN-020
+    - SCN-021

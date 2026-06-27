@@ -543,7 +543,7 @@ func TestMenuModelProjectsScreenUsesCurrentTerminalSize(t *testing.T) {
 	menu := NewMenuModel()
 	menu.termWidth = 91
 	menu.termHeight = 17
-	menu.cursor = 3
+	menu.cursor = 4
 
 	updated, _ := menu.handleMenuSelect()
 	menu = updated.(MenuModel)

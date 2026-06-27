@@ -5,6 +5,7 @@
 - Failure mode 2: Runtime query paths silently fall back to `.vela/graph.json` or stale generated artifacts when `.vela/graph.db` is missing, causing agents to trust data that is not the runtime source of truth.
 - Failure mode 3: Layered evidence collapses memory, contract, workspace, and repo/code facts into one undifferentiated answer, making prior decisions or inferred topology look like executable code truth.
 - Failure mode 4: MCP connect-time catch-up blocks agent startup or hides warming state, causing clients either to hang or to proceed without knowing whether the graph is fresh.
+- Failure mode 5: Vela ships `vela_explore` but leaves installation to manual config editing, so users never get the MCP tool wired into their coding agents.
 
 ## Hidden Assumptions
 - Existing graph query primitives can already provide enough lookup, explain, dependency, reverse-dependency, path, impact, status, and workspace/contract evidence to support the Phase 1 shell without a query-engine rewrite.
@@ -14,6 +15,7 @@
 - Connect-time catch-up or freshness probing can be represented as `warming` without implementing the later watcher/debounce/auto-sync phase.
 - Memory evidence is available only when the planner identifies a decision/history/why/previous-work intent; normal code-structure prompts do not request memory.
 - Agent instruction text can be updated as part of the Phase 1 shell, but no production code, tests, watcher, daemon, debounce, or auto-sync implementation is part of this spec-writing pass.
+- Existing CLI installer behavior for OpenCode and Claude Code can be reused by the TUI instead of duplicating agent config writing in the presentation layer.
 
 ## Alternatives Considered
 | Approach | Reason Rejected |
@@ -35,6 +37,7 @@ Vela will define and implement, in the first implementation slice only after hum
 **Acceptance Criteria:**
 - The implementation slice includes `vela explore`, MCP `vela_explore`, the shared result contract, intent planning/routing over existing primitives, DB-required diagnostics, freshness/warming reporting, layered evidence labeling, memory opt-in, and Phase 1 agent instruction text.
 - The implementation slice does not include watcher/debounce/auto-sync behavior, global daemon behavior, new extractors, benchmark implementation, or broad query-engine rewrites.
+- The implementation slice includes a TUI wizard that makes the existing agent installer discoverable and safe for local users.
 - The orchestrator asks the user before TDD implementation begins.
 - Every scenario in `features/vela-agent-explore-runtime.feature` is suitable for one-scenario-at-a-time TDD.
 **Edge Cases:**
@@ -206,14 +209,57 @@ Vela will define and implement, in the first implementation slice only after hum
 **Out of Scope:**
 - Deprecating or removing specialized graph commands.
 
+### REQ-013: TUI exposes an agent integration installer wizard
+**Description:** The TUI must provide a first-class guided path for installing Vela MCP and instructions into supported coding agents.
+**Acceptance Criteria:**
+- The main TUI menu includes `Install Agent Integration` with copy that explains it configures Vela MCP for coding agents.
+- Selecting the menu item opens a wizard instead of requiring users to discover CLI flags manually.
+- The wizard defaults to the current project and can present tracked project context when available.
+- The wizard lists OpenCode and Claude Code as MVP supported targets and shows unsupported detected agents as guidance-only, not installable.
+- The wizard displays the config path that will be touched for the selected target before writing.
+**Edge Cases:**
+- If no supported agent config is detected, the wizard still explains how to install by choosing a target/path manually in a later release and points to the equivalent CLI command.
+- Canceling from the wizard returns to the main menu without writing files.
+**Out of Scope:**
+- Cursor, Codex, Gemini, or other unsupported agent installation.
+- A global daemon or watcher setup.
+
+### REQ-014: TUI installer previews and confirms writes before installation
+**Description:** The wizard must show a dry-run preview and require explicit confirmation before modifying agent config or instruction files.
+**Acceptance Criteria:**
+- The preview lists the project path, selected agent, MCP config file, instruction file, and graph DB path.
+- The preview states that unrelated config is preserved and reruns are idempotent.
+- Confirmation runs the same backend installer used by `vela install`; the TUI must not duplicate OpenCode or Claude config writing logic.
+- Canceling at preview exits without writing files.
+**Edge Cases:**
+- If the backend installer returns an error, the wizard shows an actionable error and does not claim success.
+- If `.vela/graph.db` is missing, the install path initializes or reports the graph DB through the shared installer behavior.
+**Out of Scope:**
+- Editing arbitrary custom agent config formats.
+
+### REQ-015: TUI installer verifies the completed agent setup
+**Description:** After confirmation, the wizard must show a concise verification summary that the user can act on immediately.
+**Acceptance Criteria:**
+- Success output says MCP config was written.
+- Success output says agent instructions mention `vela_explore` first for structural questions.
+- Success output says `.vela/graph.db` exists or gives actionable `vela build`, `vela update`, or `vela status` guidance.
+- Success output includes a suggested local smoke prompt for the coding agent.
+- Re-running the same wizard target updates Vela-managed files without duplicate entries.
+**Edge Cases:**
+- If verification is partial, the wizard labels missing pieces as warnings rather than hiding them.
+- Existing unrelated config in the target directory is preserved.
+**Out of Scope:**
+- Launching or restarting the external coding agent process.
+
 ## Open Questions
-- None for the Phase 0 + Phase 1 implementation contract. Later-phase details such as watcher state storage, debounce timing, benchmark corpus, relation weights, Rust/JVM extractor strategy, SCIP/LSP ingestion, and auto-sync implementation remain intentionally out of scope for this slice.
+- None for the Phase 0 + Phase 1 implementation contract plus the TUI agent installer wizard slice. Later-phase details such as watcher state storage, debounce timing, benchmark corpus, relation weights, Rust/JVM extractor strategy, SCIP/LSP ingestion, unsupported agent installers, and auto-sync implementation remain intentionally out of scope for this slice.
 
 ## Open Assumptions
 - The initial CLI renderer can be human-readable by default while MCP returns structured content from the same envelope.
 - Any optional CLI JSON rendering, if implemented, must mirror the shared envelope and must not become a separate contract.
 - Existing freshness/status primitives are sufficient to report `fresh`, `stale`, `unavailable`, and MCP `warming`; live `pending` from file events may be reported only if existing state exists, because watcher/debounce implementation is deferred.
 - The first TDD implementation can add only the minimum planner/router needed for the accepted scenarios and does not need full graph relevance ranking.
+- The TUI wizard can start with keyboard-only Bubble Tea navigation and does not need a graphical diff viewer as long as the preview lists files and actions before writes.
 
 ## Out of Scope
 - Watcher/debounce/auto-sync implementation.
@@ -224,6 +270,8 @@ Vela will define and implement, in the first implementation slice only after hum
 - LLM or embedding-based graph truth.
 - Resource Graph completion.
 - Replacing or removing existing low-level commands and MCP tools.
+- Installing unsupported coding agents beyond OpenCode and Claude Code.
+- Restarting or controlling external coding-agent processes.
 - Production or test code changes during this spec pass.
 
 ## Trade-offs
@@ -232,6 +280,7 @@ Vela will define and implement, in the first implementation slice only after hum
 - Memory opt-in reduces surprise and noise, but agents must phrase prior-work questions clearly to receive memory evidence.
 - Keeping low-level commands increases surface area, but preserves maintainer workflows and lets `explore` reuse proven primitives incrementally.
 - Deferring watcher/debounce means Phase 1 does not fully solve active-session freshness, but it keeps the first implementation slice reviewable and anchored on the response contract.
+- Adding a TUI wizard increases surface area, but it removes a practical adoption blocker: users should not have to hand-edit MCP config to use `vela_explore`.
 
 ## Risk Level
-medium — Justification: The first slice avoids destructive operations and watcher complexity, but it changes the primary agent-facing contract, introduces runtime DB-required failure behavior, and must prevent overconfident graph answers, evidence-layer collapse, and backward-compatibility regressions.
+medium — Justification: The slice avoids destructive operations and watcher complexity, but it changes the primary agent-facing contract, introduces runtime DB-required failure behavior, and adds local agent config writes that must be previewed, confirmed, idempotent, and bounded to Vela-managed files.

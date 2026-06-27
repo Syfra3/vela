@@ -1,35 +1,35 @@
-# Bob Judge Report — Vela Agent Explore Runtime
+# Bob Judge Report — Vela Agent Explore Runtime + TUI Installer
 
 Date: 2026-06-27
 Project: vela
 Spec: `specs/hard_spec.md`
 Feature: `features/vela-agent-explore-runtime.feature`
-Approved scenarios: `SCN-001` through `SCN-015`
-Gate source: `N/A` (legacy workflow artifacts were pruned)
-TDD log: `N/A` (legacy workflow artifacts were pruned)
+Approved scenarios: `SCN-001` through `SCN-021`
+Gate source: `.uncle-bob/quality-gates.yaml`
+TDD log: `.uncle-bob/tdd-log.md`
 
 ## Verdict
 
 **status:** pass
 **verdict:** eligible for human review with warnings
 
-The repaired Bob gate files now match the requested Vela Agent Explore Runtime workflow. The active gate source is readable, points at `specs/hard_spec.md`, `features/vela-agent-explore-runtime.feature`, and lists exactly `SCN-001` through `SCN-015` for this workflow. Required gate commands all passed.
+The active gate source points at the current spec, feature, approval marker, implementation marker, TDD log, and judge report. Required gate commands passed after adding the TUI coding-agent installer wizard slice.
 
 Passing gates means the change is eligible for human review; it is not a claim of semantic perfection.
 
-## Repaired Gate File Audit
+## Gate File Audit
 
 | Evidence | Result | Notes |
 |---|---:|---|
-| `N/A` (legacy gate file pruned) | pass | `version: vela-agent-explore-runtime`; `status: final-review-ready`; scope and release evidence point to the current spec, feature, approval marker, implementation marker, and judge report. |
-| `specs/.approved` | pass | `current_workflow` points to `features/vela-agent-explore-runtime.feature` and `specs/hard_spec.md` with `SCN-001` through `SCN-015`. |
-| `specs/.implementation-complete` | pass | Exists, marks `implemented: true`, and lists `SCN-001` through `SCN-015` for the current workflow. |
-| Feature file | pass | `features/vela-agent-explore-runtime.feature` contains tags `@SCN-001` through `@SCN-015`. |
-| TDD log | pass | Legacy RED/GREEN/REFACTOR evidence was pruned from this branch after cleanup. |
+| `.uncle-bob/quality-gates.yaml` | pass | Lists `SCN-001` through `SCN-021` and the current workflow paths. |
+| `specs/.approved` | pass | `current_workflow` points to `features/vela-agent-explore-runtime.feature` and `specs/hard_spec.md` with `SCN-001` through `SCN-021`. |
+| `specs/.implementation-complete` | pass | Exists, marks `implemented: true`, and lists `SCN-001` through `SCN-021`. |
+| Feature file | pass | `features/vela-agent-explore-runtime.feature` contains tags `@SCN-001` through `@SCN-021`. |
+| TDD log | pass | Includes current workflow evidence for `SCN-001` through `SCN-021`. |
 
 ## Gates
 
-Active gate: `vela-agent-explore-runtime-verification`
+Active gate: `vela-agent-explore-runtime`
 
 | Command | Required | Result |
 |---|---:|---:|
@@ -37,7 +37,7 @@ Active gate: `vela-agent-explore-runtime-verification`
 | `make lint` | yes | pass (`0 issues.`) |
 | `make fmt-check` | yes | pass |
 
-No additional configured gate command was present in the pruned legacy gate configuration.
+No additional configured gate command was present.
 
 ## Scenario Coverage
 
@@ -58,19 +58,22 @@ No additional configured gate command was present in the pruned legacy gate conf
 | SCN-013 | pass | pass | `TestSCN013_MCPAgentInstructionsPreferVelaExploreFirstWithoutAutoSyncPromise` |
 | SCN-014 | pass | pass | `TestSCN014_SpecializedCLIMCPToolsRemainAvailableWithExploreAsDefaultSurface` |
 | SCN-015 | pass | pass | `TestSCN015_CLIExploreDefersWatcherAndDebounceForActiveSessionFreshness` |
+| SCN-016 | pass | pass | `TestSCN016_TUIMainMenuExposesAgentInstallerWizard` |
+| SCN-017 | pass | pass | `TestSCN017_TUIInstallerListsSupportedAndUnsupportedTargetsSafely` |
+| SCN-018 | pass | pass | `TestSCN018_TUIInstallerPreviewsFilesBeforeWriting` |
+| SCN-019 | pass | pass | `TestSCN019_TUIInstallerConfirmsOpenCodeThroughSharedInstaller` |
+| SCN-020 | pass | pass | `TestSCN020_TUIInstallerConfirmsClaudeThroughSharedInstaller` |
+| SCN-021 | pass | pass | `TestSCN021_TUIInstallerCancelExitsWithoutWriting` |
 
-Scenario traceability for the requested approved list is **100%**.
+Scenario traceability for the requested approved list is **100%**. Existing older feature files also contain `SCN-*` labels; this review scoped evidence to `features/vela-agent-explore-runtime.feature`.
 
 ## Diff / Evidence Audit
 
-Current working tree is not clean, which is allowed by the repaired gate warning because the user prohibited commits. Evidence files are working-tree evidence.
-
 Objective risk flags for human review:
 
-- The diff contains large generated artifact churn, including deletions under `results/.vela-graphs/*` and a modified `.vela/graph.json` plus untracked `.vela/graph.db`.
-- `specs/vela-v0.4-hard-spec.md` is deleted while the current repaired workflow points to `specs/hard_spec.md`; confirm this deletion is intended before merge.
-- New/untracked workflow artifacts include `features/vela-agent-explore-runtime.feature`, `specs/hard_spec.md`, and `docs/VELA_AGENT_EXPLORE_RUNTIME_PRD.md`; they must be intentionally included or excluded before final human merge.
-- The TDD log contains entries from multiple workflows. Current workflow entries are present and traceable, but reviewers should use the feature/spec pointers in the repaired gate files to avoid confusing older `SCN-*` entries with this workflow.
+- Working-tree evidence is present, but ignored Bob files (`.uncle-bob/*`, `specs/.approved`, `specs/.implementation-complete`) need intentional force-add or exclusion before PR.
+- The TUI wizard now writes local coding-agent config through the shared installer backend. Human review should verify the OpenCode and Claude Code paths are acceptable UX defaults.
+- The branch contains only the current workflow/code changes at this point, but reviewers should still inspect untracked/ignored workflow artifacts before committing.
 
 ## Judge Decision
 
@@ -81,10 +84,10 @@ judge_decision:
   scenario_traceability: "100%"
   tests_passing: true
   configured_gates_passing: true
-  active_gate: vela-agent-explore-runtime-verification
+  active_gate: vela-agent-explore-runtime
   failing_gates: []
   unauthorized_files: warning_only_not_gate_blocking
   next: human_review
   remediation: |
-    No Bob gate remediation required. Before merge, human review should confirm the large generated artifact churn, deleted v0.4 spec path, and untracked workflow artifacts are intentional.
+    No Bob gate remediation required. Before merge, human review should confirm ignored workflow artifacts are intentionally included or excluded and inspect the TUI installer UX.
 ```

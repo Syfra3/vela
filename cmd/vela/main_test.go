@@ -108,8 +108,8 @@ func TestSCN011_CompatibilityCLIInstallInitializesProjectGraphAndOpenCode(t *tes
 	if _, err := os.Stat(filepath.Join(projectDir, ".vela", "graph.db")); err != nil {
 		t.Fatalf("expected project graph.db initialized: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(opencodeDir, "mcp.json")); err != nil {
-		t.Fatalf("expected OpenCode MCP integration installed: %v", err)
+	if _, err := os.Stat(filepath.Join(opencodeDir, "opencode.json")); err != nil {
+		t.Fatalf("expected OpenCode config with MCP integration installed: %v", err)
 	}
 	for _, want := range []string{"initialized project graph", "installed OpenCode integration"} {
 		if !strings.Contains(stdout.String(), want) {
@@ -250,12 +250,18 @@ func TestSCN017_OpenCodeInstallWritesMCPAndInstructionSnippet(t *testing.T) {
 		t.Fatalf("Execute(install) error = %v", err)
 	}
 
-	mcpConfig, err := os.ReadFile(filepath.Join(opencodeDir, "mcp.json"))
+	mcpConfig, err := os.ReadFile(filepath.Join(opencodeDir, "opencode.json"))
 	if err != nil {
-		t.Fatalf("ReadFile(OpenCode MCP config) error = %v", err)
+		t.Fatalf("ReadFile(OpenCode config) error = %v", err)
 	}
-	if !strings.Contains(string(mcpConfig), "vela") {
-		t.Fatalf("expected OpenCode MCP config to reference vela, got %q", string(mcpConfig))
+	var opencodeConfig map[string]any
+	if err := json.Unmarshal(mcpConfig, &opencodeConfig); err != nil {
+		t.Fatalf("OpenCode config is not valid JSON: %v\n%s", err, mcpConfig)
+	}
+	mcp := opencodeConfig["mcp"].(map[string]any)
+	vela := mcp["vela"].(map[string]any)
+	if vela["type"] != "local" || vela["enabled"] != true {
+		t.Fatalf("expected OpenCode MCP config to register enabled local vela, got %#v", vela)
 	}
 	instructions, err := os.ReadFile(filepath.Join(opencodeDir, "instructions.md"))
 	if err != nil {
@@ -268,8 +274,8 @@ func TestSCN017_OpenCodeInstallWritesMCPAndInstructionSnippet(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadFile(unrelated opencode config) error = %v", err)
 	}
-	if string(unrelatedConfig) != `{"theme":"dark"}`+"\n" {
-		t.Fatalf("unrelated OpenCode config was modified: %q", string(unrelatedConfig))
+	if !strings.Contains(string(unrelatedConfig), `"theme": "dark"`) {
+		t.Fatalf("existing OpenCode config field was not preserved: %q", string(unrelatedConfig))
 	}
 }
 
@@ -294,7 +300,7 @@ func TestSCN018_OpenCodeInstallReportsUnsupportedPermissionWithoutFailingIntegra
 		t.Fatalf("Execute(install with unsupported permission) error = %v", err)
 	}
 
-	if _, err := os.Stat(filepath.Join(opencodeDir, "mcp.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(opencodeDir, "opencode.json")); err != nil {
 		t.Fatalf("expected OpenCode MCP config installed despite unsupported permission: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(opencodeDir, "instructions.md")); err != nil {

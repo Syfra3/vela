@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -9,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/Syfra3/vela/internal/agentinstall"
 	"github.com/Syfra3/vela/internal/config"
 	"github.com/Syfra3/vela/internal/export"
 	"github.com/Syfra3/vela/pkg/types"
@@ -23,6 +25,7 @@ const (
 	screenGraphStatus
 	screenProjects
 	screenPurge
+	screenAgentInstall
 )
 
 type menuItem struct {
@@ -32,25 +35,26 @@ type menuItem struct {
 }
 
 type MenuModel struct {
-	screen           menuScreen
-	cursor           int
-	items            []menuItem
-	termWidth        int
-	termHeight       int
-	message          string
-	version          string
-	lastGraphPath    string
-	obsidianRunning  bool
-	obsidianStep     int
-	obsidianTotal    int
-	obsidianStatus   string
-	obsidianStarted  time.Time
-	obsidianResult   string
-	obsidianErr      error
-	extractModel     ExtractModel
-	graphStatusModel GraphStatusModel
-	projectsModel    ProjectsModel
-	purgeModel       UninstallModel
+	screen            menuScreen
+	cursor            int
+	items             []menuItem
+	termWidth         int
+	termHeight        int
+	message           string
+	version           string
+	lastGraphPath     string
+	obsidianRunning   bool
+	obsidianStep      int
+	obsidianTotal     int
+	obsidianStatus    string
+	obsidianStarted   time.Time
+	obsidianResult    string
+	obsidianErr       error
+	extractModel      ExtractModel
+	graphStatusModel  GraphStatusModel
+	projectsModel     ProjectsModel
+	purgeModel        UninstallModel
+	agentInstallModel AgentInstallModel
 }
 
 func NewMenuModel() MenuModel {
@@ -70,6 +74,7 @@ func (m *MenuModel) rebuildMenu() {
 		{label: "Extract", description: "Browse folders and build a graph snapshot", key: "extract"},
 		{label: "Graph Status", description: "Inspect the current graph snapshot", key: "graphstatus"},
 		{label: "Export to Obsidian", description: "Export graph.json to an Obsidian vault", key: "obsidian"},
+		{label: "Install Agent Integration", description: "Configure Vela MCP for coding agents", key: "agentinstall"},
 		{label: "Projects", description: "Inspect, refresh, or delete tracked codebases", key: "projects"},
 		{label: "Purge Data", description: "Delete Vela-managed graph, cache, and vault data", key: "purge"},
 		{label: "Quit", description: "Exit Vela", key: "quit"},
@@ -98,6 +103,8 @@ func (m MenuModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.updateProjects(msg)
 	case screenPurge:
 		return m.updatePurge(msg)
+	case screenAgentInstall:
+		return m.updateAgentInstall(msg)
 	default:
 		return m, nil
 	}
@@ -117,6 +124,8 @@ func (m MenuModel) View() string {
 		return m.viewProjects()
 	case screenPurge:
 		return m.viewPurge()
+	case screenAgentInstall:
+		return m.viewAgentInstall()
 	default:
 		return ""
 	}
@@ -166,6 +175,10 @@ func (m MenuModel) handleMenuSelect() (tea.Model, tea.Cmd) {
 		done := make(chan obsidianExportMsg, 1)
 		startObsidianExport(m.lastGraphPath, progress, done)
 		return m, tea.Batch(waitForObsidianProgress(progress), waitForObsidianDone(done))
+	case "agentinstall":
+		m.screen = screenAgentInstall
+		m.agentInstallModel = NewAgentInstallModel()
+		return m, m.agentInstallModel.Init()
 	case "projects":
 		m.screen = screenProjects
 		m.projectsModel = NewProjectsModelWithGraphPath(m.lastGraphPath)
@@ -231,6 +244,16 @@ func (m MenuModel) updatePurge(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m MenuModel) updateAgentInstall(msg tea.Msg) (tea.Model, tea.Cmd) {
+	updated, cmd := m.agentInstallModel.Update(msg)
+	m.agentInstallModel = updated.(AgentInstallModel)
+	if m.agentInstallModel.Quitting() {
+		m.screen = screenMain
+		return m, nil
+	}
+	return m, cmd
+}
+
 func (m MenuModel) viewMain() string {
 	var b strings.Builder
 	b.WriteString(renderFrame("Vela", m.version, "Classic navigation restored"))
@@ -290,6 +313,10 @@ func (m MenuModel) viewProjects() string {
 
 func (m MenuModel) viewPurge() string {
 	return appStyle.Render(renderFrame("Purge Data", m.version, "Delete Vela-managed data") + "\n" + m.purgeModel.ViewContent() + "\n\n" + m.purgeModel.FooterHelp() + "\n")
+}
+
+func (m MenuModel) viewAgentInstall() string {
+	return appStyle.Render(renderFrame("Install Agent Integration", m.version, "Configure Vela MCP for coding agents") + "\n" + m.agentInstallModel.ViewContent() + "\n")
 }
 
 func renderFrame(title, version, subtitle string) string {
@@ -450,7 +477,32 @@ func renderStatusLine() string {
 	readyText := lipgloss.NewStyle().Foreground(colorSubtext).Render("ready")
 	queryDot := lipgloss.NewStyle().Foreground(colorAccent).Render("●")
 	queryText := lipgloss.NewStyle().Foreground(colorSubtext).Render("query-only")
-	return fmt.Sprintf("Status: %s %s  | Transport: %s %s", readyDot, readyText, queryDot, queryText)
+	mcpDotColor := colorWarn
+	mcpStatus := detectTuiMCPStatus()
+	if strings.EqualFold(mcpStatus, "installed") {
+		mcpDotColor = colorSuccess
+	}
+	mcpDot := lipgloss.NewStyle().Foreground(mcpDotColor).Render("●")
+	mcpText := lipgloss.NewStyle().Foreground(colorSubtext).Render(mcpStatus)
+	return fmt.Sprintf("Status: %s %s  | Transport: %s %s  | MCP: %s %s", readyDot, readyText, queryDot, queryText, mcpDot, mcpText)
+}
+
+var detectTuiMCPStatus = func() string {
+	for _, target := range agentinstall.DetectTargets() {
+		if !target.Supported {
+			continue
+		}
+		preview := agentinstall.Preview(agentinstall.Request{Agent: target.Agent, ConfigDir: target.ConfigDir})
+		if tuiMCPFileExists(preview.MCPConfigPath) && tuiMCPFileExists(preview.InstructionPath) {
+			return "installed"
+		}
+	}
+	return "not installed"
+}
+
+func tuiMCPFileExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 func renderSeparator() string {

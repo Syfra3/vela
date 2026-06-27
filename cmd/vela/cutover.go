@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Syfra3/vela/internal/agentinstall"
 	"github.com/Syfra3/vela/internal/app"
 	"github.com/Syfra3/vela/internal/config"
 	igraph "github.com/Syfra3/vela/internal/graph"
@@ -208,29 +209,20 @@ func installCmd() *cobra.Command {
 			for _, target := range targets {
 				fmt.Fprintf(cmd.OutOrStdout(), "agent target available: %s\n", target)
 			}
-			graphDB := filepath.Join(projectDir, ".vela", "graph.db")
-			if err := os.MkdirAll(filepath.Dir(graphDB), 0o755); err != nil {
-				return fmt.Errorf("initialize project graph: %w", err)
-			}
-			if _, err := os.Stat(graphDB); os.IsNotExist(err) {
-				if err := os.WriteFile(graphDB, []byte("SQLite format 3\x00"), 0o644); err != nil {
-					return fmt.Errorf("initialize project graph: %w", err)
-				}
-			} else if err != nil {
-				return fmt.Errorf("verify project graph: %w", err)
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "initialized project graph: %s\n", graphDB)
+			installedGraph := false
 
 			for _, agent := range agents {
 				if strings.EqualFold(strings.TrimSpace(agent), "opencode") {
 					if strings.TrimSpace(opencodeDir) == "" {
 						return fmt.Errorf("--opencode-dir is required for opencode install")
 					}
-					mcpPath, err := writeAgentIntegration(opencodeDir, "mcp.json", "instructions.md")
+					result, err := agentinstall.Install(agentinstall.Request{ProjectDir: projectDir, Agent: "opencode", ConfigDir: opencodeDir})
 					if err != nil {
 						return fmt.Errorf("install OpenCode integration: %w", err)
 					}
-					fmt.Fprintf(cmd.OutOrStdout(), "installed OpenCode integration: %s\n", mcpPath)
+					installedGraph = true
+					fmt.Fprintf(cmd.OutOrStdout(), "initialized project graph: %s\n", result.GraphDBPath)
+					fmt.Fprintf(cmd.OutOrStdout(), "installed OpenCode integration: %s\n", result.MCPConfigPath)
 					for _, permission := range permissions {
 						if permission = strings.TrimSpace(permission); permission != "" {
 							fmt.Fprintf(cmd.OutOrStdout(), "skipped unsupported permission setting: %s\n", permission)
@@ -241,12 +233,21 @@ func installCmd() *cobra.Command {
 					if strings.TrimSpace(claudeDir) == "" {
 						return fmt.Errorf("--claude-dir is required for claude install")
 					}
-					mcpPath, err := writeAgentIntegration(claudeDir, "vela-mcp.json", "vela-instructions.md")
+					result, err := agentinstall.Install(agentinstall.Request{ProjectDir: projectDir, Agent: "claude", ConfigDir: claudeDir})
 					if err != nil {
 						return fmt.Errorf("install Claude Code integration: %w", err)
 					}
-					fmt.Fprintf(cmd.OutOrStdout(), "installed Claude Code integration: %s\n", mcpPath)
+					installedGraph = true
+					fmt.Fprintf(cmd.OutOrStdout(), "initialized project graph: %s\n", result.GraphDBPath)
+					fmt.Fprintf(cmd.OutOrStdout(), "installed Claude Code integration: %s\n", result.MCPConfigPath)
 				}
+			}
+			if len(agents) == 0 && !installedGraph {
+				result, err := initializeProjectGraph(projectDir)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "initialized project graph: %s\n", result)
 			}
 			return nil
 		},
@@ -259,42 +260,30 @@ func installCmd() *cobra.Command {
 	return cmd
 }
 
-func writeAgentIntegration(agentDir, mcpFileName, instructionFileName string) (string, error) {
-	mcpPath := filepath.Join(agentDir, mcpFileName)
-	if err := os.MkdirAll(filepath.Dir(mcpPath), 0o755); err != nil {
-		return "", err
-	}
-	mcpConfig := []byte("{\n  \"mcpServers\": {\n    \"vela\": {\n      \"command\": \"vela\",\n      \"args\": [\"serve\"]\n    }\n  }\n}\n")
-	if err := os.WriteFile(mcpPath, mcpConfig, 0o644); err != nil {
-		return "", err
-	}
-	instructionPath := filepath.Join(agentDir, instructionFileName)
-	instructionSnippet := []byte("Use Vela graph queries for code structure, dependencies, and impact analysis before broad text search.\n")
-	if err := os.WriteFile(instructionPath, instructionSnippet, 0o644); err != nil {
-		return "", err
-	}
-	return mcpPath, nil
-}
-
 func detectedInstallTargets() []string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil || strings.TrimSpace(homeDir) == "" {
-		return nil
-	}
-
-	targets := make([]string, 0, 2)
-	if regularFileExists(filepath.Join(homeDir, ".config", "opencode", "opencode.json")) {
-		targets = append(targets, "OpenCode")
-	}
-	if regularFileExists(filepath.Join(homeDir, ".claude", "settings.json")) {
-		targets = append(targets, "Claude Code")
+	detected := agentinstall.DetectTargets()
+	targets := make([]string, 0, len(detected))
+	for _, target := range detected {
+		if target.Supported {
+			targets = append(targets, target.Name)
+		}
 	}
 	return targets
 }
 
-func regularFileExists(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && !info.IsDir()
+func initializeProjectGraph(projectDir string) (string, error) {
+	graphDB := filepath.Join(projectDir, ".vela", "graph.db")
+	if err := os.MkdirAll(filepath.Dir(graphDB), 0o755); err != nil {
+		return "", fmt.Errorf("initialize project graph: %w", err)
+	}
+	if _, err := os.Stat(graphDB); os.IsNotExist(err) {
+		if err := os.WriteFile(graphDB, []byte("SQLite format 3\x00"), 0o644); err != nil {
+			return "", fmt.Errorf("initialize project graph: %w", err)
+		}
+	} else if err != nil {
+		return "", fmt.Errorf("verify project graph: %w", err)
+	}
+	return graphDB, nil
 }
 
 func uninstallCmd() *cobra.Command {

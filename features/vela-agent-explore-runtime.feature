@@ -161,3 +161,63 @@ Feature: Vela agent explore runtime contract
     Then Vela may report known freshness, stale, warming, unavailable, or pending states from existing runtime state
     And Vela does not claim that MCP-session file watching or debounced auto-sync is implemented by this slice
     And Vela points stale or unavailable users to `vela update`, `vela build`, or `vela status`
+
+  @SCN-016 @REQ-013
+  Scenario: TUI main menu exposes an agent integration installer wizard
+    Given the user opens the Vela TUI
+    When the main menu is rendered
+    Then the menu includes "Install Agent Integration"
+    And the menu describes it as configuring Vela MCP for coding agents
+    When the user selects "Install Agent Integration"
+    Then Vela opens the agent installer wizard
+    And the wizard explains that it configures `vela_explore` for coding agents
+
+  @SCN-017 @REQ-013
+  Scenario: TUI installer lists supported and unsupported coding-agent targets safely
+    Given the agent installer wizard is open
+    And OpenCode and Claude Code config paths are detectable
+    And an unsupported agent config is detectable
+    When the target-selection step is rendered
+    Then OpenCode is shown as installable
+    And Claude Code is shown as installable
+    And the unsupported agent is shown as guidance-only
+    And unsupported agents cannot be selected for installation
+
+  @SCN-018 @REQ-014
+  Scenario: TUI installer previews files before writing agent integration
+    Given the agent installer wizard is open
+    And the user selected project "/work/vela"
+    And the user selected OpenCode
+    When the preview step is rendered
+    Then the preview lists the MCP config file to write
+    And the preview lists the instruction file to write
+    And the preview lists the graph DB path
+    And the preview says unrelated config is preserved
+    And no files are written before confirmation
+
+  @SCN-019 @REQ-014 @REQ-015
+  Scenario: TUI installer confirmation writes OpenCode integration through the shared installer
+    Given the agent installer wizard is previewing an OpenCode install
+    When the user confirms installation
+    Then Vela runs the shared installer backend for OpenCode
+    And the result says the MCP config was written
+    And the result says the instructions mention `vela_explore` first
+    And the result says `.vela/graph.db` is present or gives build/update/status guidance
+    And the result includes a suggested smoke prompt for the coding agent
+
+  @SCN-020 @REQ-014 @REQ-015
+  Scenario: TUI installer confirmation writes Claude Code integration through the shared installer
+    Given the agent installer wizard is previewing a Claude Code install
+    When the user confirms installation
+    Then Vela runs the shared installer backend for Claude Code
+    And the result says the MCP config was written
+    And the result says the instructions mention `vela_explore` first
+    And rerunning the same wizard target does not duplicate Vela-managed entries
+
+  @SCN-021 @REQ-014
+  Scenario: Canceling the TUI installer exits without writing files
+    Given the agent installer wizard is open
+    And the user has selected a supported target
+    When the user cancels before confirmation
+    Then Vela returns to the main menu
+    And no MCP config or instruction file is written
