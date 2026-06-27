@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.8.0](https://github.com/Syfra3/vela/compare/v1.7.3...v1.8.0) (2026-06-27)
+
+
+### Features
+
+* add MCP and retriever ([#36](https://github.com/Syfra3/vela/issues/36)) ([9272b5e](https://github.com/Syfra3/vela/commit/9272b5ef662642fd4468648c9569aba8f282b694))
+
 ## [1.7.3](https://github.com/Syfra3/vela/compare/v1.7.2...v1.7.3) (2026-06-27)
 
 
