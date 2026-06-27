@@ -97,7 +97,7 @@ func TestUninstallModelEnterStartsRemoval(t *testing.T) {
 	}
 }
 
-func TestUninstallAllRemovesTrackedRepoLocalData(t *testing.T) {
+func TestUninstallAllPreservesTrackedRepoLocalData(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
@@ -119,7 +119,57 @@ func TestUninstallAllRemovesTrackedRepoLocalData(t *testing.T) {
 	if _, err := uninstallAll(); err != nil {
 		t.Fatalf("uninstallAll() error = %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(repo, ".vela")); !os.IsNotExist(err) {
-		t.Fatalf("expected tracked repo local data removed, stat err = %v", err)
+	if _, err := os.Stat(filepath.Join(repo, ".vela", "graph.json")); err != nil {
+		t.Fatalf("expected tracked repo local data to remain, stat err = %v", err)
+	}
+}
+
+// REQ-006/REQ-012 → SCN-010 → TestSCN010_TUIUninstallRemovesOpenCodeIntegrationPreservesIndexes
+func TestSCN010_TUIUninstallRemovesOpenCodeIntegrationPreservesIndexes(t *testing.T) {
+	// Scenario: TUI uninstall removes agent integrations but preserves indexes.
+	home := t.TempDir()
+	repo := filepath.Join(home, "project")
+	graphDB := filepath.Join(repo, ".vela", "graph.db")
+	opencodeIntegration := filepath.Join(home, ".config", "opencode", "vela")
+	for _, dir := range []string{filepath.Dir(graphDB), opencodeIntegration} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(graphDB, []byte("sqlite graph"), 0o644); err != nil {
+		t.Fatalf("write graph db: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(opencodeIntegration, "mcp.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatalf("write opencode integration: %v", err)
+	}
+
+	originalTargets := uninstallTargetsFunc
+	originalRepos := uninstallTrackedReposFunc
+	t.Cleanup(func() {
+		uninstallTargetsFunc = originalTargets
+		uninstallTrackedReposFunc = originalRepos
+	})
+	uninstallTargetsFunc = func() ([]string, error) { return []string{opencodeIntegration}, nil }
+	uninstallTrackedReposFunc = func() ([]string, error) { return []string{repo}, nil }
+
+	result, err := uninstallAll()
+	if err != nil {
+		t.Fatalf("uninstallAll() error = %v", err)
+	}
+	if len(result.Removed) != 1 || result.Removed[0] != opencodeIntegration {
+		t.Fatalf("removed = %v, want only OpenCode integration", result.Removed)
+	}
+	if _, err := os.Stat(opencodeIntegration); !os.IsNotExist(err) {
+		t.Fatalf("expected OpenCode integration removed, stat err = %v", err)
+	}
+	if _, err := os.Stat(graphDB); err != nil {
+		t.Fatalf("expected graph index to remain, stat err = %v", err)
+	}
+
+	model := NewUninstallModel()
+	updated, _ := model.Update(uninstallResultMsg{result: result})
+	view := updated.(UninstallModel).ViewContent()
+	if !strings.Contains(view, "Indexes remain") || !strings.Contains(view, "purge") {
+		t.Fatalf("expected uninstall view to explain index purge, got %q", view)
 	}
 }

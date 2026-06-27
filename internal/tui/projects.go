@@ -10,11 +10,13 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/Syfra3/vela/internal/app"
 	"github.com/Syfra3/vela/internal/cache"
 	"github.com/Syfra3/vela/internal/config"
 	"github.com/Syfra3/vela/internal/detect"
 	"github.com/Syfra3/vela/internal/hooks"
 	"github.com/Syfra3/vela/internal/registry"
+	"github.com/Syfra3/vela/pkg/types"
 )
 
 type trackedProject struct {
@@ -43,11 +45,12 @@ type projectsActionMsg struct {
 }
 
 var (
-	loadTrackedProjectsFunc   = loadTrackedProjects
-	deleteTrackedProjectsFunc = deleteTrackedProjects
-	refreshTrackedProjectFunc = refreshTrackedProject
-	installProjectHooksFunc   = installProjectHooks
-	uninstallProjectHooksFunc = uninstallProjectHooks
+	loadTrackedProjectsFunc    = loadTrackedProjects
+	deleteTrackedProjectsFunc  = deleteTrackedProjects
+	refreshTrackedProjectFunc  = refreshTrackedProject
+	installProjectHooksFunc    = installProjectHooks
+	uninstallProjectHooksFunc  = uninstallProjectHooks
+	runTrackedProjectQueryFunc = runTrackedProjectQuery
 )
 
 type ProjectsModel struct {
@@ -65,9 +68,14 @@ type ProjectsModel struct {
 	projects  []trackedProject
 	selected  map[string]bool
 
-	message  string
-	msgIsErr bool
-	err      error
+	querying        bool
+	queryInput      string
+	queryResult     string
+	confirmingPurge bool
+	pendingPurge    []trackedProject
+	message         string
+	msgIsErr        bool
+	err             error
 }
 
 func NewProjectsModel() ProjectsModel {
@@ -103,7 +111,11 @@ func (m ProjectsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.message = msg.message
 		m.msgIsErr = msg.err != nil
 		if msg.err != nil {
-			m.message = msg.err.Error()
+			if strings.TrimSpace(msg.message) == "" {
+				m.message = msg.err.Error()
+			} else if !strings.Contains(msg.message, msg.err.Error()) {
+				m.message = msg.message + "\n" + msg.err.Error()
+			}
 		}
 		return m, loadTrackedProjectsCmd(m.graphPath)
 	case tea.WindowSizeMsg:
@@ -118,6 +130,12 @@ func (m ProjectsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.quitting = true
 			}
 			return m, nil
+		}
+		if m.querying {
+			return m.updateQueryInput(msg), nil
+		}
+		if m.confirmingPurge {
+			return m.updatePurgeConfirmation(msg)
 		}
 
 		switch msg.String() {
@@ -151,13 +169,28 @@ func (m ProjectsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "d":
 			marked := m.markedProjects()
 			if len(marked) == 0 {
-				m.message = "Mark one or more projects with x before deleting."
-				m.msgIsErr = true
+				project, ok := m.currentProject()
+				if !ok {
+					return m, nil
+				}
+				marked = []trackedProject{project}
+			}
+			m.confirmingPurge = true
+			m.pendingPurge = append([]trackedProject(nil), marked...)
+			m.message = ""
+			m.msgIsErr = false
+			m.scrollOffset = 0
+			return m, nil
+		case "D":
+			if len(m.projects) == 0 {
 				return m, nil
 			}
-			m.running = true
+			m.confirmingPurge = true
+			m.pendingPurge = append([]trackedProject(nil), m.projects...)
 			m.message = ""
-			return m, deleteTrackedProjectsCmd(m.graphPath, marked)
+			m.msgIsErr = false
+			m.scrollOffset = 0
+			return m, nil
 		case "enter":
 			fallthrough
 		case "r":
@@ -198,9 +231,117 @@ func (m ProjectsModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.message = ""
 			m.msgIsErr = false
 			return m, nil
+		case "q":
+			if _, ok := m.currentProject(); !ok {
+				return m, nil
+			}
+			m.querying = true
+			m.queryInput = ""
+			m.message = "Enter graph query, then press enter."
+			m.msgIsErr = false
+			return m, nil
 		}
 	}
 	return m, nil
+}
+
+func (m ProjectsModel) updatePurgeConfirmation(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "n", "b":
+		m.confirmingPurge = false
+		m.pendingPurge = nil
+		m.message = "Purge canceled. No project indexes were deleted."
+		m.msgIsErr = false
+		return m, nil
+	case "enter", "y":
+		if len(m.pendingPurge) == 0 {
+			m.confirmingPurge = false
+			m.message = "No project selected for purge."
+			m.msgIsErr = true
+			return m, nil
+		}
+		pending := append([]trackedProject(nil), m.pendingPurge...)
+		m.confirmingPurge = false
+		m.pendingPurge = nil
+		m.running = true
+		m.message = ""
+		m.msgIsErr = false
+		return m, deleteTrackedProjectsCmd(m.graphPath, pending)
+	}
+	return m, nil
+}
+
+func (m ProjectsModel) updateQueryInput(msg tea.KeyMsg) ProjectsModel {
+	switch msg.String() {
+	case "esc":
+		m.querying = false
+		m.queryInput = ""
+		m.message = "Graph query canceled."
+		return m
+	case "backspace":
+		if len(m.queryInput) > 0 {
+			m.queryInput = m.queryInput[:len(m.queryInput)-1]
+		}
+		return m
+	case "enter":
+		project, ok := m.currentProject()
+		if !ok {
+			m.querying = false
+			return m
+		}
+		query := strings.TrimSpace(m.queryInput)
+		if query == "" {
+			m.message = "Enter a graph query before submitting."
+			m.msgIsErr = true
+			return m
+		}
+		result, err := runTrackedProjectQueryFunc(project, query)
+		if err != nil {
+			m.querying = false
+			m.queryResult = ""
+			m.message = fmt.Sprintf("selected graph is unreadable for %s: %v. View graph status or refresh local data, then try another action.", project.Name, err)
+			m.msgIsErr = true
+			return m
+		}
+		m.querying = false
+		m.queryResult = fmt.Sprintf("Query results for %s\nsource: %s\n%s", project.Name, project.Name, result)
+		m.message = ""
+		m.msgIsErr = false
+		return m
+	default:
+		if len(msg.Runes) > 0 {
+			m.queryInput += string(msg.Runes)
+		}
+		return m
+	}
+}
+
+func runTrackedProjectQuery(project trackedProject, queryText string) (string, error) {
+	parts := strings.Fields(queryText)
+	if len(parts) < 2 {
+		return "", fmt.Errorf("enter a graph query like 'explain AuthService' or 'dependencies AuthService'")
+	}
+	input := app.QueryRequestInput{GraphPath: project.GraphPath, Subject: parts[1], Limit: types.DefaultQueryLimit}
+	switch strings.ToLower(parts[0]) {
+	case "explain":
+		input.Kind = types.QueryKindExplain
+	case "impact":
+		input.Kind = types.QueryKindImpact
+	case "dependencies", "deps":
+		input.Kind = types.QueryKindDependencies
+	case "reverse_dependencies", "reverse-dependencies", "rdeps":
+		input.Kind = types.QueryKindReverseDependencies
+	case "path":
+		if len(parts) < 3 {
+			return "", fmt.Errorf("path queries require a subject and target")
+		}
+		input.Kind = types.QueryKindPath
+		input.Target = parts[2]
+	default:
+		return "", fmt.Errorf("unsupported graph query %q", parts[0])
+	}
+	result, _, err := (app.QueryService{}).Run(input)
+	return result, err
 }
 
 func (m ProjectsModel) View() string { return m.ViewContent() }
@@ -257,6 +398,29 @@ func (m ProjectsModel) renderContent() string {
 
 	b.WriteString(accentStyle.Render("Tracked Codebases"))
 	b.WriteString("\n\n")
+	if m.querying {
+		b.WriteString(textStyle.Render("Graph query: " + m.queryInput))
+		b.WriteString("\n\n")
+	} else if m.confirmingPurge {
+		b.WriteString(warnStyle.Render("Confirm destructive purge for " + m.purgeConfirmationScope()))
+		b.WriteString("\n")
+		if m.purgeIsAllProjects() {
+			b.WriteString(textStyle.Render("This attempts to delete every known project index and registry entry."))
+		} else {
+			b.WriteString(textStyle.Render("This deletes only the selected project index data and registry entry."))
+		}
+		b.WriteString("\n")
+		if m.purgeIsAllProjects() {
+			b.WriteString(mutedStyle.Render("Press enter/y to confirm, esc/n to cancel."))
+		} else {
+			b.WriteString(mutedStyle.Render("Other project indexes remain unchanged. Press enter/y to confirm, esc/n to cancel."))
+		}
+		b.WriteString("\n\n")
+	} else if m.queryResult != "" {
+		b.WriteString(textStyle.Render(m.queryResult))
+		b.WriteString("\n\n")
+	}
+	duplicateNames := duplicateProjectNames(m.projects)
 	for i, project := range m.projects {
 		cursor := "  "
 		rowStyle := textStyle
@@ -272,6 +436,9 @@ func (m ProjectsModel) renderContent() string {
 		if project.Path != "" {
 			b.WriteString(mutedStyle.Render("     " + project.Path))
 			b.WriteString("\n")
+		} else if duplicateNames[project.Name] && strings.TrimSpace(project.NodeID) != "" {
+			b.WriteString(mutedStyle.Render("     id: " + project.NodeID))
+			b.WriteString("\n")
 		} else {
 			b.WriteString(mutedStyle.Render("     path unavailable in this graph snapshot"))
 			b.WriteString("\n")
@@ -280,7 +447,7 @@ func (m ProjectsModel) renderContent() string {
 			b.WriteString(mutedStyle.Render("     remote: " + project.Remote))
 			b.WriteString("\n")
 		}
-		b.WriteString(mutedStyle.Render("     actions: refresh local data • view graph status • toggle hooks • remove tracked data"))
+		b.WriteString(mutedStyle.Render("     actions: refresh local data • query graph • view graph status • toggle hooks • remove tracked data"))
 		b.WriteString("\n")
 		b.WriteString("\n")
 	}
@@ -299,6 +466,20 @@ func (m ProjectsModel) renderContent() string {
 	return b.String()
 }
 
+func duplicateProjectNames(projects []trackedProject) map[string]bool {
+	counts := make(map[string]int, len(projects))
+	for _, project := range projects {
+		counts[project.Name]++
+	}
+	duplicates := make(map[string]bool)
+	for name, count := range counts {
+		if count > 1 {
+			duplicates[name] = true
+		}
+	}
+	return duplicates
+}
+
 func (m ProjectsModel) FooterHelp() string {
 	if m.loading {
 		return "loading tracked projects"
@@ -306,11 +487,32 @@ func (m ProjectsModel) FooterHelp() string {
 	if m.running {
 		return "waiting for project action to finish"
 	}
-	help := "↑↓ navigate • enter/r refresh • g graph status • x mark • h toggle hooks • d delete marked • esc back"
+	if m.confirmingPurge {
+		return "enter/y confirm purge • esc/n cancel"
+	}
+	help := "↑↓ navigate • enter/r refresh • q query graph • g graph status • x mark • h toggle hooks • d delete marked • D delete all • esc back"
 	if m.maxScrollOffset() > 0 {
 		help += " • pgup/pgdown scroll"
 	}
 	return help
+}
+
+func (m ProjectsModel) purgeConfirmationScope() string {
+	if m.purgeIsAllProjects() {
+		return "all tracked projects"
+	}
+	if len(m.pendingPurge) == 1 {
+		return m.pendingPurge[0].Name
+	}
+	names := make([]string, 0, len(m.pendingPurge))
+	for _, project := range m.pendingPurge {
+		names = append(names, project.Name)
+	}
+	return strings.Join(names, ", ")
+}
+
+func (m ProjectsModel) purgeIsAllProjects() bool {
+	return len(m.projects) > 0 && len(m.pendingPurge) == len(m.projects)
 }
 
 func (m *ProjectsModel) ConsumeGraphStatusPath() (string, bool) {
@@ -525,7 +727,14 @@ func deleteTrackedProjects(graphPath string, projects []trackedProject) (string,
 	if err := pruneProjectCache(projects); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("Removed %d tracked project(s).", len(projects)), nil
+	return purgeResultMessage(projects), nil
+}
+
+func purgeResultMessage(projects []trackedProject) string {
+	if len(projects) == 1 && strings.TrimSpace(projects[0].Name) != "" {
+		return fmt.Sprintf("Purged index for %s.", projects[0].Name)
+	}
+	return fmt.Sprintf("Purged indexes for %d tracked project(s).", len(projects))
 }
 
 func refreshTrackedProject(graphPath string, project trackedProject) (string, error) {

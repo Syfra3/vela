@@ -534,12 +534,19 @@ func (m GraphStatusModel) renderGlobalContent() string {
 		}
 		b.WriteString(fmt.Sprintf("    %s %s\n", dim.Render("hooks"), renderHookState(repo.HookStatus, repo.HookInstalled, ok, warn, errS)))
 		b.WriteString(fmt.Sprintf("    %s %s  %s %s\n", dim.Render("manifest"), renderBinaryState(repo.Snapshot.Freshness.ManifestPresent, ok, warn), dim.Render("report"), renderBinaryState(repo.Snapshot.Freshness.ReportPresent, ok, warn)))
+		b.WriteString(fmt.Sprintf("    %s %s\n", dim.Render("state"), renderGraphFreshnessState(repoGraphState(repo), ok, warn, errS)))
 		if repo.LoadError != "" {
 			b.WriteString(fmt.Sprintf("    %s %s\n\n", dim.Render("status"), errS.Render(repo.LoadError)))
 			continue
 		}
 		if !repo.Snapshot.Freshness.GraphUpdatedAt.IsZero() {
 			b.WriteString(fmt.Sprintf("    %s %s\n", dim.Render("updated"), dim.Render(repo.Snapshot.Freshness.GraphUpdatedAt.Format("2006-01-02 15:04 UTC"))))
+		}
+		if repo.Snapshot.Freshness.TrackedFiles > 0 {
+			b.WriteString(fmt.Sprintf("    %s %s\n", dim.Render("tracked files"), text.Render(fmt.Sprintf("%d", repo.Snapshot.Freshness.TrackedFiles))))
+		}
+		if len(repo.Snapshot.Freshness.StaleFiles) > 0 {
+			b.WriteString(fmt.Sprintf("    %s %s\n", dim.Render("stale files"), warn.Render(strings.Join(repo.Snapshot.Freshness.StaleFiles, ", "))))
 		}
 		b.WriteString(fmt.Sprintf("    %s nodes:%d  files:%d  symbols:%d  edges:%d  broken:%d\n\n",
 			dim.Render("coverage"),
@@ -647,6 +654,36 @@ func renderHookState(status string, installed bool, ok, warn, errS lipgloss.Styl
 		return errS.Render(status)
 	default:
 		return warn.Render(status)
+	}
+}
+
+func repoGraphState(repo igraph.RepoStatusSnapshot) string {
+	if repo.LoadError != "" {
+		lower := strings.ToLower(repo.LoadError)
+		if strings.Contains(lower, "missing") || strings.Contains(lower, "not exist") || strings.Contains(lower, "unavailable") {
+			return "missing"
+		}
+		return "error"
+	}
+	if state := strings.TrimSpace(repo.Snapshot.Freshness.Status); state != "" && state != "unknown" {
+		return state
+	}
+	if strings.TrimSpace(repo.GraphPath) == "" {
+		return "missing"
+	}
+	return "unknown"
+}
+
+func renderGraphFreshnessState(state string, ok, warn, errS lipgloss.Style) string {
+	switch state {
+	case "fresh":
+		return ok.Render(state)
+	case "stale", "indexing", "unknown":
+		return warn.Render(state)
+	case "missing", "error":
+		return errS.Render(state)
+	default:
+		return warn.Render(state)
 	}
 }
 

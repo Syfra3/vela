@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -20,8 +22,8 @@ func TestMenuModelRestoresClassicMainSurface(t *testing.T) {
 		got = append(got, item.key)
 	}
 	joined := strings.Join(got, ",")
-	if joined != "extract,graphstatus,obsidian,projects,purge,quit" {
-		t.Fatalf("menu keys = %q, want extract,graphstatus,obsidian,projects,purge,quit", joined)
+	if joined != "extract,graphstatus,obsidian,agentinstall,projects,purge,quit" {
+		t.Fatalf("menu keys = %q, want extract,graphstatus,obsidian,agentinstall,projects,purge,quit", joined)
 	}
 	view := m.View()
 	if !strings.Contains(view, "██╗   ██╗███████╗██╗") {
@@ -34,6 +36,39 @@ func TestMenuModelRestoresClassicMainSurface(t *testing.T) {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected classic header content %q in view, got %q", want, view)
 		}
+	}
+}
+
+func TestMenuHeaderDisplaysMCPStatus(t *testing.T) {
+	original := detectTuiMCPStatus
+	t.Cleanup(func() { detectTuiMCPStatus = original })
+	detectTuiMCPStatus = func() string { return "installed" }
+
+	m := NewMenuModel()
+	view := m.View()
+	for _, want := range []string{"MCP:", "installed"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected header to include MCP status %q, got %q", want, view)
+		}
+	}
+}
+
+func TestMenuHeaderDoesNotTreatLegacyOpenCodeMCPFileAsInstalled(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	opencodeDir := filepath.Join(home, ".config", "opencode")
+	if err := os.MkdirAll(opencodeDir, 0o755); err != nil {
+		t.Fatalf("mkdir opencode dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(opencodeDir, "mcp.json"), []byte(`{"mcpServers":{"vela":{}}}`), 0o644); err != nil {
+		t.Fatalf("write legacy mcp file: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(opencodeDir, "instructions.md"), []byte("Use Vela\n"), 0o644); err != nil {
+		t.Fatalf("write instructions file: %v", err)
+	}
+
+	if got := detectTuiMCPStatus(); got != "not installed" {
+		t.Fatalf("MCP status = %q, want not installed for legacy sidecar files", got)
 	}
 }
 

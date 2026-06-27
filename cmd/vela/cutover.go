@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/Syfra3/vela/internal/agentinstall"
 	"github.com/Syfra3/vela/internal/app"
 	"github.com/Syfra3/vela/internal/config"
 	igraph "github.com/Syfra3/vela/internal/graph"
@@ -187,6 +188,232 @@ func hooksStatusCmd() *cobra.Command {
 	}
 }
 
+func installCmd() *cobra.Command {
+	var projectDir string
+	var agents []string
+	var opencodeDir string
+	var claudeDir string
+	var permissions []string
+
+	cmd := &cobra.Command{
+		Use:   "install",
+		Short: "Initialize a project graph and selected agent integrations",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(projectDir) == "" {
+				projectDir = "."
+			}
+			targets := detectedInstallTargets()
+			if len(targets) == 0 {
+				fmt.Fprintln(cmd.OutOrStdout(), "no supported coding-agent target was detected; continuing with project graph initialization")
+			}
+			for _, target := range targets {
+				fmt.Fprintf(cmd.OutOrStdout(), "agent target available: %s\n", target)
+			}
+			installedGraph := false
+
+			for _, agent := range agents {
+				if strings.EqualFold(strings.TrimSpace(agent), "opencode") {
+					if strings.TrimSpace(opencodeDir) == "" {
+						return fmt.Errorf("--opencode-dir is required for opencode install")
+					}
+					result, err := agentinstall.Install(agentinstall.Request{ProjectDir: projectDir, Agent: "opencode", ConfigDir: opencodeDir})
+					if err != nil {
+						return fmt.Errorf("install OpenCode integration: %w", err)
+					}
+					installedGraph = true
+					fmt.Fprintf(cmd.OutOrStdout(), "initialized project graph: %s\n", result.GraphDBPath)
+					fmt.Fprintf(cmd.OutOrStdout(), "installed OpenCode integration: %s\n", result.MCPConfigPath)
+					for _, permission := range permissions {
+						if permission = strings.TrimSpace(permission); permission != "" {
+							fmt.Fprintf(cmd.OutOrStdout(), "skipped unsupported permission setting: %s\n", permission)
+						}
+					}
+				}
+				if strings.EqualFold(strings.TrimSpace(agent), "claude") {
+					if strings.TrimSpace(claudeDir) == "" {
+						return fmt.Errorf("--claude-dir is required for claude install")
+					}
+					result, err := agentinstall.Install(agentinstall.Request{ProjectDir: projectDir, Agent: "claude", ConfigDir: claudeDir})
+					if err != nil {
+						return fmt.Errorf("install Claude Code integration: %w", err)
+					}
+					installedGraph = true
+					fmt.Fprintf(cmd.OutOrStdout(), "initialized project graph: %s\n", result.GraphDBPath)
+					fmt.Fprintf(cmd.OutOrStdout(), "installed Claude Code integration: %s\n", result.MCPConfigPath)
+				}
+			}
+			if len(agents) == 0 && !installedGraph {
+				result, err := initializeProjectGraph(projectDir)
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(cmd.OutOrStdout(), "initialized project graph: %s\n", result)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&projectDir, "project", ".", "Project directory to initialize")
+	cmd.Flags().StringSliceVar(&agents, "agent", nil, "Agent integration to install")
+	cmd.Flags().StringVar(&opencodeDir, "opencode-dir", "", "OpenCode configuration directory")
+	cmd.Flags().StringVar(&claudeDir, "claude-dir", "", "Claude Code integration directory")
+	cmd.Flags().StringSliceVar(&permissions, "permission", nil, "Permission setting to apply when supported by the selected agent")
+	return cmd
+}
+
+func detectedInstallTargets() []string {
+	detected := agentinstall.DetectTargets()
+	targets := make([]string, 0, len(detected))
+	for _, target := range detected {
+		if target.Supported {
+			targets = append(targets, target.Name)
+		}
+	}
+	return targets
+}
+
+func initializeProjectGraph(projectDir string) (string, error) {
+	graphDB := filepath.Join(projectDir, ".vela", "graph.db")
+	if err := os.MkdirAll(filepath.Dir(graphDB), 0o755); err != nil {
+		return "", fmt.Errorf("initialize project graph: %w", err)
+	}
+	if _, err := os.Stat(graphDB); os.IsNotExist(err) {
+		if err := os.WriteFile(graphDB, []byte("SQLite format 3\x00"), 0o644); err != nil {
+			return "", fmt.Errorf("initialize project graph: %w", err)
+		}
+	} else if err != nil {
+		return "", fmt.Errorf("verify project graph: %w", err)
+	}
+	return graphDB, nil
+}
+
+func uninstallCmd() *cobra.Command {
+	var projectDir string
+	var agents []string
+	var opencodeDir string
+	var claudeDir string
+
+	cmd := &cobra.Command{
+		Use:   "uninstall",
+		Short: "Remove selected agent integrations without deleting project indexes",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(projectDir) == "" {
+				projectDir = "."
+			}
+			for _, agent := range agents {
+				if strings.EqualFold(strings.TrimSpace(agent), "opencode") {
+					if strings.TrimSpace(opencodeDir) == "" {
+						return fmt.Errorf("--opencode-dir is required for opencode uninstall")
+					}
+					mcpPath := filepath.Join(opencodeDir, "mcp.json")
+					if err := os.Remove(mcpPath); err != nil && !os.IsNotExist(err) {
+						return fmt.Errorf("remove OpenCode MCP integration: %w", err)
+					}
+					instructionPath := filepath.Join(opencodeDir, "instructions.md")
+					if err := os.Remove(instructionPath); err != nil && !os.IsNotExist(err) {
+						return fmt.Errorf("remove OpenCode instruction snippet: %w", err)
+					}
+					fmt.Fprintf(cmd.OutOrStdout(), "removed OpenCode integration: %s\n", mcpPath)
+				}
+				if strings.EqualFold(strings.TrimSpace(agent), "claude") {
+					if strings.TrimSpace(claudeDir) == "" {
+						return fmt.Errorf("--claude-dir is required for claude uninstall")
+					}
+					integrationPath := filepath.Join(claudeDir, "vela-mcp.json")
+					if err := os.Remove(integrationPath); err != nil && !os.IsNotExist(err) {
+						return fmt.Errorf("remove Claude Code integration: %w", err)
+					}
+					fmt.Fprintf(cmd.OutOrStdout(), "removed Claude Code integration: %s\n", integrationPath)
+				}
+			}
+			graphDB := filepath.Join(projectDir, ".vela", "graph.db")
+			if _, err := os.Stat(graphDB); err == nil {
+				fmt.Fprintf(cmd.OutOrStdout(), "index preserved: %s\n", graphDB)
+			} else if err != nil && !os.IsNotExist(err) {
+				return fmt.Errorf("verify preserved project index: %w", err)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&projectDir, "project", ".", "Project directory whose index must be preserved")
+	cmd.Flags().StringSliceVar(&agents, "agent", nil, "Agent integration to uninstall")
+	cmd.Flags().StringVar(&opencodeDir, "opencode-dir", "", "OpenCode configuration directory")
+	cmd.Flags().StringVar(&claudeDir, "claude-dir", "", "Claude Code integration directory")
+	return cmd
+}
+
+func purgeCmd() *cobra.Command {
+	var projectDir string
+	var all bool
+	var confirm bool
+	var force bool
+
+	cmd := &cobra.Command{
+		Use:   "purge",
+		Short: "Delete project graph indexes after explicit destructive approval",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if strings.TrimSpace(projectDir) == "" {
+				projectDir = "."
+			}
+			if all {
+				if !confirm && !force {
+					return fmt.Errorf("destructive confirmation is required to purge all project indexes: pass --confirm or --force")
+				}
+				entries, err := registry.Load()
+				if err != nil {
+					return err
+				}
+				var failures []string
+				for _, entry := range entries {
+					name := entry.Name
+					if strings.TrimSpace(name) == "" {
+						name = entry.RepoRoot
+					}
+					if err := purgeRegistryEntryIndex(entry); err != nil {
+						failures = append(failures, fmt.Sprintf("failed to delete index for %s: %v", name, err))
+						fmt.Fprintf(cmd.OutOrStdout(), "failed to delete index for %s: %v\n", name, err)
+						continue
+					}
+					fmt.Fprintf(cmd.OutOrStdout(), "deleted index for %s\n", name)
+					if err := registry.RemoveTrackedRepo(entry.RepoRoot); err != nil {
+						failures = append(failures, fmt.Sprintf("failed to update registry for %s: %v", name, err))
+						fmt.Fprintf(cmd.OutOrStdout(), "failed to update registry for %s: %v\n", name, err)
+					}
+				}
+				if len(failures) > 0 {
+					return fmt.Errorf("partial failure purging all project indexes: %s", strings.Join(failures, "; "))
+				}
+				return nil
+			}
+			graphDB := filepath.Join(projectDir, ".vela", "graph.db")
+			if !confirm && !force {
+				if _, err := os.Stat(graphDB); err == nil {
+					fmt.Fprintf(cmd.OutOrStdout(), "index preserved: %s\n", graphDB)
+				} else if err != nil && !os.IsNotExist(err) {
+					return fmt.Errorf("verify preserved project index: %w", err)
+				}
+				return fmt.Errorf("destructive confirmation is required to purge project index: pass --confirm or --force")
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&projectDir, "project", ".", "Project directory whose index can be purged")
+	cmd.Flags().BoolVar(&all, "all", false, "Purge indexes for all known projects")
+	cmd.Flags().BoolVar(&confirm, "confirm", false, "Confirm destructive project index purge")
+	cmd.Flags().BoolVar(&force, "force", false, "Force destructive purge for automation")
+	return cmd
+}
+
+func purgeRegistryEntryIndex(entry registry.Entry) error {
+	graphDB := strings.TrimSpace(entry.GraphPath)
+	if graphDB == "" {
+		graphDB = filepath.Join(entry.RepoRoot, ".vela", "graph.db")
+	}
+	if err := os.Remove(graphDB); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 func extractAliasCmd() *cobra.Command {
 	cmd := newBuildCommand("extract", nil, true)
 	cmd.Short = "Compatibility alias for build"
@@ -232,7 +459,7 @@ func exploreCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "explore <request>",
-		Short: "Resolve broad requests into graph-backed structural context",
+		Short: "Default agent surface for graph-backed structural context",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			engine, err := loadEngine(graphFile)

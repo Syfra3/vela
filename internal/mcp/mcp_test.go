@@ -85,6 +85,209 @@ func TestNewServerRegistersQueryToolSurface(t *testing.T) {
 	}
 }
 
+// REQ-003/REQ-004 → SCN-002 → TestSCN002_MCPExploreUsesSharedStructuredEnvelope
+func TestSCN002_MCPExploreUsesSharedStructuredEnvelope(t *testing.T) {
+	// Scenario: MCP exposes vela_explore with the shared structured envelope.
+	dir := t.TempDir()
+	path := writeRefundServiceGraph(t, dir)
+	eng, err := query.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile error: %v", err)
+	}
+
+	srv := NewServer(eng)
+	found := false
+	for _, tool := range srv.ListTools() {
+		if tool.Tool.Name == "vela_explore" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("tool list missing vela_explore")
+	}
+
+	res, err := handleExploreTool(eng)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"query": "explain RefundService", "limit": 3}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	core := requireStructuredCoreResult(t, res)
+	if core.SchemaVersion != "vela.explore.v1" {
+		t.Fatalf("schema version = %q, want vela.explore.v1", core.SchemaVersion)
+	}
+
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(callResultText(t, res)), &envelope); err != nil {
+		t.Fatalf("MCP explore result was not structured JSON: %v", err)
+	}
+	for _, key := range []string{"freshness", "interpreted_intent", "layered_evidence", "diagnostics", "suggested_next_queries"} {
+		if _, ok := envelope[key]; !ok {
+			t.Fatalf("MCP explore envelope missing %q: %#v", key, envelope)
+		}
+	}
+	if core.Freshness.Status != query.FreshnessFresh {
+		t.Fatalf("freshness = %q, want fresh", core.Freshness.Status)
+	}
+	if len(core.Facts) == 0 || core.Facts[0].Subject != "RefundService" || core.Facts[0].Object != "RefundRepository" {
+		t.Fatalf("MCP explore facts = %+v, want RefundService -> RefundRepository graph fact", core.Facts)
+	}
+	cliText := eng.RenderExplore("explain RefundService", 3)
+	for _, want := range []string{"RefundService", "RefundRepository"} {
+		if !strings.Contains(cliText, want) || !strings.Contains(callResultText(t, res), want) {
+			t.Fatalf("CLI/MCP explore did not preserve core graph fact %q; cli=%q mcp=%q", want, cliText, callResultText(t, res))
+		}
+	}
+}
+
+// REQ-003/REQ-006 → SCN-007 → TestSCN007_MCPExploreReportsWarmingDuringConnectTimeCatchup
+func TestSCN007_MCPExploreReportsWarmingDuringConnectTimeCatchup(t *testing.T) {
+	// Scenario: MCP connect-time catch-up returns warming unless the DB is already fresh.
+	dir := t.TempDir()
+	path := writeRefundServiceGraphWithoutManifest(t, dir)
+	eng, err := query.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile error: %v", err)
+	}
+
+	handler := handleExploreToolWithConnectTimeCatchUp(eng, true)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	res, err := handler(ctx, mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"query": "explain RefundService", "limit": 3}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 100*time.Millisecond {
+		t.Fatalf("MCP explore blocked for %s, want a prompt warming result", elapsed)
+	}
+
+	core := requireStructuredCoreResult(t, res)
+	if core.Freshness.Status != query.FreshnessWarming {
+		t.Fatalf("freshness = %q, want warming", core.Freshness.Status)
+	}
+	if core.Status != query.ResultStatusPartial && core.Status != query.ResultStatusUnavailable {
+		t.Fatalf("status = %q, want partial or unavailable", core.Status)
+	}
+	if !diagnosticContains(core.Diagnostics, "MCP_CATCHUP_WARMING", "retry") || !diagnosticContains(core.Diagnostics, "MCP_CATCHUP_WARMING", "vela status") {
+		t.Fatalf("diagnostics = %+v, want retry/status guidance", core.Diagnostics)
+	}
+}
+
+// REQ-006 → SCN-008 → TestSCN008_MCPFirstExploreCallReturnsFreshWhenRuntimeDBAlreadyFresh
+func TestSCN008_MCPFirstExploreCallReturnsFreshWhenRuntimeDBAlreadyFresh(t *testing.T) {
+	// Scenario: MCP first explore call returns fresh when the runtime DB is already fresh.
+	dir := t.TempDir()
+	path := writeRefundServiceGraph(t, dir)
+	eng, err := query.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile error: %v", err)
+	}
+
+	handler := handleExploreToolWithConnectTimeCatchUp(eng, true)
+	res, err := handler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"query": "explain RefundService", "limit": 3}}})
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+
+	core := requireStructuredCoreResult(t, res)
+	if core.Freshness.Status != query.FreshnessFresh {
+		t.Fatalf("freshness = %q, want fresh", core.Freshness.Status)
+	}
+	if diagnosticContains(core.Diagnostics, "MCP_CATCHUP_WARMING", "") {
+		t.Fatalf("diagnostics = %+v, did not want warming diagnostic for already-fresh DB", core.Diagnostics)
+	}
+}
+
+// REQ-011 → SCN-013 → TestSCN013_MCPAgentInstructionsPreferVelaExploreFirstWithoutAutoSyncPromise
+func TestSCN013_MCPAgentInstructionsPreferVelaExploreFirstWithoutAutoSyncPromise(t *testing.T) {
+	// Scenario: Agent instructions prefer vela_explore first without promising auto-sync.
+	instructions := serverInstructions
+
+	for _, want := range []string{
+		"call `vela_explore` first",
+		"structural, architectural, flow, dependency, ownership, or impact questions",
+		"source snippets and graph paths as already-read evidence",
+		"raw grep or file reads",
+		"exact text lookup",
+		"stale files named by Vela",
+		"unavailable graphs",
+	} {
+		if !strings.Contains(instructions, want) {
+			t.Fatalf("server instructions missing %q:\n%s", want, instructions)
+		}
+	}
+
+	for _, forbidden := range []string{"watcher", "debounce", "auto-sync"} {
+		if strings.Contains(strings.ToLower(instructions), forbidden) {
+			t.Fatalf("server instructions promise or mention Phase 1 out-of-scope %q behavior:\n%s", forbidden, instructions)
+		}
+	}
+}
+
+func writeRefundServiceGraphWithoutManifest(t *testing.T, dir string) string {
+	t.Helper()
+	path := writeRefundServiceGraph(t, dir)
+	if err := os.Remove(filepath.Join(dir, ".vela", "manifest.json")); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func writeRefundServiceGraph(t *testing.T, dir string) string {
+	t.Helper()
+	servicePath := filepath.Join(dir, "refund", "service.go")
+	repositoryPath := filepath.Join(dir, "refund", "repository.go")
+	if err := os.MkdirAll(filepath.Dir(servicePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	serviceSource := []byte("package refund\n\ntype RefundService struct{}\n")
+	repositorySource := []byte("package refund\n\ntype RefundRepository struct{}\n")
+	if err := os.WriteFile(servicePath, serviceSource, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(repositoryPath, repositorySource, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	outDir := filepath.Join(dir, ".vela")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	graph := &types.Graph{
+		Nodes: []types.Node{
+			{ID: "refund_service", Label: "RefundService", NodeType: "struct", SourceFile: "refund/service.go"},
+			{ID: "refund_repo", Label: "RefundRepository", NodeType: "struct", SourceFile: "refund/repository.go"},
+		},
+		Edges: []types.Edge{{Source: "refund_service", Target: "refund_repo", Relation: "uses"}},
+	}
+	if err := graphExport.WriteSQLiteGraphAtomic(graph, outDir); err != nil {
+		t.Fatalf("WriteSQLiteGraphAtomic error: %v", err)
+	}
+	manifest := types.Manifest{
+		Version:     1,
+		RepoRoot:    dir,
+		GeneratedAt: time.Now().UTC(),
+		Files: []types.ManifestFile{
+			{Path: "refund/service.go", SHA256: sha256Hex(serviceSource)},
+			{Path: "refund/repository.go", SHA256: sha256Hex(repositorySource)},
+		},
+	}
+	manifestData, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "manifest.json"), manifestData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	data, _ := json.MarshalIndent(map[string]interface{}{"nodes": []map[string]interface{}{}, "edges": []map[string]interface{}{}}, "", "  ")
+	path := filepath.Join(outDir, "graph.json")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // REQ-006 → SCN-008 → TestSCN008_MCPServerExposesRequiredV04Toolset
 func TestSCN008_MCPServerExposesRequiredV04Toolset(t *testing.T) {
 	// Scenario: MCP server exposes the required v0.4 toolset.

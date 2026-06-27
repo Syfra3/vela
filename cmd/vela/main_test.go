@@ -13,7 +13,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/Syfra3/vela/internal/export"
 	igraph "github.com/Syfra3/vela/internal/graph"
 	"github.com/Syfra3/vela/internal/hooks"
 	"github.com/Syfra3/vela/internal/query"
@@ -46,6 +48,468 @@ func TestRootCommandExposesReducedBuildAndQuerySurface(t *testing.T) {
 	}
 	if queryCommand == nil || queryCommand.Name() != "dependencies" {
 		t.Fatalf("expected dependencies subcommand, got %#v", queryCommand)
+	}
+}
+
+// REQ-001 → SCN-001 → TestSCN001_LanguageCompatibilityReportsScannerEvidence
+func TestSCN001_LanguageCompatibilityReportsScannerEvidence(t *testing.T) {
+	// Scenario: Language support is reported as scanner-level evidence
+	stdout := runCompatibilityCommand(t)
+
+	if !strings.Contains(stdout, "capability=scanner") {
+		t.Fatalf("expected scanner capability in compatibility output, got %q", stdout)
+	}
+	if strings.Contains(strings.ToLower(stdout), "semantically supported") {
+		t.Fatalf("compatibility output describes scanner evidence as semantically supported: %q", stdout)
+	}
+}
+
+// REQ-001 → SCN-002 → TestSCN002_LanguageCompatibilityDistinguishesSemanticAndPatched
+func TestSCN002_LanguageCompatibilityDistinguishesSemanticAndPatched(t *testing.T) {
+	// Scenario: Semantic and patched language capabilities are distinguishable
+	stdout := runCompatibilityCommand(t)
+
+	for _, want := range []string{"go capability=semantic", "typescript capability=patched"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("expected compatibility output to contain %q, got %q", want, stdout)
+		}
+	}
+}
+
+func runCompatibilityCommand(t *testing.T) string {
+	t.Helper()
+
+	stdout := captureStdout(t, func() {
+		root := rootCmd()
+		root.SetErr(&bytes.Buffer{})
+		root.SetArgs([]string{"compatibility"})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("Execute(compatibility) error = %v", err)
+		}
+	})
+	return stdout
+}
+
+// REQ-007/REQ-009 → SCN-011 → TestSCN011_CompatibilityCLIInstallInitializesProjectGraphAndOpenCode
+func TestSCN011_CompatibilityCLIInstallInitializesProjectGraphAndOpenCode(t *testing.T) {
+	// Scenario: CLI install initializes project graph and selected agent integration
+	projectDir := t.TempDir()
+	opencodeDir := filepath.Join(t.TempDir(), "opencode")
+
+	var stdout bytes.Buffer
+	root := rootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"install", "--project", projectDir, "--agent", "opencode", "--opencode-dir", opencodeDir})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(install) error = %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(projectDir, ".vela", "graph.db")); err != nil {
+		t.Fatalf("expected project graph.db initialized: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(opencodeDir, "opencode.json")); err != nil {
+		t.Fatalf("expected OpenCode config with MCP integration installed: %v", err)
+	}
+	for _, want := range []string{"initialized project graph", "installed OpenCode integration"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected install output to contain %q, got %q", want, stdout.String())
+		}
+	}
+}
+
+// REQ-007/REQ-012 → SCN-012 → TestSCN012_CompatibilityCLIUninstallRemovesClaudeIntegrationPreservesIndex
+func TestSCN012_CompatibilityCLIUninstallRemovesClaudeIntegrationPreservesIndex(t *testing.T) {
+	// Scenario: CLI uninstall does not delete indexes by default
+	projectDir := t.TempDir()
+	graphDB := filepath.Join(projectDir, ".vela", "graph.db")
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+	if err := os.MkdirAll(filepath.Dir(graphDB), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.vela) error = %v", err)
+	}
+	if err := os.WriteFile(graphDB, []byte("SQLite format 3\x00"), 0o644); err != nil {
+		t.Fatalf("WriteFile(graph.db) error = %v", err)
+	}
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(claudeDir) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "vela-mcp.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(claude integration) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	root := rootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"uninstall", "--project", projectDir, "--agent", "claude", "--claude-dir", claudeDir})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(uninstall) error = %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(claudeDir, "vela-mcp.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected Claude Code integration removed, stat err = %v", err)
+	}
+	if _, err := os.Stat(graphDB); err != nil {
+		t.Fatalf("expected graph.db index preserved: %v", err)
+	}
+	for _, want := range []string{"removed Claude Code integration", "index preserved"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected uninstall output to contain %q, got %q", want, stdout.String())
+		}
+	}
+}
+
+// REQ-008/REQ-011 → SCN-015 → TestSCN015_InstallerOffersOnlySupportedAgentTargets
+func TestSCN015_InstallerOffersOnlySupportedAgentTargets(t *testing.T) {
+	// Scenario: Installer offers only OpenCode and Claude Code as agent targets
+	homeDir := t.TempDir()
+	projectDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	for _, configPath := range []string{
+		filepath.Join(homeDir, ".config", "opencode", "opencode.json"),
+		filepath.Join(homeDir, ".claude", "settings.json"),
+		filepath.Join(homeDir, ".cursor", "settings.json"),
+		filepath.Join(homeDir, ".codex", "config.toml"),
+		filepath.Join(homeDir, ".gemini", "settings.json"),
+	} {
+		if err := os.MkdirAll(filepath.Dir(configPath), 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", filepath.Dir(configPath), err)
+		}
+		if err := os.WriteFile(configPath, []byte("{}\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile(%s) error = %v", configPath, err)
+		}
+	}
+
+	var stdout bytes.Buffer
+	root := rootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"install", "--project", projectDir})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(install) error = %v", err)
+	}
+
+	for _, want := range []string{"agent target available: OpenCode", "agent target available: Claude Code"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected install output to contain %q, got %q", want, stdout.String())
+		}
+	}
+	for _, unwanted := range []string{"Cursor", "Codex", "Gemini"} {
+		if strings.Contains(stdout.String(), unwanted) {
+			t.Fatalf("expected install output not to offer %s, got %q", unwanted, stdout.String())
+		}
+	}
+}
+
+// REQ-008/REQ-009 → SCN-016 → TestSCN016_InstallerInitializesProjectWhenNoSupportedAgentDetected
+func TestSCN016_InstallerInitializesProjectWhenNoSupportedAgentDetected(t *testing.T) {
+	// Scenario: Installer allows project initialization when no supported agent is detected
+	homeDir := t.TempDir()
+	projectDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+
+	var stdout bytes.Buffer
+	root := rootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"install", "--project", projectDir})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(install) error = %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(projectDir, ".vela", "graph.db")); err != nil {
+		t.Fatalf("expected project graph.db initialized without supported agents: %v", err)
+	}
+	for _, want := range []string{"no supported coding-agent target was detected", "initialized project graph"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected install output to contain %q, got %q", want, stdout.String())
+		}
+	}
+}
+
+// REQ-010 → SCN-017 → TestSCN017_OpenCodeInstallWritesMCPAndInstructionSnippet
+func TestSCN017_OpenCodeInstallWritesMCPAndInstructionSnippet(t *testing.T) {
+	// Scenario: Agent install writes MCP configuration and instruction snippet
+	projectDir := t.TempDir()
+	opencodeDir := filepath.Join(t.TempDir(), "opencode")
+	unrelatedConfigPath := filepath.Join(opencodeDir, "opencode.json")
+	if err := os.MkdirAll(opencodeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(opencodeDir) error = %v", err)
+	}
+	if err := os.WriteFile(unrelatedConfigPath, []byte(`{"theme":"dark"}`+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(unrelated opencode config) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	root := rootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"install", "--project", projectDir, "--agent", "opencode", "--opencode-dir", opencodeDir})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(install) error = %v", err)
+	}
+
+	mcpConfig, err := os.ReadFile(filepath.Join(opencodeDir, "opencode.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(OpenCode config) error = %v", err)
+	}
+	var opencodeConfig map[string]any
+	if err := json.Unmarshal(mcpConfig, &opencodeConfig); err != nil {
+		t.Fatalf("OpenCode config is not valid JSON: %v\n%s", err, mcpConfig)
+	}
+	mcp := opencodeConfig["mcp"].(map[string]any)
+	vela := mcp["vela"].(map[string]any)
+	if vela["type"] != "local" || vela["enabled"] != true {
+		t.Fatalf("expected OpenCode MCP config to register enabled local vela, got %#v", vela)
+	}
+	instructions, err := os.ReadFile(filepath.Join(opencodeDir, "instructions.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(OpenCode instruction snippet) error = %v", err)
+	}
+	if !strings.Contains(string(instructions), "Vela") || !strings.Contains(string(instructions), "graph") {
+		t.Fatalf("expected OpenCode instruction snippet to explain Vela graph usage, got %q", string(instructions))
+	}
+	unrelatedConfig, err := os.ReadFile(unrelatedConfigPath)
+	if err != nil {
+		t.Fatalf("ReadFile(unrelated opencode config) error = %v", err)
+	}
+	if !strings.Contains(string(unrelatedConfig), `"theme": "dark"`) {
+		t.Fatalf("existing OpenCode config field was not preserved: %q", string(unrelatedConfig))
+	}
+}
+
+// REQ-010 → SCN-018 → TestSCN018_OpenCodeInstallReportsUnsupportedPermissionWithoutFailingIntegration
+func TestSCN018_OpenCodeInstallReportsUnsupportedPermissionWithoutFailingIntegration(t *testing.T) {
+	// Scenario: Agent install reports unsupported permission settings without failing the integration
+	projectDir := t.TempDir()
+	opencodeDir := filepath.Join(t.TempDir(), "opencode")
+
+	var stdout bytes.Buffer
+	root := rootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{
+		"install",
+		"--project", projectDir,
+		"--agent", "opencode",
+		"--opencode-dir", opencodeDir,
+		"--permission", "allow-network",
+	})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(install with unsupported permission) error = %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(opencodeDir, "opencode.json")); err != nil {
+		t.Fatalf("expected OpenCode MCP config installed despite unsupported permission: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(opencodeDir, "instructions.md")); err != nil {
+		t.Fatalf("expected OpenCode instruction snippet installed despite unsupported permission: %v", err)
+	}
+	for _, want := range []string{"installed OpenCode integration", "skipped unsupported permission setting: allow-network"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected install output to contain %q, got %q", want, stdout.String())
+		}
+	}
+}
+
+// REQ-010/REQ-012 → SCN-019 → TestSCN019_ClaudeInstallUpdatesManagedEntriesWithoutDuplication
+func TestSCN019_ClaudeInstallUpdatesManagedEntriesWithoutDuplication(t *testing.T) {
+	// Scenario: Re-running install updates Vela-managed entries without duplication
+	projectDir := t.TempDir()
+	claudeDir := filepath.Join(t.TempDir(), "claude")
+	if err := os.MkdirAll(claudeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(claudeDir) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "vela-mcp.json"), []byte(`{"mcpServers":{"vela":{"command":"old-vela"}}}`+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(existing Claude MCP config) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(claudeDir, "vela-instructions.md"), []byte("Old Vela instruction snippet\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(existing Claude instruction snippet) error = %v", err)
+	}
+
+	for run := 1; run <= 2; run++ {
+		root := rootCmd()
+		root.SetOut(&bytes.Buffer{})
+		root.SetErr(&bytes.Buffer{})
+		root.SetArgs([]string{"install", "--project", projectDir, "--agent", "claude", "--claude-dir", claudeDir})
+		if err := root.Execute(); err != nil {
+			t.Fatalf("Execute(install Claude run %d) error = %v", run, err)
+		}
+	}
+
+	mcpConfig, err := os.ReadFile(filepath.Join(claudeDir, "vela-mcp.json"))
+	if err != nil {
+		t.Fatalf("ReadFile(Claude MCP config) error = %v", err)
+	}
+	if strings.Contains(string(mcpConfig), "old-vela") {
+		t.Fatalf("expected Claude MCP Vela-managed entry updated, got %q", string(mcpConfig))
+	}
+	if got := strings.Count(string(mcpConfig), "vela"); got != 2 {
+		t.Fatalf("Claude MCP config has %d vela occurrences, want one managed server entry without duplication: %q", got, string(mcpConfig))
+	}
+
+	instructions, err := os.ReadFile(filepath.Join(claudeDir, "vela-instructions.md"))
+	if err != nil {
+		t.Fatalf("ReadFile(Claude instruction snippet) error = %v", err)
+	}
+	if strings.Contains(string(instructions), "Old Vela instruction") {
+		t.Fatalf("expected Claude instruction snippet updated, got %q", string(instructions))
+	}
+	if got := strings.Count(string(instructions), "Vela"); got != 1 {
+		t.Fatalf("Claude instruction snippet has %d Vela occurrences, want one managed snippet without duplication: %q", got, string(instructions))
+	}
+}
+
+// REQ-011/REQ-012 → SCN-020 → TestSCN020_UninstallIgnoresUnsupportedFutureAgents
+func TestSCN020_UninstallIgnoresUnsupportedFutureAgents(t *testing.T) {
+	// Scenario: Uninstall ignores unsupported future agents
+	projectDir := t.TempDir()
+	opencodeDir := filepath.Join(t.TempDir(), "opencode")
+	futureAgentDir := filepath.Join(t.TempDir(), "future-agent")
+	graphDB := filepath.Join(projectDir, ".vela", "graph.db")
+	futureAgentConfig := filepath.Join(futureAgentDir, "vela-mcp.json")
+	futureAgentInstructions := filepath.Join(futureAgentDir, "vela-instructions.md")
+
+	for _, dir := range []string{filepath.Dir(graphDB), opencodeDir, futureAgentDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("MkdirAll(%s) error = %v", dir, err)
+		}
+	}
+	if err := os.WriteFile(graphDB, []byte("SQLite format 3\x00"), 0o644); err != nil {
+		t.Fatalf("WriteFile(graph.db) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(opencodeDir, "mcp.json"), []byte("{\"mcpServers\":{\"vela\":{}}}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(OpenCode MCP config) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(opencodeDir, "instructions.md"), []byte("Use Vela graph queries.\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(OpenCode instructions) error = %v", err)
+	}
+	futureMCP := []byte("future-agent Vela MCP config must remain untouched\n")
+	futureInstructions := []byte("future-agent Vela instructions must remain untouched\n")
+	if err := os.WriteFile(futureAgentConfig, futureMCP, 0o644); err != nil {
+		t.Fatalf("WriteFile(future agent config) error = %v", err)
+	}
+	if err := os.WriteFile(futureAgentInstructions, futureInstructions, 0o644); err != nil {
+		t.Fatalf("WriteFile(future agent instructions) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	root := rootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"uninstall", "--project", projectDir, "--agent", "opencode", "--opencode-dir", opencodeDir})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(uninstall OpenCode) error = %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(opencodeDir, "mcp.json")); !os.IsNotExist(err) {
+		t.Fatalf("expected OpenCode MCP integration removed, stat err = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(opencodeDir, "instructions.md")); !os.IsNotExist(err) {
+		t.Fatalf("expected OpenCode instruction snippet removed, stat err = %v", err)
+	}
+	if got, err := os.ReadFile(futureAgentConfig); err != nil || string(got) != string(futureMCP) {
+		t.Fatalf("future agent config = %q, %v; want unchanged %q", string(got), err, string(futureMCP))
+	}
+	if got, err := os.ReadFile(futureAgentInstructions); err != nil || string(got) != string(futureInstructions) {
+		t.Fatalf("future agent instructions = %q, %v; want unchanged %q", string(got), err, string(futureInstructions))
+	}
+	for _, want := range []string{"removed OpenCode integration", "index preserved"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected uninstall output to contain %q, got %q", want, stdout.String())
+		}
+	}
+}
+
+// REQ-007/REQ-012 → SCN-013 → TestSCN013_CompatibilityCLIPurgeRequiresDestructiveApproval
+func TestSCN013_CompatibilityCLIPurgeRequiresDestructiveApproval(t *testing.T) {
+	// Scenario: CLI purge requires explicit destructive approval
+	projectDir := t.TempDir()
+	graphDB := filepath.Join(projectDir, ".vela", "graph.db")
+	if err := os.MkdirAll(filepath.Dir(graphDB), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.vela) error = %v", err)
+	}
+	if err := os.WriteFile(graphDB, []byte("SQLite format 3\x00"), 0o644); err != nil {
+		t.Fatalf("WriteFile(graph.db) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	root := rootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"purge", "--project", projectDir})
+	err := root.Execute()
+
+	if err == nil {
+		t.Fatal("Execute(purge) error = nil, want destructive confirmation required")
+	}
+	if _, statErr := os.Stat(graphDB); statErr != nil {
+		t.Fatalf("expected graph.db index preserved without confirmation: %v", statErr)
+	}
+	for _, want := range []string{"destructive confirmation is required", "index preserved"} {
+		if !strings.Contains(err.Error()+stdout.String(), want) {
+			t.Fatalf("expected purge output/error to contain %q, got error %q stdout %q", want, err.Error(), stdout.String())
+		}
+	}
+}
+
+// REQ-007/REQ-005 → SCN-014 → TestSCN014_CompatibilityCLIForcePurgeAllReportsPartialFailures
+func TestSCN014_CompatibilityCLIForcePurgeAllReportsPartialFailures(t *testing.T) {
+	// Scenario: CLI force purge all reports partial failures
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	alpha := filepath.Join(t.TempDir(), "alpha")
+	beta := filepath.Join(t.TempDir(), "beta")
+	alphaGraphDB := filepath.Join(alpha, ".vela", "graph.db")
+	betaGraphDB := filepath.Join(beta, ".vela", "graph.db")
+	writeGraphDBForPurgeTest(t, alphaGraphDB)
+	writeGraphDBForPurgeTest(t, betaGraphDB)
+	if err := os.Chmod(filepath.Dir(betaGraphDB), 0o500); err != nil {
+		t.Fatalf("Chmod(beta .vela) error = %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(filepath.Dir(betaGraphDB), 0o700) })
+
+	registryPath := filepath.Join(home, ".vela", "registry.json")
+	if err := os.MkdirAll(filepath.Dir(registryPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(registry) error = %v", err)
+	}
+	registryJSON := fmt.Sprintf(`{"version":1,"entries":[{"repo_root":%q,"name":"alpha","graph_path":%q},{"repo_root":%q,"name":"beta","graph_path":%q}]}`+"\n", alpha, alphaGraphDB, beta, betaGraphDB)
+	if err := os.WriteFile(registryPath, []byte(registryJSON), 0o644); err != nil {
+		t.Fatalf("WriteFile(registry) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	root := rootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"purge", "--all", "--force"})
+	err := root.Execute()
+
+	if err == nil {
+		t.Fatal("Execute(purge --all --force) error = nil, want partial failure")
+	}
+	if _, statErr := os.Stat(alphaGraphDB); !os.IsNotExist(statErr) {
+		t.Fatalf("alpha graph.db stat err = %v, want deleted", statErr)
+	}
+	if _, statErr := os.Stat(betaGraphDB); statErr != nil {
+		t.Fatalf("beta graph.db stat err = %v, want preserved after failed delete", statErr)
+	}
+	combined := err.Error() + stdout.String()
+	for _, want := range []string{"deleted index for alpha", "failed to delete index for beta", "partial failure"} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("expected purge output/error to contain %q, got error %q stdout %q", want, err.Error(), stdout.String())
+		}
+	}
+}
+
+func writeGraphDBForPurgeTest(t *testing.T, graphDB string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(graphDB), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.vela) error = %v", err)
+	}
+	if err := os.WriteFile(graphDB, []byte("SQLite format 3\x00"), 0o644); err != nil {
+		t.Fatalf("WriteFile(graph.db) error = %v", err)
 	}
 }
 
@@ -252,6 +716,67 @@ func TestSCN023_MCPFixtureServesAndCallsRequiredTools(t *testing.T) {
 		if core.Status != query.ResultStatusOK && len(core.Diagnostics) == 0 {
 			t.Fatalf("%s returned %q without structured diagnostic: %+v", toolName, core.Status, core)
 		}
+	}
+}
+
+// REQ-012 → SCN-014 → TestSCN014_SpecializedCLIMCPToolsRemainAvailableWithExploreAsDefaultSurface
+func TestSCN014_SpecializedCLIMCPToolsRemainAvailableWithExploreAsDefaultSurface(t *testing.T) {
+	// Scenario: Existing specialized CLI and MCP tools remain available.
+	restore := serveMCPStdio
+	t.Cleanup(func() { serveMCPStdio = restore })
+
+	graphPath := writeMCPFixtureGraph(t)
+	var served *mcpserver.MCPServer
+	serveMCPStdio = func(srv *mcpserver.MCPServer) error {
+		served = srv
+		return nil
+	}
+
+	root := rootCmd()
+	root.SetOut(&bytes.Buffer{})
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"serve", "--mcp", "--graph", graphPath})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(serve --mcp) error = %v", err)
+	}
+	if served == nil {
+		t.Fatal("serve --mcp did not start an MCP server")
+	}
+
+	for _, args := range [][]string{
+		{"lookup"},
+		{"search"},
+		{"explain"},
+		{"impact"},
+		{"path"},
+		{"build"},
+		{"update"},
+		{"status"},
+	} {
+		cmd, _, err := root.Find(args)
+		if err != nil {
+			t.Fatalf("Find(%v) error = %v", args, err)
+		}
+		if cmd == nil || cmd.Name() != args[0] {
+			t.Fatalf("expected CLI command %q to remain available, got %#v", args[0], cmd)
+		}
+	}
+
+	for _, toolName := range []string{"vela_lookup", "vela_explain", "vela_impact", "vela_path", "vela_status"} {
+		if tool := served.GetTool(toolName); tool == nil {
+			t.Fatalf("expected specialized MCP tool %q to remain available", toolName)
+		}
+	}
+
+	explore, _, err := root.Find([]string{"explore"})
+	if err != nil {
+		t.Fatalf("Find(explore) error = %v", err)
+	}
+	if explore == nil {
+		t.Fatal("expected explore command to remain available")
+	}
+	if !strings.Contains(strings.ToLower(explore.Short), "default agent surface") {
+		t.Fatalf("explore command should be presented as the default agent surface rather than the only graph capability; short help = %q", explore.Short)
 	}
 }
 
@@ -734,6 +1259,334 @@ func TestLookupCommandPrintsCandidateNodes(t *testing.T) {
 	}
 }
 
+// REQ-002/REQ-004 → SCN-001 → TestSCN001_CLIExploreAnswersKnownStructuralQuestionWithStableSections
+func TestSCN001_CLIExploreAnswersKnownStructuralQuestionWithStableSections(t *testing.T) {
+	// Scenario: CLI explore answers a known structural question with the stable sections.
+	graphPath := writeFreshRefundServiceRuntimeGraph(t)
+
+	root := rootCmd()
+	stdout := &bytes.Buffer{}
+	root.SetOut(stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"explore", "explain RefundService", "--graph", graphPath, "--limit", "3"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	for _, want := range []string{
+		"Answer",
+		"Freshness",
+		"Relevant source",
+		"Paths and relationships",
+		"Impact radius",
+		"Layered evidence",
+		"Confidence and limits",
+		"Suggested next queries",
+		"Interpreted intent: explain",
+		"RefundService",
+		"graph-backed evidence",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, stdout.String())
+		}
+	}
+}
+
+// REQ-004/REQ-006 → SCN-003 → TestSCN003_CLIExploreIncludesRequiredSectionsWhenNotRelevant
+func TestSCN003_CLIExploreIncludesRequiredSectionsWhenNotRelevant(t *testing.T) {
+	// Scenario: Explore response includes every required section even when sections are not relevant.
+	graphPath := writeFreshRefundStatusRuntimeGraph(t)
+
+	root := rootCmd()
+	stdout := &bytes.Buffer{}
+	root.SetOut(stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"explore", "who uses RefundStatus?", "--graph", graphPath, "--limit", "3"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	output := stdout.String()
+	for _, want := range []string{
+		"Freshness\n  status: fresh",
+		"Relevant source\n  services/refund_status.go",
+		"Paths and relationships",
+		"RefundService [repo/struct] --[uses]--> RefundStatus [repo/enum]",
+		"Impact radius\n  not relevant for this usage result",
+		"Confidence and limits",
+		"Source snippets are unavailable from this graph fact; missing graph families are reported as limits instead of omitted.",
+		"vela search \"explain RefundStatus\"",
+		"vela search \"who uses RefundStatus\"",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, output)
+		}
+	}
+}
+
+// REQ-007/REQ-012 → SCN-004 → TestSCN004_PlannerRoutesCommonIntentFamiliesToExistingPrimitives
+func TestSCN004_PlannerRoutesCommonIntentFamiliesToExistingPrimitives(t *testing.T) {
+	// Scenario Outline: Planner routes common intent families to existing graph primitives.
+	graphPath := writeExplorePlannerRuntimeGraph(t)
+
+	cases := []struct {
+		question  string
+		intent    string
+		primitive string
+	}{
+		{question: "explain RefundService", intent: "explain", primitive: "lookup/explain"},
+		{question: "who uses RefundStatus?", intent: "usage", primitive: "reverse dependency / who uses"},
+		{question: "what does WebhookHandler depend on?", intent: "dependency", primitive: "dependency / callee neighborhood"},
+		{question: "how does StripeWebhook reach RefundService?", intent: "path", primitive: "path"},
+		{question: "what breaks if RefundStatus changes?", intent: "impact", primitive: "impact / bounded reverse reach"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.intent, func(t *testing.T) {
+			root := rootCmd()
+			stdout := &bytes.Buffer{}
+			root.SetOut(stdout)
+			root.SetErr(&bytes.Buffer{})
+			root.SetArgs([]string{"explore", tc.question, "--graph", graphPath, "--limit", "5"})
+
+			if err := root.Execute(); err != nil {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			output := stdout.String()
+			for _, want := range []string{
+				"Interpreted intent: " + tc.intent,
+				"Derived primitive: " + tc.primitive,
+				"Graph facts used:",
+			} {
+				if !strings.Contains(output, want) {
+					t.Fatalf("expected stdout to contain %q, got %q", want, output)
+				}
+			}
+		})
+	}
+}
+
+// REQ-007/REQ-008 → SCN-005 → TestSCN005_AmbiguousExplainExploreQueryReturnsCandidates
+func TestSCN005_AmbiguousExplainExploreQueryReturnsCandidates(t *testing.T) {
+	// Scenario: Ambiguous explore query returns candidates instead of a strong claim.
+	graphPath := writeAmbiguousExploreGraph(t)
+
+	root := rootCmd()
+	stdout := &bytes.Buffer{}
+	root.SetOut(stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"explore", "explain auth", "--graph", graphPath, "--limit", "5"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	output := stdout.String()
+	for _, want := range []string{
+		"Status: ambiguous",
+		"Ambiguous explore query for \"explain auth\"",
+		"AuthService",
+		"AuthController",
+		"file: services/auth/service.go",
+		"file: services/auth/controller.go",
+		"vela explore \"explain AuthService\"",
+		"vela explore \"explain AuthController\"",
+		"Refine the request",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, output)
+		}
+	}
+	if strings.Contains(output, "Graph facts used:") || strings.Contains(output, "graph-backed evidence:") {
+		t.Fatalf("ambiguous explore output chose a graph-backed answer instead of asking for refinement: %q", output)
+	}
+}
+
+// REQ-005/REQ-006 → SCN-006 → TestSCN006_CLIMissingRuntimeDBFailsWithActionableDiagnostics
+func TestSCN006_CLIMissingRuntimeDBFailsWithActionableDiagnostics(t *testing.T) {
+	// Scenario: Missing runtime DB fails with actionable diagnostics and no JSON fallback.
+	graphPath := writeMissingRuntimeDBExploreGraph(t)
+
+	root := rootCmd()
+	stdout := &bytes.Buffer{}
+	root.SetOut(stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"explore", "explain RefundService", "--graph", graphPath, "--limit", "3"})
+
+	err := root.Execute()
+	if err == nil {
+		t.Fatal("Execute() error = nil, want missing runtime DB failure")
+	}
+	message := err.Error()
+	for _, want := range []string{
+		"freshness state: unavailable",
+		".vela/graph.db is required for runtime graph answers",
+		"vela build",
+		"vela update",
+		"vela status",
+		".vela/graph.json is export/debug only and will not be used as runtime graph truth",
+	} {
+		if !strings.Contains(message, want) {
+			t.Fatalf("expected error to contain %q, got %q", want, message)
+		}
+	}
+	if strings.Contains(stdout.String(), "Graph facts used:") || strings.Contains(stdout.String(), "graph-backed evidence") {
+		t.Fatalf("missing runtime DB used graph.json as graph-backed answer: %q", stdout.String())
+	}
+}
+
+// REQ-006/REQ-008 → SCN-009 → TestSCN009_CLIExploreNamesKnownStaleAffectedFiles
+func TestSCN009_CLIExploreNamesKnownStaleAffectedFiles(t *testing.T) {
+	// Scenario: Stale or pending freshness names affected files when known.
+	graphPath := writeStaleQueryEngineRuntimeGraph(t)
+
+	root := rootCmd()
+	stdout := &bytes.Buffer{}
+	root.SetOut(stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"explore", "who uses QueryEngine?", "--graph", graphPath, "--limit", "3"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	output := stdout.String()
+	for _, want := range []string{
+		"Freshness\n  status: stale",
+		"affected files: internal/query/query.go",
+		"exact latest source may require a direct file read",
+		"vela update",
+		"vela build",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, output)
+		}
+	}
+}
+
+// REQ-001/REQ-011 → SCN-015 → TestSCN015_CLIExploreDefersWatcherAndDebounceForActiveSessionFreshness
+func TestSCN015_CLIExploreDefersWatcherAndDebounceForActiveSessionFreshness(t *testing.T) {
+	// Scenario: Phase 1 shell defers watcher and debounce implementation to later phases.
+	graphPath := writeStaleQueryEngineRuntimeGraph(t)
+
+	root := rootCmd()
+	stdout := &bytes.Buffer{}
+	root.SetOut(stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"explore", "how is active-session freshness handled?", "--graph", graphPath, "--limit", "3"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	output := stdout.String()
+	for _, want := range []string{
+		"Active-session freshness",
+		"known runtime freshness state: stale",
+		"MCP-session file watching is deferred to a later phase",
+		"debounced auto-sync is deferred to a later phase",
+		"does not claim active-session watcher or debounced auto-sync is implemented by this Phase 1 shell",
+		"vela update",
+		"vela build",
+		"vela status",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, output)
+		}
+	}
+}
+
+// REQ-009 → SCN-010 → TestSCN010_CLIExploreSeparatesLayeredEvidenceLabels
+func TestSCN010_CLIExploreSeparatesLayeredEvidenceLabels(t *testing.T) {
+	// Scenario: Layered evidence labels separate code, workspace, and contract facts.
+	graphPath := writeLayeredRefundEvidenceRuntimeGraph(t)
+
+	root := rootCmd()
+	stdout := &bytes.Buffer{}
+	root.SetOut(stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"explore", "where is the refund API contract enforced?", "--graph", graphPath, "--limit", "5"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	output := stdout.String()
+	for _, want := range []string{
+		"Layered evidence",
+		"repo_code evidence:",
+		"workspace evidence:",
+		"contract evidence:",
+		"Contract evidence is public-interface or behavior-contract context, not inferred executable code truth.",
+		"resource evidence: unavailable",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, output)
+		}
+	}
+	if strings.Contains(output, "contract evidence: executable code truth") {
+		t.Fatalf("contract evidence was presented as executable code truth: %q", output)
+	}
+}
+
+// REQ-010 → SCN-011 → TestSCN011_NormalStructuralExploreOmitsMemoryEvidenceByDefault
+func TestSCN011_NormalStructuralExploreOmitsMemoryEvidenceByDefault(t *testing.T) {
+	// Scenario: Normal structural queries omit memory evidence by default.
+	graphPath := writeRefundServiceRuntimeGraphWithMemoryObservation(t)
+
+	root := rootCmd()
+	stdout := &bytes.Buffer{}
+	root.SetOut(stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"explore", "explain RefundService", "--graph", graphPath, "--limit", "3"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	output := stdout.String()
+	for _, want := range []string{
+		"repo_code evidence:",
+		"memory evidence: not requested",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, output)
+		}
+	}
+	for _, unwanted := range []string{
+		"Prior refund decision [observation] --[documents]--> RefundService [repo/struct]",
+		"memory evidence:\n    Prior refund decision",
+	} {
+		if strings.Contains(output, unwanted) {
+			t.Fatalf("normal structural explore included memory evidence %q in output %q", unwanted, output)
+		}
+	}
+}
+
+// REQ-010 → SCN-012 → TestSCN012_DecisionHistoryExploreIncludesSeparateMemoryEvidence
+func TestSCN012_DecisionHistoryExploreIncludesSeparateMemoryEvidence(t *testing.T) {
+	// Scenario: Decision-history queries include memory evidence as a separate layer.
+	graphPath := writeStripeRefundDecisionRuntimeGraph(t)
+
+	root := rootCmd()
+	stdout := &bytes.Buffer{}
+	root.SetOut(stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"explore", "what did we decide about Stripe refunds?", "--graph", graphPath, "--limit", "3"})
+
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	output := stdout.String()
+	for _, want := range []string{
+		"Interpreted intent: memory",
+		"memory evidence:",
+		"Prior Stripe refund decision [memory/observation] --[documents]--> Stripe refunds [repo/service]",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("expected stdout to contain %q, got %q", want, output)
+		}
+	}
+	if strings.Contains(output, "repo_code evidence:\n    Prior Stripe refund decision [memory/observation]") {
+		t.Fatalf("memory evidence was merged into repo_code facts: %q", output)
+	}
+}
+
 // REQ-005 → SCN-006 → TestSCN006_ExploreResolvesBroadRequestIntoGraphBackedContext
 func TestSCN006_ExploreResolvesBroadRequestIntoGraphBackedContext(t *testing.T) {
 	// Scenario: Explore resolves natural language into graph-backed structural context.
@@ -845,6 +1698,463 @@ func TestQueryCommandSuggestsLookupWhenSubjectIsMissing(t *testing.T) {
 	}
 }
 
+func writeFreshRefundServiceRuntimeGraph(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	t.Setenv("HOME", filepath.Join(repo, "home"))
+	servicePath := filepath.Join(repo, "services", "refund.go")
+	if err := os.MkdirAll(filepath.Dir(servicePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(service dir) error = %v", err)
+	}
+	serviceSource := []byte("package services\n\ntype RefundService struct{}\n")
+	if err := os.WriteFile(servicePath, serviceSource, 0o644); err != nil {
+		t.Fatalf("WriteFile(refund service) error = %v", err)
+	}
+	outDir := filepath.Join(repo, ".vela")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(.vela) error = %v", err)
+	}
+	graph := &types.Graph{
+		Nodes: []types.Node{
+			{ID: "services/refund.go:RefundService", Label: "RefundService", NodeType: "struct", SourceFile: "services/refund.go"},
+			{ID: "services/refund.go:RefundRepository", Label: "RefundRepository", NodeType: "interface", SourceFile: "services/refund.go"},
+		},
+		Edges: []types.Edge{
+			{
+				Source:     "services/refund.go:RefundService",
+				Target:     "services/refund.go:RefundRepository",
+				Relation:   "uses",
+				SourceFile: "services/refund.go",
+				Confidence: string(types.ConfidenceExtracted),
+				Metadata: map[string]interface{}{
+					"layer":                    string(types.LayerRepo),
+					"evidence_type":            "static-analysis",
+					"evidence_source_artifact": "services/refund.go",
+					"evidence_confidence":      string(types.ConfidenceExtracted),
+				},
+			},
+		},
+	}
+	if err := export.WriteSQLiteGraphAtomic(graph, outDir); err != nil {
+		t.Fatalf("WriteSQLiteGraphAtomic error = %v", err)
+	}
+	manifest := types.Manifest{
+		Version:              1,
+		RepoRoot:             repo,
+		GeneratedAt:          time.Now().UTC(),
+		ExtractorFingerprint: "test",
+		BuildMode:            "test",
+		Files: []types.ManifestFile{{
+			Path:   "services/refund.go",
+			SHA256: hexSHA256(serviceSource),
+			Size:   int64(len(serviceSource)),
+		}},
+	}
+	manifestJSON, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("Marshal(manifest) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "manifest.json"), manifestJSON, 0o644); err != nil {
+		t.Fatalf("WriteFile(manifest.json) error = %v", err)
+	}
+	graphPath := filepath.Join(outDir, "graph.json")
+	if err := os.WriteFile(graphPath, []byte(`{"nodes":[],"edges":[]}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(graph.json) error = %v", err)
+	}
+	return graphPath
+}
+
+func writeFreshRefundStatusRuntimeGraph(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	t.Setenv("HOME", filepath.Join(repo, "home"))
+	statusPath := filepath.Join(repo, "services", "refund_status.go")
+	if err := os.MkdirAll(filepath.Dir(statusPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(service dir) error = %v", err)
+	}
+	statusSource := []byte("package services\n\ntype RefundStatus string\ntype RefundService struct{}\n")
+	if err := os.WriteFile(statusPath, statusSource, 0o644); err != nil {
+		t.Fatalf("WriteFile(refund status) error = %v", err)
+	}
+	outDir := filepath.Join(repo, ".vela")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(.vela) error = %v", err)
+	}
+	graph := &types.Graph{
+		Nodes: []types.Node{
+			{ID: "services/refund_status.go:RefundService", Label: "RefundService", NodeType: "struct", SourceFile: "services/refund_status.go"},
+			{ID: "services/refund_status.go:RefundStatus", Label: "RefundStatus", NodeType: "enum", SourceFile: "services/refund_status.go"},
+		},
+		Edges: []types.Edge{{
+			Source:     "services/refund_status.go:RefundService",
+			Target:     "services/refund_status.go:RefundStatus",
+			Relation:   "uses",
+			SourceFile: "services/refund_status.go",
+			Confidence: string(types.ConfidenceExtracted),
+			Metadata: map[string]interface{}{
+				"layer":                    string(types.LayerRepo),
+				"evidence_type":            "static-analysis",
+				"evidence_source_artifact": "services/refund_status.go",
+				"evidence_confidence":      string(types.ConfidenceExtracted),
+			},
+		}},
+	}
+	if err := export.WriteSQLiteGraphAtomic(graph, outDir); err != nil {
+		t.Fatalf("WriteSQLiteGraphAtomic error = %v", err)
+	}
+	manifest := types.Manifest{
+		Version:              1,
+		RepoRoot:             repo,
+		GeneratedAt:          time.Now().UTC(),
+		ExtractorFingerprint: "test",
+		BuildMode:            "test",
+		Files: []types.ManifestFile{{
+			Path:   "services/refund_status.go",
+			SHA256: hexSHA256(statusSource),
+			Size:   int64(len(statusSource)),
+		}},
+	}
+	manifestJSON, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("Marshal(manifest) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "manifest.json"), manifestJSON, 0o644); err != nil {
+		t.Fatalf("WriteFile(manifest.json) error = %v", err)
+	}
+	graphPath := filepath.Join(outDir, "graph.json")
+	if err := os.WriteFile(graphPath, []byte(`{"nodes":[],"edges":[]}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(graph.json) error = %v", err)
+	}
+	return graphPath
+}
+
+func writeStaleQueryEngineRuntimeGraph(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	t.Setenv("HOME", filepath.Join(repo, "home"))
+	queryPath := filepath.Join(repo, "internal", "query", "query.go")
+	if err := os.MkdirAll(filepath.Dir(queryPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(query dir) error = %v", err)
+	}
+	querySource := []byte("package query\n\ntype QueryEngine struct{}\ntype QueryRunner struct{}\n")
+	if err := os.WriteFile(queryPath, querySource, 0o644); err != nil {
+		t.Fatalf("WriteFile(query source) error = %v", err)
+	}
+	outDir := filepath.Join(repo, ".vela")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(.vela) error = %v", err)
+	}
+	graph := &types.Graph{
+		Nodes: []types.Node{
+			{ID: "internal/query/query.go:QueryRunner", Label: "QueryRunner", NodeType: "struct", SourceFile: "internal/query/query.go"},
+			{ID: "internal/query/query.go:QueryEngine", Label: "QueryEngine", NodeType: "struct", SourceFile: "internal/query/query.go"},
+		},
+		Edges: []types.Edge{{
+			Source:     "internal/query/query.go:QueryRunner",
+			Target:     "internal/query/query.go:QueryEngine",
+			Relation:   "uses",
+			SourceFile: "internal/query/query.go",
+			Confidence: string(types.ConfidenceExtracted),
+			Metadata: map[string]interface{}{
+				"layer":                    string(types.LayerRepo),
+				"evidence_type":            "static-analysis",
+				"evidence_source_artifact": "internal/query/query.go",
+				"evidence_confidence":      string(types.ConfidenceExtracted),
+			},
+		}},
+	}
+	if err := export.WriteSQLiteGraphAtomic(graph, outDir); err != nil {
+		t.Fatalf("WriteSQLiteGraphAtomic error = %v", err)
+	}
+	manifest := types.Manifest{
+		Version:              1,
+		RepoRoot:             repo,
+		GeneratedAt:          time.Now().UTC(),
+		ExtractorFingerprint: "test",
+		BuildMode:            "test",
+		Files: []types.ManifestFile{{
+			Path:   "internal/query/query.go",
+			SHA256: strings.Repeat("0", 64),
+			Size:   int64(len(querySource)),
+		}},
+	}
+	manifestJSON, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("Marshal(manifest) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "manifest.json"), manifestJSON, 0o644); err != nil {
+		t.Fatalf("WriteFile(manifest.json) error = %v", err)
+	}
+	graphPath := filepath.Join(outDir, "graph.json")
+	if err := os.WriteFile(graphPath, []byte(`{"nodes":[],"edges":[]}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(graph.json) error = %v", err)
+	}
+	return graphPath
+}
+
+func writeExplorePlannerRuntimeGraph(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	t.Setenv("HOME", filepath.Join(repo, "home"))
+	sourcePath := filepath.Join(repo, "services", "refund_flow.go")
+	if err := os.MkdirAll(filepath.Dir(sourcePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(service dir) error = %v", err)
+	}
+	source := []byte("package services\n\ntype RefundStatus string\ntype RefundService struct{}\ntype WebhookHandler struct{}\ntype StripeWebhook struct{}\n")
+	if err := os.WriteFile(sourcePath, source, 0o644); err != nil {
+		t.Fatalf("WriteFile(refund flow) error = %v", err)
+	}
+	outDir := filepath.Join(repo, ".vela")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(.vela) error = %v", err)
+	}
+	graph := &types.Graph{
+		Nodes: []types.Node{
+			{ID: "services/refund_flow.go:RefundStatus", Label: "RefundStatus", NodeType: "enum", SourceFile: "services/refund_flow.go"},
+			{ID: "services/refund_flow.go:RefundService", Label: "RefundService", NodeType: "struct", SourceFile: "services/refund_flow.go"},
+			{ID: "services/refund_flow.go:WebhookHandler", Label: "WebhookHandler", NodeType: "struct", SourceFile: "services/refund_flow.go"},
+			{ID: "services/refund_flow.go:StripeWebhook", Label: "StripeWebhook", NodeType: "struct", SourceFile: "services/refund_flow.go"},
+		},
+		Edges: []types.Edge{
+			plannerRuntimeEdge("services/refund_flow.go:RefundService", "services/refund_flow.go:RefundStatus"),
+			plannerRuntimeEdge("services/refund_flow.go:WebhookHandler", "services/refund_flow.go:RefundService"),
+			plannerRuntimeEdge("services/refund_flow.go:StripeWebhook", "services/refund_flow.go:WebhookHandler"),
+		},
+	}
+	if err := export.WriteSQLiteGraphAtomic(graph, outDir); err != nil {
+		t.Fatalf("WriteSQLiteGraphAtomic error = %v", err)
+	}
+	manifest := types.Manifest{
+		Version:              1,
+		RepoRoot:             repo,
+		GeneratedAt:          time.Now().UTC(),
+		ExtractorFingerprint: "test",
+		BuildMode:            "test",
+		Files: []types.ManifestFile{{
+			Path:   "services/refund_flow.go",
+			SHA256: hexSHA256(source),
+			Size:   int64(len(source)),
+		}},
+	}
+	manifestJSON, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("Marshal(manifest) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "manifest.json"), manifestJSON, 0o644); err != nil {
+		t.Fatalf("WriteFile(manifest.json) error = %v", err)
+	}
+	graphPath := filepath.Join(outDir, "graph.json")
+	if err := os.WriteFile(graphPath, []byte(`{"nodes":[],"edges":[]}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(graph.json) error = %v", err)
+	}
+	return graphPath
+}
+
+func plannerRuntimeEdge(source, target string) types.Edge {
+	return types.Edge{
+		Source:     source,
+		Target:     target,
+		Relation:   "uses",
+		SourceFile: "services/refund_flow.go",
+		Confidence: string(types.ConfidenceExtracted),
+		Metadata: map[string]interface{}{
+			"layer":                    string(types.LayerRepo),
+			"evidence_type":            "static-analysis",
+			"evidence_source_artifact": "services/refund_flow.go",
+			"evidence_confidence":      string(types.ConfidenceExtracted),
+		},
+	}
+}
+
+func writeLayeredRefundEvidenceRuntimeGraph(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	t.Setenv("HOME", filepath.Join(repo, "home"))
+	sourcePath := filepath.Join(repo, "services", "payments", "handler.go")
+	if err := os.MkdirAll(filepath.Dir(sourcePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(service dir) error = %v", err)
+	}
+	source := []byte("package payments\n\nfunc Handler() {}\n")
+	if err := os.WriteFile(sourcePath, source, 0o644); err != nil {
+		t.Fatalf("WriteFile(refund handler) error = %v", err)
+	}
+	outDir := filepath.Join(repo, ".vela")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(.vela) error = %v", err)
+	}
+	contractID := "contract:endpoint:refund-api-enforced"
+	graph := &types.Graph{
+		Nodes: []types.Node{
+			{ID: "services/payments/handler.go:Handler", Label: "Handler", NodeType: "function", SourceFile: "services/payments/handler.go"},
+			{ID: "workspace:service:payments", Label: "payments", NodeType: "service", SourceFile: ".vela/workspace.yaml", Metadata: map[string]interface{}{"layer": string(types.LayerWorkspace)}},
+			{ID: contractID, Label: "where is the refund API contract enforced", NodeType: "endpoint", SourceFile: "openapi/refunds.yaml", Metadata: map[string]interface{}{"layer": string(types.LayerContract)}},
+		},
+		Edges: []types.Edge{
+			layeredRuntimeEdge("services/payments/handler.go:Handler", contractID, "enforces", types.LayerRepo, "static-analysis", "services/payments/handler.go"),
+			layeredRuntimeEdge("workspace:service:payments", contractID, "routes", types.LayerWorkspace, "routing", ".vela/workspace.yaml"),
+			layeredRuntimeEdge(contractID, "services/payments/handler.go:Handler", "declares_behavior_for", types.LayerContract, "openapi", "openapi/refunds.yaml"),
+		},
+	}
+	if err := export.WriteSQLiteGraphAtomic(graph, outDir); err != nil {
+		t.Fatalf("WriteSQLiteGraphAtomic error = %v", err)
+	}
+	manifest := types.Manifest{
+		Version:              1,
+		RepoRoot:             repo,
+		GeneratedAt:          time.Now().UTC(),
+		ExtractorFingerprint: "test",
+		BuildMode:            "test",
+		Files: []types.ManifestFile{{
+			Path:   "services/payments/handler.go",
+			SHA256: hexSHA256(source),
+			Size:   int64(len(source)),
+		}},
+	}
+	manifestJSON, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("Marshal(manifest) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "manifest.json"), manifestJSON, 0o644); err != nil {
+		t.Fatalf("WriteFile(manifest.json) error = %v", err)
+	}
+	graphPath := filepath.Join(outDir, "graph.json")
+	if err := os.WriteFile(graphPath, []byte(`{"nodes":[],"edges":[]}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(graph.json) error = %v", err)
+	}
+	return graphPath
+}
+
+func layeredRuntimeEdge(source, target, relation string, layer types.Layer, evidenceType, artifact string) types.Edge {
+	return types.Edge{
+		Source:     source,
+		Target:     target,
+		Relation:   relation,
+		SourceFile: artifact,
+		Confidence: string(types.ConfidenceExtracted),
+		Metadata: map[string]interface{}{
+			"layer":                    string(layer),
+			"evidence_type":            evidenceType,
+			"evidence_source_artifact": artifact,
+			"evidence_confidence":      string(types.ConfidenceExtracted),
+		},
+	}
+}
+
+func writeRefundServiceRuntimeGraphWithMemoryObservation(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	t.Setenv("HOME", filepath.Join(repo, "home"))
+	servicePath := filepath.Join(repo, "services", "refund.go")
+	if err := os.MkdirAll(filepath.Dir(servicePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(service dir) error = %v", err)
+	}
+	serviceSource := []byte("package services\n\ntype RefundService struct{}\ntype RefundRepository interface{}\n")
+	if err := os.WriteFile(servicePath, serviceSource, 0o644); err != nil {
+		t.Fatalf("WriteFile(refund service) error = %v", err)
+	}
+	outDir := filepath.Join(repo, ".vela")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(.vela) error = %v", err)
+	}
+	graph := &types.Graph{
+		Nodes: []types.Node{
+			{ID: "services/refund.go:RefundService", Label: "RefundService", NodeType: "struct", SourceFile: "services/refund.go"},
+			{ID: "services/refund.go:RefundRepository", Label: "RefundRepository", NodeType: "interface", SourceFile: "services/refund.go"},
+			{ID: "memory:observation:refund", Label: "Prior refund decision", NodeType: "observation", SourceFile: "ancora:obs:refund", Metadata: map[string]interface{}{"layer": string(types.LayerMemory)}},
+		},
+		Edges: []types.Edge{
+			layeredRuntimeEdge("services/refund.go:RefundService", "services/refund.go:RefundRepository", "uses", types.LayerRepo, "static-analysis", "services/refund.go"),
+			layeredRuntimeEdge("memory:observation:refund", "services/refund.go:RefundService", "documents", types.LayerMemory, "observation-reference", "ancora:obs:refund"),
+		},
+	}
+	if err := export.WriteSQLiteGraphAtomic(graph, outDir); err != nil {
+		t.Fatalf("WriteSQLiteGraphAtomic error = %v", err)
+	}
+	manifest := types.Manifest{
+		Version:              1,
+		RepoRoot:             repo,
+		GeneratedAt:          time.Now().UTC(),
+		ExtractorFingerprint: "test",
+		BuildMode:            "test",
+		Files: []types.ManifestFile{{
+			Path:   "services/refund.go",
+			SHA256: hexSHA256(serviceSource),
+			Size:   int64(len(serviceSource)),
+		}},
+	}
+	manifestJSON, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("Marshal(manifest) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "manifest.json"), manifestJSON, 0o644); err != nil {
+		t.Fatalf("WriteFile(manifest.json) error = %v", err)
+	}
+	graphPath := filepath.Join(outDir, "graph.json")
+	if err := os.WriteFile(graphPath, []byte(`{"nodes":[],"edges":[]}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(graph.json) error = %v", err)
+	}
+	return graphPath
+}
+
+func writeStripeRefundDecisionRuntimeGraph(t *testing.T) string {
+	t.Helper()
+	repo := t.TempDir()
+	t.Setenv("HOME", filepath.Join(repo, "home"))
+	servicePath := filepath.Join(repo, "services", "stripe_refunds.go")
+	if err := os.MkdirAll(filepath.Dir(servicePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(service dir) error = %v", err)
+	}
+	serviceSource := []byte("package services\n\ntype StripeRefunds struct{}\n")
+	if err := os.WriteFile(servicePath, serviceSource, 0o644); err != nil {
+		t.Fatalf("WriteFile(stripe refunds service) error = %v", err)
+	}
+	outDir := filepath.Join(repo, ".vela")
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(.vela) error = %v", err)
+	}
+	graph := &types.Graph{
+		Nodes: []types.Node{
+			{ID: "services/stripe_refunds.go:StripeRefunds", Label: "Stripe refunds", NodeType: "service", SourceFile: "services/stripe_refunds.go"},
+			{ID: "memory:observation:stripe-refunds", Label: "Prior Stripe refund decision", NodeType: "observation", SourceFile: "ancora:obs:stripe-refunds", Metadata: map[string]interface{}{"layer": string(types.LayerMemory)}},
+		},
+		Edges: []types.Edge{
+			layeredRuntimeEdge("memory:observation:stripe-refunds", "services/stripe_refunds.go:StripeRefunds", "documents", types.LayerMemory, "observation-reference", "ancora:obs:stripe-refunds"),
+		},
+	}
+	if err := export.WriteSQLiteGraphAtomic(graph, outDir); err != nil {
+		t.Fatalf("WriteSQLiteGraphAtomic error = %v", err)
+	}
+	manifest := types.Manifest{
+		Version:              1,
+		RepoRoot:             repo,
+		GeneratedAt:          time.Now().UTC(),
+		ExtractorFingerprint: "test",
+		BuildMode:            "test",
+		Files: []types.ManifestFile{{
+			Path:   "services/stripe_refunds.go",
+			SHA256: hexSHA256(serviceSource),
+			Size:   int64(len(serviceSource)),
+		}},
+	}
+	manifestJSON, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatalf("Marshal(manifest) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "manifest.json"), manifestJSON, 0o644); err != nil {
+		t.Fatalf("WriteFile(manifest.json) error = %v", err)
+	}
+	graphPath := filepath.Join(outDir, "graph.json")
+	if err := os.WriteFile(graphPath, []byte(`{"nodes":[],"edges":[]}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(graph.json) error = %v", err)
+	}
+	return graphPath
+}
+
+func hexSHA256(data []byte) string {
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
 func writeSearchTestGraph(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
@@ -887,6 +2197,31 @@ func writeAmbiguousExploreGraph(t *testing.T) string {
 	path := filepath.Join(dir, "graph.json")
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
+	}
+	return path
+}
+
+func writeMissingRuntimeDBExploreGraph(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	velaDir := filepath.Join(dir, ".vela")
+	if err := os.MkdirAll(velaDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(.vela) error = %v", err)
+	}
+	graph := map[string]any{
+		"nodes": []map[string]any{
+			{"id": "services/refund.go:RefundService", "label": "RefundService", "kind": "struct", "file": "services/refund.go"},
+		},
+		"edges": []map[string]any{},
+		"meta":  map[string]any{"nodeCount": 1, "edgeCount": 0},
+	}
+	data, err := json.MarshalIndent(graph, "", "  ")
+	if err != nil {
+		t.Fatalf("MarshalIndent() error = %v", err)
+	}
+	path := filepath.Join(velaDir, "graph.json")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("WriteFile(graph.json) error = %v", err)
 	}
 	return path
 }

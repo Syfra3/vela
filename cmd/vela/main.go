@@ -14,6 +14,7 @@ import (
 	"github.com/Syfra3/vela/internal/export"
 	vmcp "github.com/Syfra3/vela/internal/mcp"
 	"github.com/Syfra3/vela/internal/query"
+	"github.com/Syfra3/vela/internal/scip"
 	"github.com/Syfra3/vela/internal/server"
 	"github.com/Syfra3/vela/internal/tui"
 	"github.com/Syfra3/vela/pkg/types"
@@ -63,12 +64,44 @@ from the persisted graph output.`,
 	root.AddCommand(lookupCmd())
 	root.AddCommand(searchCmd())
 	root.AddCommand(graphQueryCmd())
+	root.AddCommand(compatibilityCmd())
+	root.AddCommand(installCmd())
+	root.AddCommand(uninstallCmd())
+	root.AddCommand(purgeCmd())
 	root.AddCommand(newQueryKindCmd(types.QueryKindExplain, false))
 	root.AddCommand(newQueryKindCmd(types.QueryKindImpact, false))
 	root.AddCommand(newQueryKindCmd(types.QueryKindPath, true))
 	root.AddCommand(serveCmd())
 	root.AddCommand(versionCmd())
 	return root
+}
+
+func compatibilityCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "compatibility",
+		Short: "Show language compatibility evidence levels",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			registry, err := scip.DefaultRegistry()
+			if err != nil {
+				return err
+			}
+			for _, language := range registry.Languages() {
+				fmt.Printf("%s capability=%s\n", language, compatibilityCapability(language))
+			}
+			return nil
+		},
+	}
+}
+
+func compatibilityCapability(language string) string {
+	switch strings.TrimSpace(language) {
+	case "go":
+		return "semantic"
+	case "typescript":
+		return "patched"
+	default:
+		return "scanner"
+	}
 }
 
 func tuiCmd() *cobra.Command {

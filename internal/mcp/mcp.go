@@ -11,11 +11,14 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-const serverInstructions = `Vela exposes read-only graph-truth dependency queries over graph.json.
+const serverInstructions = `Vela exposes read-only graph-truth dependency queries through the MCP ` + "`vela_explore`" + ` tool and specialized graph tools.
 
 Treat Vela as a structural graph tool, not as free-text or keyword search.
 
 Rules:
+- For structural, architectural, flow, dependency, ownership, or impact questions, call ` + "`vela_explore`" + ` first.
+- Treat returned source snippets and graph paths as already-read evidence.
+- Preserve raw grep or file reads for exact text lookup, stale files named by Vela, unavailable graphs, or verification of latest source.
 - Do not send bag-of-words or full feature descriptions directly to graph query tools.
 - Do not guess generic node names like movement, transaction, service, or handler unless the exact label is already known.
 - For broad product questions, discover concrete files, symbols, DTOs, types, services, or modules first.
@@ -29,8 +32,8 @@ Valid structural queries:
 - explain X
 
 Workflow:
-1. Start broad questions with discovery, not graph queries.
-2. Find exact node candidates first.
+1. Start structural questions with ` + "`vela_explore`" + ` so Vela can route to the right graph primitive.
+2. Find exact node candidates before specialized tool calls when more precision is needed.
 3. Run dependency, reverse dependency, impact, path, or explain queries on the most specific exact label or ID.
 4. If the subject is ambiguous, list candidates or ask a clarifying question instead of guessing.`
 
@@ -68,13 +71,26 @@ func registerExploreTool(srv *server.MCPServer, engine *query.Engine) {
 }
 
 func handleExploreTool(engine *query.Engine) server.ToolHandlerFunc {
+	return handleExploreToolWithConnectTimeCatchUp(engine, false)
+}
+
+func handleExploreToolWithConnectTimeCatchUp(engine *query.Engine, catchUpRunning bool) server.ToolHandlerFunc {
 	return func(ctx context.Context, req markmcp.CallToolRequest) (*markmcp.CallToolResult, error) {
 		_ = ctx
 		input := strings.TrimSpace(req.GetString("query", ""))
 		if input == "" {
 			return markmcp.NewToolResultStructuredOnly(engine.DiagnosticResult("explore", "VALIDATION_ERROR", "query is required")), nil
 		}
-		return markmcp.NewToolResultStructuredOnly(engine.ExploreResult(input, req.GetInt("limit", types.DefaultQueryLimit))), nil
+		result := engine.ExploreResult(input, req.GetInt("limit", types.DefaultQueryLimit))
+		if catchUpRunning && result.Freshness.Status != query.FreshnessFresh {
+			result.Freshness.Status = query.FreshnessWarming
+			result.Status = query.ResultStatusPartial
+			result.Diagnostics = append(result.Diagnostics, query.Diagnostic{
+				Code:    "MCP_CATCHUP_WARMING",
+				Message: "MCP connect-time graph catch-up is still running; retry the explore call or run `vela status` before trusting graph freshness.",
+			})
+		}
+		return markmcp.NewToolResultStructuredOnly(result), nil
 	}
 }
 

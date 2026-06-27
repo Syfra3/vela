@@ -30,12 +30,19 @@ Thumbs.db
 
 # Vela outputs
 vela-out/
+results/.vela-graphs/
 *.graph.json
 *.graph.html
 .vela/GRAPH_REPORT.md
 .vela/manifest.json
 .vela/retrieval.db
 *.graphml
+
+# Local workflow/spec artifacts
+specs/.approved
+specs/.implementation-complete
+specs/vela-v0.4-hard-spec.md
+.uncle-bob/
 
 # Cache
 .cache/

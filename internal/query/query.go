@@ -147,7 +147,7 @@ func runtimeGraphDBPath(graphPath string) (string, bool, error) {
 		return graphDBPath, true, fmt.Errorf("runtime graph unavailable: cannot inspect %s: %w; run `vela build` or `vela update`", graphDBPath, err)
 	}
 
-	return graphDBPath, true, fmt.Errorf("runtime graph unavailable: %s is required for runtime queries; %s is export/debug only and will not be used as query truth; run `vela build` or `vela update`", graphDBPath, graphPath)
+	return graphDBPath, true, fmt.Errorf("runtime graph unavailable: freshness state: unavailable; %s is required for runtime graph answers; %s is export/debug only and will not be used as runtime graph truth; run `vela build`, `vela update`, or `vela status`", graphDBPath, graphPath)
 }
 
 func loadFromSQLite(graphDBPath string) (*Engine, error) {

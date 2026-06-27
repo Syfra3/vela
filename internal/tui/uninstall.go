@@ -25,8 +25,9 @@ const (
 )
 
 type uninstallResult struct {
-	Removed  []string
-	Warnings []string
+	Removed          []string
+	PreservedIndexes []string
+	Warnings         []string
 }
 
 type uninstallPlan struct {
@@ -55,9 +56,6 @@ func NewUninstallModel() UninstallModel {
 	plan.Targets, _ = uninstallTargetsFunc()
 	plan.Repos, _ = uninstallTrackedReposFunc()
 	targets := append([]string(nil), plan.Targets...)
-	for _, repo := range plan.Repos {
-		targets = append(targets, filepath.Join(repo, ".vela"))
-	}
 	return UninstallModel{targets: uniqueSortedPaths(targets)}
 }
 
@@ -107,18 +105,18 @@ func (m UninstallModel) ViewContent() string {
 
 	switch m.state {
 	case uninstallStateConfirm:
-		b.WriteString(warnStyle.Render("This purges Vela-managed graph, cache, export, and tracked local repo data."))
+		b.WriteString(warnStyle.Render("This removes Vela-managed agent integrations."))
 		b.WriteString("\n")
-		b.WriteString(textStyle.Render("It deletes only Vela-managed paths:"))
+		b.WriteString(textStyle.Render("It deletes only integration paths:"))
 		b.WriteString("\n\n")
 		for _, target := range m.targets {
 			b.WriteString(textStyle.Render("  • " + target))
 			b.WriteString("\n")
 		}
 		b.WriteString("\n")
-		b.WriteString(mutedStyle.Render("Source repositories are not deleted. Tracked repo .vela data and managed git hooks are removed."))
+		b.WriteString(mutedStyle.Render("Source repositories and .vela/graph.db indexes are not deleted. Use purge to remove indexes."))
 	case uninstallStateRunning:
-		b.WriteString(textStyle.Render("Purging Vela-managed data..."))
+		b.WriteString(textStyle.Render("Removing Vela agent integrations..."))
 	case uninstallStateDone:
 		if m.err != nil {
 			b.WriteString(errorStyle.Render(fmt.Sprintf("Purge failed: %v", m.err)))
@@ -133,6 +131,15 @@ func (m UninstallModel) ViewContent() string {
 			b.WriteString("\n")
 			for _, path := range m.result.Removed {
 				b.WriteString(successStyle.Render("  • " + path))
+				b.WriteString("\n")
+			}
+		}
+		if len(m.result.PreservedIndexes) > 0 {
+			b.WriteString("\n")
+			b.WriteString(mutedStyle.Render("Indexes remain and can be removed with purge:"))
+			b.WriteString("\n")
+			for _, path := range m.result.PreservedIndexes {
+				b.WriteString(mutedStyle.Render("  • " + path))
 				b.WriteString("\n")
 			}
 		}
@@ -152,9 +159,9 @@ func (m UninstallModel) ViewContent() string {
 func (m UninstallModel) FooterHelp() string {
 	switch m.state {
 	case uninstallStateConfirm:
-		return "p/u/Enter purge • esc back"
+		return "u/Enter uninstall integrations • esc back"
 	case uninstallStateRunning:
-		return "waiting for purge to finish"
+		return "waiting for uninstall to finish"
 	default:
 		return "Enter or esc back to menu"
 	}
@@ -184,16 +191,9 @@ func uninstallAll() (uninstallResult, error) {
 		if err := hooks.Uninstall(repo); err != nil {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("remove hooks %s: %v", repo, err))
 		}
-		localData := filepath.Join(repo, ".vela")
-		if _, err := os.Stat(localData); os.IsNotExist(err) {
-			continue
-		} else if err != nil {
-			return result, fmt.Errorf("checking %s: %w", localData, err)
+		if graphDB := filepath.Join(repo, ".vela", "graph.db"); fileExists(graphDB) {
+			result.PreservedIndexes = append(result.PreservedIndexes, graphDB)
 		}
-		if err := os.RemoveAll(localData); err != nil {
-			return result, fmt.Errorf("removing %s: %w", localData, err)
-		}
-		result.Removed = append(result.Removed, localData)
 	}
 	for _, target := range targets {
 		if _, err := os.Stat(target); os.IsNotExist(err) {
