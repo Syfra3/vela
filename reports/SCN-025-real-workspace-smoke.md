@@ -37,7 +37,7 @@ status: complete
 
 5. `VELA_SCN025_WORKSPACE=<REAL_WORKSPACE> go test ./cmd/vela -run TestSCN025_RealWorkspaceSmokeHarness -count=1`
    - result: pass
-   - automated harness rebuilt the real workspace, verified `.vela/graph.db`, checked status freshness, executed evidence-bearing CLI explain JSON, started `vela serve --mcp`, and called `MCP tool call: vela_explain` with structured `query.Result` content.
+   - automated harness rebuilt the real workspace, verified `.vela/graph.db`, checked status freshness, executed evidence-bearing CLI explain JSON, started `vela serve --mcp`, and called `MCP tool call: explain` with structured `query.Result` content.
    - MCP evidence-bearing: yes
 
 ## Secret and Redaction Check
