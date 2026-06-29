@@ -149,6 +149,11 @@ func (b *Builder) Build(ctx context.Context, req types.BuildRequest) (Result, er
 	if strings.TrimSpace(req.RepoRoot) == "" {
 		return Result{}, errors.New("pipeline repo root is required")
 	}
+	absRepoRoot, err := filepath.Abs(req.RepoRoot)
+	if err != nil {
+		return Result{}, fmt.Errorf("resolve repo root %s: %w", req.RepoRoot, err)
+	}
+	req.RepoRoot = filepath.Clean(absRepoRoot)
 	if b == nil {
 		return Result{}, errors.New("pipeline builder is nil")
 	}

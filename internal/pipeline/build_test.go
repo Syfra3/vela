@@ -38,6 +38,59 @@ func writeTestFile(t *testing.T, path string, body string) {
 	}
 }
 
+func TestBuilderBuild_NormalizesRelativeRepoRootBeforeManifest(t *testing.T) {
+	repoRoot := t.TempDir()
+	outDir := filepath.Join(repoRoot, ".vela")
+	writeTestFile(t, filepath.Join(repoRoot, "main.go"), "package main\n")
+
+	previousWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+	if err := os.Chdir(repoRoot); err != nil {
+		t.Fatalf("Chdir(%s) error = %v", repoRoot, err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(previousWD); err != nil {
+			t.Fatalf("restore working directory: %v", err)
+		}
+	})
+
+	scanner := &fakeScanner{
+		nodes: []types.Node{{ID: "main", Label: "main", NodeType: "package", SourceFile: "main.go"}},
+	}
+	builder := NewBuilder(Config{
+		Detect: func(string) ([]string, error) {
+			return []string{filepath.Join(repoRoot, "main.go")}, nil
+		},
+		Scanner:      scanner,
+		GraphBuilder: igraph.Build,
+		OutDir:       outDir,
+	})
+
+	result, err := builder.Build(context.Background(), types.BuildRequest{RepoRoot: "."})
+	if err != nil {
+		t.Fatalf("Build() error = %v", err)
+	}
+	if scanner.gotRoot != repoRoot {
+		t.Fatalf("scanner root = %q, want absolute repo root %q", scanner.gotRoot, repoRoot)
+	}
+	if result.GraphPath != filepath.Join(outDir, "graph.json") {
+		t.Fatalf("GraphPath = %q, want %q", result.GraphPath, filepath.Join(outDir, "graph.json"))
+	}
+
+	manifest, err := export.LoadManifest(filepath.Join(outDir, "manifest.json"))
+	if err != nil {
+		t.Fatalf("ReadManifest() error = %v", err)
+	}
+	if manifest.RepoRoot != repoRoot {
+		t.Fatalf("manifest RepoRoot = %q, want %q", manifest.RepoRoot, repoRoot)
+	}
+	if len(manifest.Files) != 1 || manifest.Files[0].Path != "main.go" {
+		t.Fatalf("manifest files = %+v, want relative main.go", manifest.Files)
+	}
+}
+
 // REQ-002/REQ-003 → SCN-004 → TestSCN004_BuildCreatesRuntimeAndGeneratedArtifacts
 func TestSCN004_BuildCreatesRuntimeAndGeneratedArtifacts(t *testing.T) {
 	// Scenario: Build creates runtime and generated graph artifacts with SQLite as truth.
