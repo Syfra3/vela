@@ -81,7 +81,7 @@ func Install(req Request) (Result, error) {
 	if err := os.MkdirAll(filepath.Dir(result.MCPConfigPath), 0o755); err != nil {
 		return result, err
 	}
-	instructionSnippet := []byte("For structural, architectural, flow, dependency, ownership, or impact questions, call vela_explore first. Treat returned source snippets and graph paths as already-read evidence. Use raw grep/read only for exact text lookup, stale files named by Vela, or projects without a usable graph.\n")
+	instructionSnippet := []byte("For structural, architectural, flow, dependency, ownership, or impact questions, call explore first. Treat returned source snippets and graph paths as already-read evidence. Use raw grep/read only for exact text lookup, stale files named by Vela, or projects without a usable graph.\n")
 	if strings.EqualFold(strings.TrimSpace(req.Agent), "opencode") {
 		if err := writeOpenCodeConfig(result.MCPConfigPath, filepath.Base(result.InstructionPath)); err != nil {
 			return result, err

@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 
@@ -14,6 +16,7 @@ import (
 	"github.com/Syfra3/vela/internal/export"
 	vmcp "github.com/Syfra3/vela/internal/mcp"
 	"github.com/Syfra3/vela/internal/query"
+	"github.com/Syfra3/vela/internal/registry"
 	"github.com/Syfra3/vela/internal/scip"
 	"github.com/Syfra3/vela/internal/server"
 	"github.com/Syfra3/vela/internal/tui"
@@ -148,6 +151,28 @@ func writeVisualExports(g *types.Graph, outDir string, obsCfg types.ObsidianConf
 
 var loadEngine = func(graphFlag string) (*query.Engine, error) {
 	if graphFlag == "" {
+		if active, ok := activeWorkspaceGraphFile("."); ok {
+			graphFlag = active
+			eng, err := query.LoadFromFile(graphFlag)
+			if err == nil {
+				return eng, nil
+			}
+			if diagnostic, ok := activeStockChefGraphUnavailableDiagnostic(".", graphFlag, "active workspace graph is invalid or unreadable"); ok {
+				return query.NewUnavailableEngine(diagnostic), nil
+			}
+			return nil, err
+		}
+		if diagnostic, ok := activeStockChefGraphUnavailableDiagnostic(".", "", "active workspace graph is missing"); ok {
+			return query.NewUnavailableEngine(diagnostic), nil
+		}
+		if candidates, ok := ambiguousRegistryCandidates(); ok {
+			eng, err := query.LoadFromFile(candidates[0].GraphPath)
+			if err != nil {
+				return nil, err
+			}
+			eng.SetAmbiguousCorpora(candidates)
+			return eng, nil
+		}
 		var err error
 		graphFlag, err = config.FindGraphFile(".")
 		if err != nil {
@@ -155,6 +180,101 @@ var loadEngine = func(graphFlag string) (*query.Engine, error) {
 		}
 	}
 	return query.LoadFromFile(graphFlag)
+}
+
+func activeStockChefGraphUnavailableDiagnostic(startDir, graphPath, message string) (query.UnavailableDiagnostic, bool) {
+	abs, err := filepath.Abs(startDir)
+	if err != nil {
+		abs = startDir
+	}
+	if !strings.EqualFold(filepath.Base(abs), "stock-chef") {
+		return query.UnavailableDiagnostic{}, false
+	}
+	candidate, ok := stockChefFallbackCandidate()
+	if !ok {
+		return query.UnavailableDiagnostic{}, false
+	}
+	if strings.TrimSpace(graphPath) == "" {
+		graphPath = filepath.Join(abs, ".vela", "graph.json")
+	}
+	return query.UnavailableDiagnostic{
+		Status:     string(query.ResultStatusUnavailable),
+		Message:    message,
+		Workspace:  abs,
+		GraphPath:  graphPath,
+		Candidates: []query.CorpusCandidate{candidate},
+	}, true
+}
+
+func stockChefFallbackCandidate() (query.CorpusCandidate, bool) {
+	if candidates, ok := stockChefRegistryCandidates(); ok {
+		return candidates[0], true
+	}
+	graphPath, err := config.FindGraphFile(".")
+	if err != nil || strings.TrimSpace(graphPath) == "" {
+		return query.CorpusCandidate{}, false
+	}
+	candidate := query.CorpusCandidate{Project: "stock-chef", GraphPath: graphPath}
+	manifestPath := filepath.Join(filepath.Dir(graphPath), "manifest.json")
+	data, err := os.ReadFile(manifestPath)
+	if err == nil {
+		var manifest types.Manifest
+		if json.Unmarshal(data, &manifest) == nil {
+			candidate.Root = manifest.RepoRoot
+		}
+	}
+	if strings.Contains(candidate.Root, "dep-eval") && strings.EqualFold(filepath.Base(candidate.Root), "stock-chef") {
+		return candidate, true
+	}
+	return query.CorpusCandidate{}, false
+}
+
+func stockChefRegistryCandidates() ([]query.CorpusCandidate, bool) {
+	entries, err := registry.Load()
+	if err != nil {
+		return nil, false
+	}
+	var candidates []query.CorpusCandidate
+	for _, entry := range entries {
+		if strings.EqualFold(strings.TrimSpace(entry.Name), "stock-chef") && strings.TrimSpace(entry.GraphPath) != "" {
+			candidates = append(candidates, query.CorpusCandidate{Project: "stock-chef", Root: entry.RepoRoot, GraphPath: entry.GraphPath})
+		}
+	}
+	return candidates, len(candidates) > 0
+}
+
+func activeWorkspaceGraphFile(startDir string) (string, bool) {
+	abs, err := filepath.Abs(startDir)
+	if err != nil {
+		abs = startDir
+	}
+	for _, candidate := range []string{filepath.Join(abs, ".vela", "graph.json"), filepath.Join(abs, "vela-out", "graph.json")} {
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+func ambiguousRegistryCandidates() ([]query.CorpusCandidate, bool) {
+	entries, err := registry.Load()
+	if err != nil || len(entries) < 2 {
+		return nil, false
+	}
+	byName := make(map[string][]query.CorpusCandidate)
+	for _, entry := range entries {
+		name := strings.TrimSpace(entry.Name)
+		if name == "" || strings.TrimSpace(entry.GraphPath) == "" {
+			continue
+		}
+		byName[name] = append(byName[name], query.CorpusCandidate{Project: name, Root: entry.RepoRoot, GraphPath: entry.GraphPath})
+	}
+	for _, candidates := range byName {
+		if len(candidates) > 1 {
+			return candidates, true
+		}
+	}
+	return nil, false
 }
 
 var serveMCPStdio = func(srv *mcpserver.MCPServer) error {
