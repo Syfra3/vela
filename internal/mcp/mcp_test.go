@@ -65,14 +65,14 @@ func TestNewServerRegistersQueryToolSurface(t *testing.T) {
 		t.Fatalf("expected 8 tools, got %d", len(tools))
 	}
 	want := map[string]bool{
-		"vela_explore":              true,
-		"vela_lookup":               true,
-		"vela_dependencies":         true,
-		"vela_reverse_dependencies": true,
-		"vela_impact":               true,
-		"vela_path":                 true,
-		"vela_explain":              true,
-		"vela_status":               true,
+		"explore":              true,
+		"lookup":               true,
+		"dependencies":         true,
+		"reverse_dependencies": true,
+		"impact":               true,
+		"path":                 true,
+		"explain":              true,
+		"status":               true,
 	}
 	for _, tool := range tools {
 		if !want[tool.Tool.Name] {
@@ -85,9 +85,38 @@ func TestNewServerRegistersQueryToolSurface(t *testing.T) {
 	}
 }
 
+// REQ-003 → SCN-004 → TestSCN004_MCPServerExposesCanonicalToolNamesWithoutDuplicatedVelaPrefix
+func TestSCN004_MCPServerExposesCanonicalToolNamesWithoutDuplicatedVelaPrefix(t *testing.T) {
+	// Scenario: MCP exposes non-duplicated tool names when server is named vela.
+	srv := NewServer(newTestEngine(t))
+	tools := srv.ListTools()
+
+	want := map[string]bool{
+		"explore": true,
+		"lookup":  true,
+		"status":  true,
+		"explain": true,
+		"impact":  true,
+		"path":    true,
+	}
+	for _, tool := range tools {
+		name := tool.Tool.Name
+		if strings.HasPrefix(name, "vela_vela_") {
+			t.Fatalf("tool list exposes duplicated server prefix %q", name)
+		}
+		if strings.HasPrefix(name, "vela_") {
+			t.Fatalf("server named vela should expose canonical unprefixed primary tool name, got %q", name)
+		}
+		delete(want, name)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing canonical MCP tools: %v", want)
+	}
+}
+
 // REQ-003/REQ-004 → SCN-002 → TestSCN002_MCPExploreUsesSharedStructuredEnvelope
 func TestSCN002_MCPExploreUsesSharedStructuredEnvelope(t *testing.T) {
-	// Scenario: MCP exposes vela_explore with the shared structured envelope.
+	// Scenario: MCP exposes explore with the shared structured envelope.
 	dir := t.TempDir()
 	path := writeRefundServiceGraph(t, dir)
 	eng, err := query.LoadFromFile(path)
@@ -98,13 +127,13 @@ func TestSCN002_MCPExploreUsesSharedStructuredEnvelope(t *testing.T) {
 	srv := NewServer(eng)
 	found := false
 	for _, tool := range srv.ListTools() {
-		if tool.Tool.Name == "vela_explore" {
+		if tool.Tool.Name == "explore" {
 			found = true
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("tool list missing vela_explore")
+		t.Fatalf("tool list missing explore")
 	}
 
 	res, err := handleExploreTool(eng)(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"query": "explain RefundService", "limit": 3}}})
@@ -200,11 +229,11 @@ func TestSCN008_MCPFirstExploreCallReturnsFreshWhenRuntimeDBAlreadyFresh(t *test
 
 // REQ-011 → SCN-013 → TestSCN013_MCPAgentInstructionsPreferVelaExploreFirstWithoutAutoSyncPromise
 func TestSCN013_MCPAgentInstructionsPreferVelaExploreFirstWithoutAutoSyncPromise(t *testing.T) {
-	// Scenario: Agent instructions prefer vela_explore first without promising auto-sync.
+	// Scenario: Agent instructions prefer explore first without promising auto-sync.
 	instructions := serverInstructions
 
 	for _, want := range []string{
-		"call `vela_explore` first",
+		"call `explore` first",
 		"structural, architectural, flow, dependency, ownership, or impact questions",
 		"source snippets and graph paths as already-read evidence",
 		"raw grep or file reads",
@@ -295,12 +324,12 @@ func TestSCN008_MCPServerExposesRequiredV04Toolset(t *testing.T) {
 	tools := srv.ListTools()
 
 	want := map[string]bool{
-		"vela_explore": true,
-		"vela_lookup":  true,
-		"vela_explain": true,
-		"vela_impact":  true,
-		"vela_path":    true,
-		"vela_status":  true,
+		"explore": true,
+		"lookup":  true,
+		"explain": true,
+		"impact":  true,
+		"path":    true,
+		"status":  true,
 	}
 	for _, tool := range tools {
 		delete(want, tool.Tool.Name)
@@ -315,12 +344,12 @@ func TestSCN009_CompatibleMCPClientsReceiveStructuredCoreResponses(t *testing.T)
 	// Scenario: OpenCode and Claude-compatible MCP clients can call Vela tools.
 	eng := newTestEngine(t)
 	toolHandlers := map[string]serverCall{
-		"vela_explore": {handler: handleExploreTool(eng), arguments: map[string]any{"query": "AuthService", "limit": 5}, wantKind: "explore"},
-		"vela_lookup":  {handler: handleLookupTool(eng), arguments: map[string]any{"term": "AuthService", "limit": 5}, wantKind: "lookup"},
-		"vela_explain": {handler: handleQueryTool(eng, "explain"), arguments: map[string]any{"subject": "AuthService", "limit": 5}, wantKind: "explain"},
-		"vela_impact":  {handler: handleQueryTool(eng, "impact"), arguments: map[string]any{"subject": "Database", "limit": 5}, wantKind: "impact"},
-		"vela_path":    {handler: handleQueryTool(eng, "path"), arguments: map[string]any{"subject": "AuthService", "target": "Database", "limit": 5}, wantKind: "path"},
-		"vela_status":  {handler: handleStatusTool(eng), arguments: map[string]any{}, wantKind: "status"},
+		"explore": {handler: handleExploreTool(eng), arguments: map[string]any{"query": "AuthService", "limit": 5}, wantKind: "explore"},
+		"lookup":  {handler: handleLookupTool(eng), arguments: map[string]any{"term": "AuthService", "limit": 5}, wantKind: "lookup"},
+		"explain": {handler: handleQueryTool(eng, "explain"), arguments: map[string]any{"subject": "AuthService", "limit": 5}, wantKind: "explain"},
+		"impact":  {handler: handleQueryTool(eng, "impact"), arguments: map[string]any{"subject": "Database", "limit": 5}, wantKind: "impact"},
+		"path":    {handler: handleQueryTool(eng, "path"), arguments: map[string]any{"subject": "AuthService", "target": "Database", "limit": 5}, wantKind: "path"},
+		"status":  {handler: handleStatusTool(eng), arguments: map[string]any{}, wantKind: "status"},
 	}
 	clientCalls := []struct {
 		name string

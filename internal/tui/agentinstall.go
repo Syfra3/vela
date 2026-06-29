@@ -125,7 +125,7 @@ func (m AgentInstallModel) View() string { return m.ViewContent() }
 func (m AgentInstallModel) ViewContent() string {
 	var b strings.Builder
 	b.WriteString("Agent Integration Installer\n")
-	b.WriteString("configure vela_explore for coding agents through Vela MCP\n\n")
+	b.WriteString("configure explore for coding agents through Vela MCP\n\n")
 	if strings.TrimSpace(m.message) != "" {
 		b.WriteString(m.message)
 		b.WriteString("\n\n")
@@ -164,7 +164,7 @@ func (m AgentInstallModel) ViewContent() string {
 		b.WriteString("MCP config written: ")
 		b.WriteString(m.result.MCPConfigPath)
 		b.WriteString("\n")
-		b.WriteString("instructions mention vela_explore first: ")
+		b.WriteString("instructions mention explore first: ")
 		b.WriteString(m.result.InstructionPath)
 		b.WriteString("\n")
 		if m.result.GraphReady {

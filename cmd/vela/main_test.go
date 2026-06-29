@@ -693,12 +693,12 @@ func TestSCN023_MCPFixtureServesAndCallsRequiredTools(t *testing.T) {
 	}
 
 	toolCalls := map[string]map[string]any{
-		"vela_explore": {"query": "AuthService", "limit": 5},
-		"vela_lookup":  {"term": "AuthService", "limit": 5},
-		"vela_explain": {"subject": "AuthService", "limit": 5},
-		"vela_impact":  {"subject": "Database", "limit": 5},
-		"vela_path":    {"subject": "AuthService", "target": "Database", "limit": 5},
-		"vela_status":  {},
+		"explore": {"query": "AuthService", "limit": 5},
+		"lookup":  {"term": "AuthService", "limit": 5},
+		"explain": {"subject": "AuthService", "limit": 5},
+		"impact":  {"subject": "Database", "limit": 5},
+		"path":    {"subject": "AuthService", "target": "Database", "limit": 5},
+		"status":  {},
 	}
 	for toolName, args := range toolCalls {
 		tool := served.GetTool(toolName)
@@ -762,7 +762,7 @@ func TestSCN014_SpecializedCLIMCPToolsRemainAvailableWithExploreAsDefaultSurface
 		}
 	}
 
-	for _, toolName := range []string{"vela_lookup", "vela_explain", "vela_impact", "vela_path", "vela_status"} {
+	for _, toolName := range []string{"lookup", "explain", "impact", "path", "status"} {
 		if tool := served.GetTool(toolName); tool == nil {
 			t.Fatalf("expected specialized MCP tool %q to remain available", toolName)
 		}
@@ -821,7 +821,7 @@ func TestSCN024_CLIMCPEquivalenceFixtureUsesSharedCoreSchema(t *testing.T) {
 	if served == nil {
 		t.Fatal("serve --mcp did not start an MCP server for equivalence fixture")
 	}
-	res, err := served.GetTool("vela_explain").Handler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"subject": "AuthService", "limit": 5}}})
+	res, err := served.GetTool("explain").Handler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"subject": "AuthService", "limit": 5}}})
 	if err != nil {
 		t.Fatalf("MCP explain handler error = %v", err)
 	}
@@ -911,7 +911,7 @@ func TestSCN025_RealWorkspaceSmokeReportIsRedactedReleaseProof(t *testing.T) {
 		"freshness:",
 		"vela lookup",
 		"vela explain",
-		"MCP tool call: vela_explain",
+		"MCP tool call: explain",
 		"evidence-bearing: yes",
 		"secret scan: pass",
 	} {
@@ -996,7 +996,7 @@ func TestSCN025_RealWorkspaceSmokeHarness(t *testing.T) {
 	if served == nil {
 		t.Fatal("serve --mcp did not start an MCP server for real workspace smoke")
 	}
-	res, err := served.GetTool("vela_explain").Handler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"subject": subject, "limit": 5}}})
+	res, err := served.GetTool("explain").Handler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"subject": subject, "limit": 5}}})
 	if err != nil {
 		t.Fatalf("MCP explain real workspace handler error = %v", err)
 	}
@@ -1007,6 +1007,586 @@ func TestSCN025_RealWorkspaceSmokeHarness(t *testing.T) {
 	if mcpCore.Status != query.ResultStatusOK || len(mcpCore.Facts) == 0 || len(mcpCore.Evidence) == 0 {
 		t.Fatalf("real workspace MCP explain lacks evidence-bearing graph answer: %+v", mcpCore)
 	}
+}
+
+// REQ-001/REQ-002 → SCN-001 → TestSCN001_MCPServeFromFreshWorkspaceReportsFreshSelectedGraph
+func TestSCN001_MCPServeFromFreshWorkspaceReportsFreshSelectedGraph(t *testing.T) {
+	// Scenario: MCP reports the same fresh active stock-chef graph as CLI status.
+	restore := serveMCPStdio
+	t.Cleanup(func() { serveMCPStdio = restore })
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeRuntimeGraphForMCPSelection(t, filepath.Join(home, ".vela"), home, false)
+
+	workspace := filepath.Join(t.TempDir(), "stock-chef")
+	graphJSON := writeRuntimeGraphForMCPSelection(t, filepath.Join(workspace, ".vela"), workspace, true)
+	t.Chdir(workspace)
+
+	var served *mcpserver.MCPServer
+	serveMCPStdio = func(srv *mcpserver.MCPServer) error {
+		served = srv
+		return nil
+	}
+	serve := rootCmd()
+	serve.SetOut(&bytes.Buffer{})
+	serve.SetErr(&bytes.Buffer{})
+	serve.SetArgs([]string{"serve", "--mcp"})
+	if err := serve.Execute(); err != nil {
+		t.Fatalf("Execute(serve --mcp from stock-chef workspace) error = %v", err)
+	}
+	if served == nil {
+		t.Fatal("serve --mcp did not start an MCP server")
+	}
+
+	res, err := served.GetTool("explain").Handler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"subject": "AuthService", "limit": 5}}})
+	if err != nil {
+		t.Fatalf("MCP explain handler error = %v", err)
+	}
+	core, ok := res.StructuredContent.(query.Result)
+	if !ok {
+		t.Fatalf("MCP explain structured content = %T, want query.Result", res.StructuredContent)
+	}
+	if core.Freshness.Status != query.FreshnessFresh {
+		t.Fatalf("MCP freshness = %q, want fresh; diagnostics=%+v", core.Freshness.Status, core.Diagnostics)
+	}
+
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(callToolResultText(t, res)), &envelope); err != nil {
+		t.Fatalf("MCP explain text fallback was not JSON: %v", err)
+	}
+	freshness, ok := envelope["freshness"].(map[string]any)
+	if !ok {
+		t.Fatalf("MCP response freshness = %#v, want object", envelope["freshness"])
+	}
+	if freshness["source"] != graphJSON {
+		t.Fatalf("MCP graph source = %#v, want %q", freshness["source"], graphJSON)
+	}
+	if actions, ok := freshness["recommended_actions"].([]any); ok {
+		for _, action := range actions {
+			if strings.Contains(fmt.Sprint(action), "vela build") || strings.Contains(fmt.Sprint(action), "vela update") {
+				t.Fatalf("MCP response recommended %q for fresh selected graph; freshness=%#v", action, freshness)
+			}
+		}
+	}
+}
+
+// REQ-001/REQ-002 → SCN-002 → TestSCN002_MCPGraphQueryIncludesSelectedGraphSourceEvidence
+func TestSCN002_MCPGraphQueryIncludesSelectedGraphSourceEvidence(t *testing.T) {
+	// Scenario: MCP response includes graph source evidence for debugging selection.
+	restore := serveMCPStdio
+	t.Cleanup(func() { serveMCPStdio = restore })
+
+	workspace := filepath.Clean("/home/geen/Documents/personal/stock-chef")
+	updatedAt := time.Date(2026, 6, 29, 15, 30, 0, 0, time.UTC)
+	graphJSON := writeRuntimeGraphWithSourceEvidence(t, filepath.Join(t.TempDir(), ".vela"), workspace, updatedAt)
+
+	var served *mcpserver.MCPServer
+	serveMCPStdio = func(srv *mcpserver.MCPServer) error {
+		served = srv
+		return nil
+	}
+	serve := rootCmd()
+	serve.SetOut(&bytes.Buffer{})
+	serve.SetErr(&bytes.Buffer{})
+	serve.SetArgs([]string{"serve", "--mcp", "--graph", graphJSON})
+	if err := serve.Execute(); err != nil {
+		t.Fatalf("Execute(serve --mcp --graph) error = %v", err)
+	}
+	if served == nil {
+		t.Fatal("serve --mcp did not start an MCP server")
+	}
+
+	res, err := served.GetTool("explain").Handler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"subject": "AuthService", "limit": 5}}})
+	if err != nil {
+		t.Fatalf("MCP explain handler error = %v", err)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(callToolResultText(t, res)), &envelope); err != nil {
+		t.Fatalf("MCP explain text fallback was not JSON: %v", err)
+	}
+	freshness, ok := envelope["freshness"].(map[string]any)
+	if !ok {
+		t.Fatalf("MCP response freshness = %#v, want object", envelope["freshness"])
+	}
+	for key, want := range map[string]string{
+		"selected_graph_path": graphJSON,
+		"project":             "stock-chef",
+		"workspace_root":      workspace,
+		"graph_updated_at":    updatedAt.Format(time.RFC3339),
+	} {
+		if freshness[key] != want {
+			t.Fatalf("freshness[%q] = %#v, want %q; freshness=%#v", key, freshness[key], want, freshness)
+		}
+	}
+}
+
+// REQ-002 → SCN-003 → TestSCN003_MCPGraphQueryExplainsUnknownFreshnessBuildRecommendation
+func TestSCN003_MCPGraphQueryExplainsUnknownFreshnessBuildRecommendation(t *testing.T) {
+	// Scenario: Stale or unknown freshness explains why build is recommended.
+	restore := serveMCPStdio
+	t.Cleanup(func() { serveMCPStdio = restore })
+
+	workspace := filepath.Join(t.TempDir(), "stock-chef")
+	graphJSON := writeRuntimeGraphForMCPSelection(t, filepath.Join(workspace, ".vela"), workspace, false)
+
+	var served *mcpserver.MCPServer
+	serveMCPStdio = func(srv *mcpserver.MCPServer) error {
+		served = srv
+		return nil
+	}
+	serve := rootCmd()
+	serve.SetOut(&bytes.Buffer{})
+	serve.SetErr(&bytes.Buffer{})
+	serve.SetArgs([]string{"serve", "--mcp", "--graph", graphJSON})
+	if err := serve.Execute(); err != nil {
+		t.Fatalf("Execute(serve --mcp --graph unknown freshness) error = %v", err)
+	}
+	if served == nil {
+		t.Fatal("serve --mcp did not start an MCP server")
+	}
+
+	res, err := served.GetTool("explain").Handler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"subject": "AuthService", "limit": 5}}})
+	if err != nil {
+		t.Fatalf("MCP explain handler error = %v", err)
+	}
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(callToolResultText(t, res)), &envelope); err != nil {
+		t.Fatalf("MCP explain text fallback was not JSON: %v", err)
+	}
+	freshness, ok := envelope["freshness"].(map[string]any)
+	if !ok {
+		t.Fatalf("MCP response freshness = %#v, want object", envelope["freshness"])
+	}
+	if freshness["status"] != string(query.FreshnessUnknown) {
+		t.Fatalf("freshness status = %#v, want unknown; freshness=%#v", freshness["status"], freshness)
+	}
+	if freshness["selected_graph_path"] != graphJSON {
+		t.Fatalf("freshness selected_graph_path = %#v, want %q; freshness=%#v", freshness["selected_graph_path"], graphJSON, freshness)
+	}
+	reason, ok := freshness["reason"].(string)
+	if !ok || !strings.Contains(reason, "manifest") || !strings.Contains(reason, "vela build") {
+		t.Fatalf("freshness reason = %#v, want manifest-specific build explanation; freshness=%#v", freshness["reason"], freshness)
+	}
+	actions, ok := freshness["recommended_actions"].([]any)
+	if !ok {
+		t.Fatalf("freshness recommended_actions = %#v, want actions including vela build", freshness["recommended_actions"])
+	}
+	foundBuild := false
+	for _, action := range actions {
+		if fmt.Sprint(action) == "vela build" {
+			foundBuild = true
+		}
+	}
+	if !foundBuild {
+		t.Fatalf("freshness recommended_actions = %#v, want vela build", actions)
+	}
+}
+
+// REQ-004 → SCN-005 → TestSCN005_MCPReverseDependenciesPreferActiveWorkspaceOverDepEvalCorpus
+func TestSCN005_MCPReverseDependenciesPreferActiveWorkspaceOverDepEvalCorpus(t *testing.T) {
+	// Scenario: Active real stock-chef workspace is preferred over dep-eval stock-chef corpus.
+	restore := serveMCPStdio
+	t.Cleanup(func() { serveMCPStdio = restore })
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	writeStockChefSelectionRuntimeGraph(t, filepath.Join(home, ".vela"), filepath.Join(home, "dep-eval", "corpora", "workdirs", "stock-chef"), "dep-eval:corpora/workdirs/stock-chef/DepEvalCaller", "dep_eval.go")
+
+	workspace := filepath.Join(t.TempDir(), "stock-chef")
+	graphJSON := writeStockChefSelectionRuntimeGraph(t, filepath.Join(workspace, ".vela"), workspace, "github.com/Syfra3/stock-chef:LocalCaller", "local_stock_chef.go")
+	t.Chdir(workspace)
+
+	var served *mcpserver.MCPServer
+	serveMCPStdio = func(srv *mcpserver.MCPServer) error {
+		served = srv
+		return nil
+	}
+	serve := rootCmd()
+	serve.SetOut(&bytes.Buffer{})
+	serve.SetErr(&bytes.Buffer{})
+	serve.SetArgs([]string{"serve", "--mcp"})
+	if err := serve.Execute(); err != nil {
+		t.Fatalf("Execute(serve --mcp from active stock-chef workspace) error = %v", err)
+	}
+	if served == nil {
+		t.Fatal("serve --mcp did not start an MCP server")
+	}
+
+	res, err := served.GetTool("reverse_dependencies").Handler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"subject": "SharedStockChefSymbol", "limit": 5}}})
+	if err != nil {
+		t.Fatalf("MCP reverse_dependencies handler error = %v", err)
+	}
+	text := callToolResultText(t, res)
+	for _, want := range []string{graphJSON, workspace, "stock-chef", "github.com/Syfra3/stock-chef:LocalCaller"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("MCP response missing active workspace evidence %q; response:\n%s", want, text)
+		}
+	}
+	for _, forbidden := range []string{"dep-eval", "corpora/workdirs/stock-chef", "DepEvalCaller"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("MCP response included non-active dep-eval corpus evidence %q; response:\n%s", forbidden, text)
+		}
+	}
+}
+
+// REQ-005 → SCN-006 → TestSCN006_MCPReverseDependenciesReturnsAmbiguityForSameNameStockChefCorpora
+func TestSCN006_MCPReverseDependenciesReturnsAmbiguityForSameNameStockChefCorpora(t *testing.T) {
+	// Scenario: Ambiguous stock-chef corpora require explicit disambiguation.
+	restore := serveMCPStdio
+	t.Cleanup(func() { serveMCPStdio = restore })
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	localRoot := filepath.Join(home, "work", "stock-chef")
+	depEvalRoot := filepath.Join(home, "dep-eval", "corpora", "workdirs", "stock-chef")
+	localGraph := writeStockChefSelectionRuntimeGraph(t, filepath.Join(localRoot, ".vela"), localRoot, "github.com/Syfra3/stock-chef:LocalCaller", "local_stock_chef.go")
+	depEvalGraph := writeStockChefSelectionRuntimeGraph(t, filepath.Join(depEvalRoot, ".vela"), depEvalRoot, "dep-eval:corpora/workdirs/stock-chef/DepEvalCaller", "dep_eval.go")
+	registryPath := filepath.Join(home, ".vela", "registry.json")
+	if err := os.MkdirAll(filepath.Dir(registryPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(registry) error = %v", err)
+	}
+	registryJSON := fmt.Sprintf(`{"version":1,"entries":[{"repo_root":%q,"name":"stock-chef","graph_path":%q},{"repo_root":%q,"name":"stock-chef","graph_path":%q}]}`+"\n", localRoot, localGraph, depEvalRoot, depEvalGraph)
+	if err := os.WriteFile(registryPath, []byte(registryJSON), 0o644); err != nil {
+		t.Fatalf("WriteFile(registry) error = %v", err)
+	}
+	t.Chdir(t.TempDir())
+
+	var served *mcpserver.MCPServer
+	serveMCPStdio = func(srv *mcpserver.MCPServer) error {
+		served = srv
+		return nil
+	}
+	serve := rootCmd()
+	serve.SetOut(&bytes.Buffer{})
+	serve.SetErr(&bytes.Buffer{})
+	serve.SetArgs([]string{"serve", "--mcp"})
+	if err := serve.Execute(); err != nil {
+		t.Fatalf("Execute(serve --mcp with ambiguous stock-chef registry) error = %v", err)
+	}
+	if served == nil {
+		t.Fatal("serve --mcp did not start an MCP server")
+	}
+
+	res, err := served.GetTool("reverse_dependencies").Handler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"subject": "stock-chef", "limit": 5}}})
+	if err != nil {
+		t.Fatalf("MCP reverse_dependencies handler error = %v", err)
+	}
+	text := callToolResultText(t, res)
+	for _, want := range []string{"Status: ambiguous", "stock-chef", localGraph, localRoot, depEvalGraph, depEvalRoot, "choose an explicit corpus", "--graph"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("MCP ambiguity response missing %q; response:\n%s", want, text)
+		}
+	}
+	for _, forbidden := range []string{"LocalCaller", "DepEvalCaller", "Graph evidence:"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("MCP ambiguity response merged graph answer evidence %q; response:\n%s", forbidden, text)
+		}
+	}
+}
+
+// REQ-005 → SCN-006 → TestSCN006_MCPSymbolOnlyQueryReturnsAmbiguityForSameNameCorpora
+func TestSCN006_MCPSymbolOnlyQueryReturnsAmbiguityForSameNameCorpora(t *testing.T) {
+	// Scenario: Ambiguous stock-chef corpora require explicit disambiguation.
+	restore := serveMCPStdio
+	t.Cleanup(func() { serveMCPStdio = restore })
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	localRoot := filepath.Join(home, "work", "stock-chef")
+	depEvalRoot := filepath.Join(home, "dep-eval", "corpora", "workdirs", "stock-chef")
+	localGraph := writeStockChefSelectionRuntimeGraph(t, filepath.Join(localRoot, ".vela"), localRoot, "github.com/Syfra3/stock-chef:LocalCaller", "local_stock_chef.go")
+	depEvalGraph := writeStockChefSelectionRuntimeGraph(t, filepath.Join(depEvalRoot, ".vela"), depEvalRoot, "dep-eval:corpora/workdirs/stock-chef/DepEvalCaller", "dep_eval.go")
+	registryPath := filepath.Join(home, ".vela", "registry.json")
+	if err := os.MkdirAll(filepath.Dir(registryPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(registry) error = %v", err)
+	}
+	registryJSON := fmt.Sprintf(`{"version":1,"entries":[{"repo_root":%q,"name":"stock-chef","graph_path":%q},{"repo_root":%q,"name":"stock-chef","graph_path":%q}]}`+"\n", localRoot, localGraph, depEvalRoot, depEvalGraph)
+	if err := os.WriteFile(registryPath, []byte(registryJSON), 0o644); err != nil {
+		t.Fatalf("WriteFile(registry) error = %v", err)
+	}
+	t.Chdir(t.TempDir())
+
+	var served *mcpserver.MCPServer
+	serveMCPStdio = func(srv *mcpserver.MCPServer) error {
+		served = srv
+		return nil
+	}
+	serve := rootCmd()
+	serve.SetOut(&bytes.Buffer{})
+	serve.SetErr(&bytes.Buffer{})
+	serve.SetArgs([]string{"serve", "--mcp"})
+	if err := serve.Execute(); err != nil {
+		t.Fatalf("Execute(serve --mcp with ambiguous stock-chef registry) error = %v", err)
+	}
+	if served == nil {
+		t.Fatal("serve --mcp did not start an MCP server")
+	}
+
+	res, err := served.GetTool("reverse_dependencies").Handler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"subject": "SharedStockChefSymbol", "limit": 5}}})
+	if err != nil {
+		t.Fatalf("MCP reverse_dependencies handler error = %v", err)
+	}
+	text := callToolResultText(t, res)
+	for _, want := range []string{"Status: ambiguous", "SharedStockChefSymbol", localGraph, localRoot, depEvalGraph, depEvalRoot, "choose an explicit corpus", "--graph"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("MCP ambiguity response missing %q; response:\n%s", want, text)
+		}
+	}
+	for _, forbidden := range []string{"LocalCaller", "DepEvalCaller", "Graph evidence:"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("MCP symbol-only ambiguity response executed against one candidate %q; response:\n%s", forbidden, text)
+		}
+	}
+}
+
+// REQ-004/REQ-005 → SCN-007 → TestSCN007_MCPMissingActiveStockChefGraphDoesNotFallbackToDepEvalCorpus
+func TestSCN007_MCPMissingActiveStockChefGraphDoesNotFallbackToDepEvalCorpus(t *testing.T) {
+	// Scenario: Missing active graph does not silently fall back to dep-eval corpus.
+	restore := serveMCPStdio
+	t.Cleanup(func() { serveMCPStdio = restore })
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	depEvalRoot := filepath.Join(home, "dep-eval", "corpora", "workdirs", "stock-chef")
+	depEvalGraph := writeStockChefSelectionRuntimeGraph(t, filepath.Join(home, ".vela"), depEvalRoot, "dep-eval:corpora/workdirs/stock-chef/DepEvalCaller", "dep_eval.go")
+
+	workspace := filepath.Join(t.TempDir(), "stock-chef")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "local_stock_chef.go"), []byte("package main\n\ntype SharedStockChefSymbol struct{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(workspace)
+
+	var served *mcpserver.MCPServer
+	serveMCPStdio = func(srv *mcpserver.MCPServer) error {
+		served = srv
+		return nil
+	}
+	serve := rootCmd()
+	serve.SetOut(&bytes.Buffer{})
+	serve.SetErr(&bytes.Buffer{})
+	serve.SetArgs([]string{"serve", "--mcp"})
+	if err := serve.Execute(); err != nil {
+		t.Fatalf("Execute(serve --mcp from active stock-chef workspace with missing graph) error = %v", err)
+	}
+	if served == nil {
+		t.Fatal("serve --mcp did not start an MCP server")
+	}
+
+	res, err := served.GetTool("reverse_dependencies").Handler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"subject": "SharedStockChefSymbol", "limit": 5}}})
+	if err != nil {
+		t.Fatalf("MCP reverse_dependencies handler error = %v", err)
+	}
+	text := callToolResultText(t, res)
+	for _, want := range []string{"Status: unavailable", "active workspace graph", "missing", workspace, filepath.Join(workspace, ".vela", "graph.json"), depEvalGraph, depEvalRoot, "vela build", "choose an explicit corpus"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("MCP missing-active-graph response missing %q; response:\n%s", want, text)
+		}
+	}
+	for _, forbidden := range []string{"DepEvalCaller", "Graph evidence:"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("MCP response silently answered from dep-eval corpus evidence %q; response:\n%s", forbidden, text)
+		}
+	}
+}
+
+// REQ-004/REQ-005 → SCN-007 → TestSCN007_MCPInvalidActiveStockChefGraphDoesNotFailStartupOrFallbackToDepEvalCorpus
+func TestSCN007_MCPInvalidActiveStockChefGraphDoesNotFailStartupOrFallbackToDepEvalCorpus(t *testing.T) {
+	// Scenario: Missing active graph does not silently fall back to dep-eval corpus.
+	restore := serveMCPStdio
+	t.Cleanup(func() { serveMCPStdio = restore })
+
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	depEvalRoot := filepath.Join(home, "dep-eval", "corpora", "workdirs", "stock-chef")
+	depEvalGraph := writeStockChefSelectionRuntimeGraph(t, filepath.Join(depEvalRoot, ".vela"), depEvalRoot, "dep-eval:corpora/workdirs/stock-chef/DepEvalCaller", "dep_eval.go")
+	registryPath := filepath.Join(home, ".vela", "registry.json")
+	if err := os.MkdirAll(filepath.Dir(registryPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(registry) error = %v", err)
+	}
+	registryJSON := fmt.Sprintf(`{"version":1,"entries":[{"repo_root":%q,"name":"stock-chef","graph_path":%q}]}`+"\n", depEvalRoot, depEvalGraph)
+	if err := os.WriteFile(registryPath, []byte(registryJSON), 0o644); err != nil {
+		t.Fatalf("WriteFile(registry) error = %v", err)
+	}
+
+	workspace := filepath.Join(t.TempDir(), "stock-chef")
+	activeGraph := filepath.Join(workspace, ".vela", "graph.json")
+	if err := os.MkdirAll(filepath.Dir(activeGraph), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "local_stock_chef.go"), []byte("package main\n\ntype SharedStockChefSymbol struct{}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(activeGraph, []byte(`{"nodes":`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(workspace)
+
+	var served *mcpserver.MCPServer
+	serveMCPStdio = func(srv *mcpserver.MCPServer) error {
+		served = srv
+		return nil
+	}
+	serve := rootCmd()
+	serve.SetOut(&bytes.Buffer{})
+	serve.SetErr(&bytes.Buffer{})
+	serve.SetArgs([]string{"serve", "--mcp"})
+	if err := serve.Execute(); err != nil {
+		t.Fatalf("Execute(serve --mcp from active stock-chef workspace with invalid graph) error = %v", err)
+	}
+	if served == nil {
+		t.Fatal("serve --mcp did not start an MCP server")
+	}
+
+	res, err := served.GetTool("reverse_dependencies").Handler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"subject": "SharedStockChefSymbol", "limit": 5}}})
+	if err != nil {
+		t.Fatalf("MCP reverse_dependencies handler error = %v", err)
+	}
+	text := callToolResultText(t, res)
+	for _, want := range []string{"Status: unavailable", "active workspace graph", "invalid", workspace, activeGraph, depEvalGraph, depEvalRoot, "vela build", "choose an explicit corpus"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("MCP invalid-active-graph response missing %q; response:\n%s", want, text)
+		}
+	}
+	for _, forbidden := range []string{"DepEvalCaller", "Graph evidence:"} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("MCP response silently answered from dep-eval corpus evidence %q; response:\n%s", forbidden, text)
+		}
+	}
+}
+
+func writeRuntimeGraphForMCPSelection(t *testing.T, outDir, repoRoot string, withManifest bool) string {
+	t.Helper()
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sourcePath := filepath.Join(repoRoot, "auth.go")
+	if err := os.MkdirAll(filepath.Dir(sourcePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := []byte("package main\n\ntype AuthService struct{}\ntype Database struct{}\n")
+	if err := os.WriteFile(sourcePath, source, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	graphJSON := filepath.Join(outDir, "graph.json")
+	if err := os.WriteFile(graphJSON, []byte(`{"nodes":[],"edges":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	graph := &types.Graph{
+		Nodes: []types.Node{
+			{ID: "auth", Label: "AuthService", NodeType: "struct", SourceFile: "auth.go"},
+			{ID: "db", Label: "Database", NodeType: "struct", SourceFile: "auth.go"},
+		},
+		Edges: []types.Edge{{Source: "auth", Target: "db", Relation: "uses", Metadata: map[string]interface{}{"evidence_confidence": "extracted"}}},
+	}
+	if err := export.WriteSQLiteGraphAtomic(graph, outDir); err != nil {
+		t.Fatalf("WriteSQLiteGraphAtomic error = %v", err)
+	}
+	if withManifest {
+		manifest := types.Manifest{
+			Version:     1,
+			RepoRoot:    repoRoot,
+			GeneratedAt: time.Now().UTC(),
+			BuildMode:   "full_rebuild",
+			Files:       []types.ManifestFile{{Path: "auth.go", SHA256: hexSHA256(source)}},
+		}
+		manifestData, err := json.Marshal(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(outDir, "manifest.json"), manifestData, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return graphJSON
+}
+
+func writeStockChefSelectionRuntimeGraph(t *testing.T, outDir, repoRoot, callerID, sourceFile string) string {
+	t.Helper()
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	source := []byte("package main\n\ntype SharedStockChefSymbol struct{}\ntype LocalCaller struct{}\n")
+	if err := os.WriteFile(filepath.Join(repoRoot, sourceFile), source, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	graphJSON := filepath.Join(outDir, "graph.json")
+	if err := os.WriteFile(graphJSON, []byte(`{"nodes":[],"edges":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	graph := &types.Graph{
+		Nodes: []types.Node{
+			{ID: callerID, Label: callerID, NodeType: "struct", SourceFile: sourceFile},
+			{ID: "github.com/Syfra3/stock-chef:SharedStockChefSymbol", Label: "SharedStockChefSymbol", NodeType: "struct", SourceFile: sourceFile},
+		},
+		Edges: []types.Edge{{Source: callerID, Target: "github.com/Syfra3/stock-chef:SharedStockChefSymbol", Relation: "uses", Metadata: map[string]interface{}{"evidence_confidence": "extracted"}}},
+	}
+	if err := export.WriteSQLiteGraphAtomic(graph, outDir); err != nil {
+		t.Fatalf("WriteSQLiteGraphAtomic error = %v", err)
+	}
+	manifest := types.Manifest{
+		Version:     1,
+		RepoRoot:    repoRoot,
+		GeneratedAt: time.Now().UTC(),
+		BuildMode:   "full_rebuild",
+		Files:       []types.ManifestFile{{Path: sourceFile, SHA256: hexSHA256(source)}},
+	}
+	manifestData, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "manifest.json"), manifestData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return graphJSON
+}
+
+func writeRuntimeGraphWithSourceEvidence(t *testing.T, outDir, repoRoot string, generatedAt time.Time) string {
+	t.Helper()
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	graphJSON := filepath.Join(outDir, "graph.json")
+	if err := os.WriteFile(graphJSON, []byte(`{"nodes":[],"edges":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	graph := &types.Graph{
+		Nodes: []types.Node{
+			{ID: "auth", Label: "AuthService", NodeType: "struct", SourceFile: "auth.go"},
+			{ID: "db", Label: "Database", NodeType: "struct", SourceFile: "auth.go"},
+		},
+		Edges: []types.Edge{{Source: "auth", Target: "db", Relation: "uses", Metadata: map[string]interface{}{"evidence_confidence": "extracted"}}},
+	}
+	if err := export.WriteSQLiteGraphAtomic(graph, outDir); err != nil {
+		t.Fatalf("WriteSQLiteGraphAtomic error = %v", err)
+	}
+	manifest := types.Manifest{Version: 1, RepoRoot: repoRoot, GeneratedAt: generatedAt, BuildMode: "full_rebuild"}
+	manifestData, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(outDir, "manifest.json"), manifestData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return graphJSON
+}
+
+func callToolResultText(t *testing.T, res *mcppkg.CallToolResult) string {
+	t.Helper()
+	if res == nil || len(res.Content) == 0 {
+		t.Fatalf("expected non-empty MCP tool result")
+	}
+	text, ok := mcppkg.AsTextContent(res.Content[0])
+	if !ok {
+		t.Fatalf("expected text content in MCP tool result")
+	}
+	return text.Text
 }
 
 func assertEquivalentCoreResult(t *testing.T, adapter string, got, expected query.Result) {

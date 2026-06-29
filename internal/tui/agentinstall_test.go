@@ -35,8 +35,8 @@ func TestSCN016_TUIMainMenuExposesAgentInstallerWizard(t *testing.T) {
 	if menu.screen != screenAgentInstall {
 		t.Fatalf("screen = %v, want %v", menu.screen, screenAgentInstall)
 	}
-	if got := menu.viewAgentInstall(); !strings.Contains(got, "configure vela_explore") {
-		t.Fatalf("expected wizard to explain vela_explore setup, got %q", got)
+	if got := menu.viewAgentInstall(); !strings.Contains(got, "configure explore") {
+		t.Fatalf("expected wizard to explain explore setup, got %q", got)
 	}
 }
 
@@ -175,7 +175,7 @@ func TestSCN019_TUIInstallerConfirmsOpenCodeThroughSharedInstaller(t *testing.T)
 		t.Fatalf("installer request = %+v, want opencode /work/vela", gotReq)
 	}
 	view := model.ViewContent()
-	for _, want := range []string{"MCP config written", "instructions mention vela_explore first", ".vela/graph.db is present", "Try asking your coding agent"} {
+	for _, want := range []string{"MCP config written", "instructions mention explore first", ".vela/graph.db is present", "Try asking your coding agent"} {
 		if !strings.Contains(view, want) {
 			t.Fatalf("expected result to contain %q, got %q", want, view)
 		}
