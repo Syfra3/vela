@@ -1,86 +1,93 @@
-# Bob Judge Report — Vela v0.4 Final Gates
+# Bob Judge Report — Vela Agent Explore Runtime + TUI Installer
+
+Date: 2026-06-27
+Project: vela
+Spec: `specs/hard_spec.md`
+Feature: `features/vela-agent-explore-runtime.feature`
+Approved scenarios: `SCN-001` through `SCN-021`
+Gate source: `.uncle-bob/quality-gates.yaml`
+TDD log: `.uncle-bob/tdd-log.md`
 
 ## Verdict
 
-**pass with warnings**
+**status:** pass
+**verdict:** eligible for human review with warnings
 
-Vela v0.4 — Truth Graph with Evidence passes the active final gates defined in `.uncle-bob/quality-gates.yaml`. Scenario coverage for SCN-001 through SCN-026 is complete in the implementation marker, Gherkin contract, TDD log, and test traceability evidence.
+The active gate source points at the current spec, feature, approval marker, implementation marker, TDD log, and judge report. Required gate commands passed after adding the TUI coding-agent installer wizard slice.
 
-Warnings remain review/release notes rather than blockers: the documented full `go test ./...` fixture blocker is intentionally non-active, SCN-019 proof remains failure-path/restoration focused, and SCN-025 real-workspace smoke is a single maintainer-selected workspace with redacted persisted evidence.
+Passing gates means the change is eligible for human review; it is not a claim of semantic perfection.
 
-## Objective Gate Results
+## Gate File Audit
 
-Active gate source: `.uncle-bob/quality-gates.yaml` (`targeted-go-verification`).
+| Evidence | Result | Notes |
+|---|---:|---|
+| `.uncle-bob/quality-gates.yaml` | pass | Lists `SCN-001` through `SCN-021` and the current workflow paths. |
+| `specs/.approved` | pass | `current_workflow` points to `features/vela-agent-explore-runtime.feature` and `specs/hard_spec.md` with `SCN-001` through `SCN-021`. |
+| `specs/.implementation-complete` | pass | Exists, marks `implemented: true`, and lists `SCN-001` through `SCN-021`. |
+| Feature file | pass | `features/vela-agent-explore-runtime.feature` contains tags `@SCN-001` through `@SCN-021`. |
+| TDD log | pass | Includes current workflow evidence for `SCN-001` through `SCN-021`. |
 
-| Gate command | Result |
-| --- | --- |
-| `go test ./cmd/... ./internal/... ./pkg/... ./scripts ./tests/fixtures/extract -count=1` | **pass** |
-| `go vet ./cmd/... ./internal/... ./pkg/... ./scripts ./tests/fixtures/extract` | **pass** |
-| `go mod tidy -diff` | **pass** |
-| `go test ./cmd/vela -run 'TestSCN025_' -count=1` | **pass** |
+## Gates
 
-Known non-active blocker remains documented in the gate config: `go test ./... -count=1` fails on malformed detect fixture packages containing empty `.go` files. This was not treated as a final release gate because `.uncle-bob/quality-gates.yaml` explicitly excludes it.
+Active gate: `vela-agent-explore-runtime`
 
-## Scenario Coverage Status
+| Command | Required | Result |
+|---|---:|---:|
+| `go test ./... -count=1` | yes | pass |
+| `make lint` | yes | pass (`0 issues.`) |
+| `make fmt-check` | yes | pass |
 
-- `specs/.implementation-complete` lists **SCN-001 through SCN-026** exactly.
-- `features/vela-v0.4-truth-graph.feature` defines **SCN-001 through SCN-026**.
-- `.uncle-bob/tdd-log.md` records RED/GREEN/REFACTOR evidence for implemented scenarios, including SCN-025 real-workspace smoke.
-- Test traceability search found `TestSCN<NNN>_` coverage for every scenario SCN-001 through SCN-026.
+No additional configured gate command was present.
 
-Scenario traceability: **100%**.
+## Scenario Coverage
 
-## Semantic Risk Inspection
+| Scenario | Feature | Spec/TDD evidence | Test evidence found |
+|---|---:|---:|---|
+| SCN-001 | pass | pass | `TestSCN001_CLIExploreAnswersKnownStructuralQuestionWithStableSections` |
+| SCN-002 | pass | pass | `TestSCN002_MCPExploreUsesSharedStructuredEnvelope` |
+| SCN-003 | pass | pass | `TestSCN003_CLIExploreIncludesRequiredSectionsWhenNotRelevant` |
+| SCN-004 | pass | pass | `TestSCN004_PlannerRoutesCommonIntentFamiliesToExistingPrimitives` |
+| SCN-005 | pass | pass | `TestSCN005_AmbiguousExplainExploreQueryReturnsCandidates` |
+| SCN-006 | pass | pass | `TestSCN006_CLIMissingRuntimeDBFailsWithActionableDiagnostics` |
+| SCN-007 | pass | pass | `TestSCN007_MCPExploreReportsWarmingDuringConnectTimeCatchup` |
+| SCN-008 | pass | pass | `TestSCN008_MCPFirstExploreCallReturnsFreshWhenRuntimeDBAlreadyFresh` |
+| SCN-009 | pass | pass | `TestSCN009_CLIExploreNamesKnownStaleAffectedFiles` |
+| SCN-010 | pass | pass | `TestSCN010_CLIExploreSeparatesLayeredEvidenceLabels` |
+| SCN-011 | pass | pass | `TestSCN011_NormalStructuralExploreOmitsMemoryEvidenceByDefault` |
+| SCN-012 | pass | pass | `TestSCN012_DecisionHistoryExploreIncludesSeparateMemoryEvidence` |
+| SCN-013 | pass | pass | `TestSCN013_MCPAgentInstructionsPreferVelaExploreFirstWithoutAutoSyncPromise` |
+| SCN-014 | pass | pass | `TestSCN014_SpecializedCLIMCPToolsRemainAvailableWithExploreAsDefaultSurface` |
+| SCN-015 | pass | pass | `TestSCN015_CLIExploreDefersWatcherAndDebounceForActiveSessionFreshness` |
+| SCN-016 | pass | pass | `TestSCN016_TUIMainMenuExposesAgentInstallerWizard` |
+| SCN-017 | pass | pass | `TestSCN017_TUIInstallerListsSupportedAndUnsupportedTargetsSafely` |
+| SCN-018 | pass | pass | `TestSCN018_TUIInstallerPreviewsFilesBeforeWriting` |
+| SCN-019 | pass | pass | `TestSCN019_TUIInstallerConfirmsOpenCodeThroughSharedInstaller` |
+| SCN-020 | pass | pass | `TestSCN020_TUIInstallerConfirmsClaudeThroughSharedInstaller` |
+| SCN-021 | pass | pass | `TestSCN021_TUIInstallerCancelExitsWithoutWriting` |
 
-- **SCN-019 success path / generated artifact proof:** still narrow, as previously warned. Evidence strongly proves failed update rollback/preservation behavior; it does not add byte-for-byte proof for every generated runtime artifact. This is accepted as a warning under the current final gate config, not a blocker.
-- **Full test known blocker:** documented as non-active in `.uncle-bob/quality-gates.yaml`; active targeted gate passes.
-- **External smoke determinism:** SCN-025 persisted report proves one maintainer-selected real workspace with redaction and a gated harness. It is release smoke coverage, not exhaustive deterministic corpus validation.
-- **Stale diagnostics consistency:** TDD evidence covers SCN-010, SCN-018, and SCN-026; no final-gate inconsistency was found.
-- **Redaction/secrets:** `reports/` and `.uncle-bob/` contain no raw real-workspace path. Secret-pattern matches in persisted reports/logs are benign prose in the redaction checklist, not secret values.
+Scenario traceability for the requested approved list is **100%**. Existing older feature files also contain `SCN-*` labels; this review scoped evidence to `features/vela-agent-explore-runtime.feature`.
 
-## Findings by Severity
+## Diff / Evidence Audit
 
-### CRITICAL
+Objective risk flags for human review:
 
-- None.
+- Working-tree evidence is present, but ignored Bob files (`.uncle-bob/*`, `specs/.approved`, `specs/.implementation-complete`) need intentional force-add or exclusion before PR.
+- The TUI wizard now writes local coding-agent config through the shared installer backend. Human review should verify the OpenCode and Claude Code paths are acceptable UX defaults.
+- The branch contains only the current workflow/code changes at this point, but reviewers should still inspect untracked/ignored workflow artifacts before committing.
 
-### HIGH
-
-- None.
-
-### MEDIUM
-
-- None.
-
-### LOW
-
-- **SCN-019 proof remains focused on rollback/failure preservation.** Not a blocker for the active final gates, but future hardening should add success-path stale-to-fresh proof and direct restoration assertions for `.vela/graph.db` and `.vela/manifest.json`.
-- **SCN-025 real workspace smoke is intentionally narrow.** The persisted report proves one real workspace and one evidence-bearing subject; broader corpus coverage remains future release hardening.
-- **Full `go test ./...` remains unavailable as a gate.** The reason is documented and scoped to malformed detect fixtures, but cleaning those fixtures later would allow re-promoting the full suite to an active gate.
-
-## Release Blockers
-
-- None under the active final gate definition.
-
-## Recommended Next Action
-
-Proceed with release/archive for Vela v0.4, carrying the LOW warnings as post-release or next-hardening tasks.
+## Judge Decision
 
 ```yaml
 judge_decision:
-  status: pass_with_warnings
+  status: pass
   reason: none
   scenario_traceability: "100%"
   tests_passing: true
-  changed_line_coverage: null
-  mutation_score: null
-  surviving_mutations: []
-  architecture_violations: 0
-  complexity_violations: 0
-  unauthorized_files: 0
-  next: feature_complete
+  configured_gates_passing: true
+  active_gate: vela-agent-explore-runtime
+  failing_gates: []
+  unauthorized_files: warning_only_not_gate_blocking
+  next: human_review
   remediation: |
-    No release blockers under the active final gate definition. Carry SCN-019 proof breadth, SCN-025 smoke breadth, and the known full-suite fixture blocker as LOW follow-up hardening items.
+    No Bob gate remediation required. Before merge, human review should confirm ignored workflow artifacts are intentionally included or excluded and inspect the TUI installer UX.
 ```
-
-skill_resolution: none

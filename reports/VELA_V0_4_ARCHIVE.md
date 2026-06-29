@@ -26,7 +26,7 @@ SCN-001 through SCN-026 are implemented and traceable across:
 
 - `specs/.implementation-complete`
 - `features/vela-v0.4-truth-graph.feature`
-- `.uncle-bob/tdd-log.md`
+- `N/A` (legacy workflow artifacts were pruned)
 - `reports/judge_report.md`
 
 Scenario coverage is recorded as 100% in the final judge report. The implemented scenario set covers:
@@ -43,7 +43,7 @@ Scenario coverage is recorded as 100% in the final judge report. The implemented
 
 ## Gate Results
 
-Active gate source: `.uncle-bob/quality-gates.yaml` (`targeted-go-verification`).
+Active gate source: `N/A` (legacy gate file pruned).
 
 | Gate command | Result |
 | --- | --- |
@@ -91,8 +91,8 @@ Recommended post-release or next-workflow tasks:
 - `reports/judge_report.md` - Final Bob review verdict, active gate results, scenario traceability, warnings, and release blocker status.
 - `reports/SCN-025-real-workspace-smoke.md` - Redacted real-workspace smoke evidence using `<REAL_WORKSPACE>`.
 - `specs/.implementation-complete` - Implementation marker for SCN-001 through SCN-026.
-- `.uncle-bob/quality-gates.yaml` - Active final gate definition and known non-gate blocker.
-- `.uncle-bob/tdd-log.md` - RED/GREEN/REFACTOR evidence for implemented scenarios.
+- `N/A` (legacy gate file pruned) - Active final gate definition and known non-gate blocker.
+- `N/A` (legacy workflow artifacts pruned) - RED/GREEN/REFACTOR evidence for implemented scenarios.
 - `specs/vela-v0.4-hard-spec.md` - Approved hard spec and requirement contract.
 - `features/vela-v0.4-truth-graph.feature` - Gherkin scenario contract.
 - `docs/VELA_V0_4_TECHNICAL_DESIGN.md` - Technical design and scenario mapping.
