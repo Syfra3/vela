@@ -93,30 +93,49 @@ func (e *Engine) RenderLookup(term string, limit int) string {
 // RenderExplore resolves broad natural language to candidate graph subjects and
 // cites only graph relationships as proof for the returned context.
 func (e *Engine) RenderExplore(request string, limit int) string {
+	if isActiveSessionFreshnessQuestion(request) {
+		return e.renderActiveSessionFreshnessAnswer()
+	}
 	if routed := e.renderRouteFirstExplore(request, limit); routed != "" {
 		return routed
 	}
 
+	intent := exploreIntent(request)
+	memoryRequested := exploreRequestsMemory(request)
 	results := e.Lookup(request, limit)
 	if len(results) == 0 {
 		return fmt.Sprintf("No graph-backed candidates found for %q.", request)
 	}
-	if len(results) > 1 {
+	if len(results) > 1 && intent != "path" && intent != "memory" {
 		return renderAmbiguousExplore(request, results)
 	}
 
-	lines := []string{fmt.Sprintf("Resolved candidates for %q:", request), ""}
+	lines := []string{
+		"Answer",
+		fmt.Sprintf("Resolved candidates for %q:", request),
+		"",
+	}
 	candidateIDs := make(map[string]struct{}, len(results))
+	sourceFiles := make([]string, 0, len(results))
 	for i, candidate := range results {
 		node := candidate.Node
 		candidateIDs[node.ID] = struct{}{}
 		lines = append(lines, fmt.Sprintf("%d. %s", i+1, describeNode(node)))
 		lines = append(lines, fmt.Sprintf("   id: %s", node.ID))
+		if strings.TrimSpace(node.SourceFile) != "" {
+			sourceFiles = append(sourceFiles, node.SourceFile)
+		}
 	}
+	lines = append(lines, fmt.Sprintf("Interpreted intent: %s", intent))
+	lines = append(lines, fmt.Sprintf("Derived primitive: %s", explorePrimitive(intent)))
 
 	facts := make([]string, 0)
+	layeredFacts := map[string][]string{}
 	seen := map[string]struct{}{}
 	for _, edge := range e.graph.Edges {
+		if types.EdgeEvidence(edge).Layer == types.LayerMemory && !memoryRequested {
+			continue
+		}
 		if _, ok := candidateIDs[edge.Source]; !ok {
 			if _, ok := candidateIDs[edge.Target]; !ok {
 				continue
@@ -128,9 +147,30 @@ func (e *Engine) RenderExplore(request string, limit int) string {
 		}
 		seen[fact] = struct{}{}
 		facts = append(facts, fact)
+		if label := evidenceLayerLabel(edge); label != "" {
+			layeredFacts[label] = append(layeredFacts[label], fact)
+		}
 	}
 
-	lines = append(lines, "", "Graph facts used:")
+	freshness := e.Freshness()
+	lines = append(lines, "", "Freshness")
+	lines = append(lines, fmt.Sprintf("  status: %s", freshness.Status))
+	if len(freshness.StaleFiles) > 0 {
+		lines = append(lines, fmt.Sprintf("  affected files: %s", strings.Join(freshness.StaleFiles, ", ")))
+		lines = append(lines, "  warning: exact latest source may require a direct file read")
+	}
+	if len(freshness.RecommendedActions) > 0 {
+		lines = append(lines, fmt.Sprintf("  recommended: %s", strings.Join(freshness.RecommendedActions, ", ")))
+	}
+	lines = append(lines, "", "Relevant source")
+	if len(sourceFiles) == 0 {
+		lines = append(lines, "  none available")
+	} else {
+		for _, file := range sourceFiles {
+			lines = append(lines, "  "+file)
+		}
+	}
+	lines = append(lines, "", "Paths and relationships", "Graph facts used:")
 	if len(facts) == 0 {
 		lines = append(lines, "  none yet; choose a candidate and run a structural query")
 	} else {
@@ -138,8 +178,161 @@ func (e *Engine) RenderExplore(request string, limit int) string {
 			lines = append(lines, "  "+fact)
 		}
 	}
-	lines = append(lines, "", "Free-text matching is candidate discovery only, not proof.")
+	lines = append(lines, "", "Impact radius", fmt.Sprintf("  %s", exploreImpactLimit(intent)))
+	lines = append(lines, "", "Layered evidence")
+	if len(facts) == 0 {
+		lines = append(lines, "  no graph-backed evidence available yet")
+	} else {
+		lines = append(lines, "  graph-backed evidence: layered labels below")
+		for _, label := range []string{"repo_code", "workspace", "contract", "memory", "resource"} {
+			items := layeredFacts[label]
+			if len(items) == 0 {
+				if label == "memory" && !memoryRequested {
+					lines = append(lines, "  memory evidence: not requested")
+				}
+				if label == "resource" {
+					lines = append(lines, "  resource evidence: unavailable")
+				}
+				continue
+			}
+			lines = append(lines, "  "+label+" evidence:")
+			for _, fact := range items {
+				lines = append(lines, "    "+fact)
+			}
+			if label == "contract" {
+				lines = append(lines, "    Contract evidence is public-interface or behavior-contract context, not inferred executable code truth.")
+			}
+		}
+	}
+	lines = append(lines, "", "Confidence and limits", "  Free-text matching is candidate discovery only, not proof.")
+	lines = append(lines, "  Source snippets are unavailable from this graph fact; missing graph families are reported as limits instead of omitted.")
+	lines = append(lines, "", "Suggested next queries")
+	if len(results) > 0 {
+		best := results[0].Node.Label
+		if strings.TrimSpace(best) == "" {
+			best = results[0].Node.ID
+		}
+		lines = append(lines, fmt.Sprintf("  vela search \"explain %s\"", best))
+		lines = append(lines, fmt.Sprintf("  vela search \"who uses %s\"", best))
+	}
 	return strings.Join(lines, "\n")
+}
+
+func isActiveSessionFreshnessQuestion(request string) bool {
+	request = strings.ToLower(strings.TrimSpace(request))
+	return strings.Contains(request, "active-session") && strings.Contains(request, "freshness")
+}
+
+func (e *Engine) renderActiveSessionFreshnessAnswer() string {
+	freshness := e.Freshness()
+	lines := []string{
+		"Active-session freshness",
+		fmt.Sprintf("  known runtime freshness state: %s", freshness.Status),
+		"  MCP-session file watching is deferred to a later phase.",
+		"  debounced auto-sync is deferred to a later phase.",
+		"  Vela does not claim active-session watcher or debounced auto-sync is implemented by this Phase 1 shell.",
+	}
+	if len(freshness.StaleFiles) > 0 {
+		lines = append(lines, fmt.Sprintf("  affected files: %s", strings.Join(freshness.StaleFiles, ", ")))
+	}
+	actions := append([]string{}, freshness.RecommendedActions...)
+	actions = appendMissingActions(actions, "vela status")
+	if len(actions) == 0 {
+		actions = []string{"vela update", "vela build", "vela status"}
+	}
+	lines = append(lines, fmt.Sprintf("  next actions: %s", strings.Join(actions, ", ")))
+	return strings.Join(lines, "\n")
+}
+
+func appendMissingActions(actions []string, required ...string) []string {
+	seen := make(map[string]struct{}, len(actions))
+	for _, action := range actions {
+		seen[action] = struct{}{}
+	}
+	for _, action := range required {
+		if _, ok := seen[action]; ok {
+			continue
+		}
+		actions = append(actions, action)
+	}
+	return actions
+}
+
+func exploreRequestsMemory(request string) bool {
+	request = strings.ToLower(strings.TrimSpace(request))
+	for _, marker := range []string{"what did we decide", "why did we", "previous work", "prior work", "history", "decision"} {
+		if strings.Contains(request, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func evidenceLayerLabel(edge types.Edge) string {
+	switch types.EdgeEvidence(edge).Layer {
+	case types.LayerRepo:
+		return "repo_code"
+	case types.LayerWorkspace:
+		return "workspace"
+	case types.LayerContract:
+		return "contract"
+	case types.LayerMemory:
+		return "memory"
+	case types.Layer("resource"):
+		return "resource"
+	default:
+		return ""
+	}
+}
+
+func exploreIntent(request string) string {
+	request = strings.TrimSpace(strings.ToLower(request))
+	if exploreRequestsMemory(request) {
+		return "memory"
+	}
+	if strings.HasPrefix(request, "explain ") {
+		return "explain"
+	}
+	if strings.HasPrefix(request, "who uses ") || strings.HasPrefix(request, "what uses ") || strings.HasPrefix(request, "where is ") && strings.Contains(request, " used") {
+		return "usage"
+	}
+	if strings.HasPrefix(request, "what does ") && (strings.Contains(request, " depend on") || strings.Contains(request, " depends on")) {
+		return "dependency"
+	}
+	if strings.HasPrefix(request, "how does ") && strings.Contains(request, " reach ") {
+		return "path"
+	}
+	if strings.HasPrefix(request, "what breaks if ") || strings.Contains(request, " impact ") {
+		return "impact"
+	}
+	return "lookup"
+}
+
+func explorePrimitive(intent string) string {
+	switch intent {
+	case "explain":
+		return "lookup/explain"
+	case "usage":
+		return "reverse dependency / who uses"
+	case "dependency":
+		return "dependency / callee neighborhood"
+	case "path":
+		return "path"
+	case "impact":
+		return "impact / bounded reverse reach"
+	default:
+		return "lookup"
+	}
+}
+
+func exploreImpactLimit(intent string) string {
+	if intent == "usage" {
+		return "not relevant for this usage result"
+	}
+	if intent == "impact" {
+		return "bounded reverse reach is reported from graph facts when available"
+	}
+	return "not calculated for this explain result"
 }
 
 func (e *Engine) renderRouteFirstExplore(request string, limit int) string {
@@ -240,7 +433,7 @@ func (e *Engine) deepLookupCandidates(request string, limit int) []LookupCandida
 }
 
 func renderAmbiguousExplore(request string, results []LookupCandidate) string {
-	lines := []string{fmt.Sprintf("Ambiguous explore query for %q", request), "", "Candidate nodes:"}
+	lines := []string{"Status: ambiguous", fmt.Sprintf("Ambiguous explore query for %q", request), "", "Candidate nodes:"}
 	for i, candidate := range results {
 		node := candidate.Node
 		lines = append(lines, fmt.Sprintf("%d. %s", i+1, describeNode(node)))
@@ -248,6 +441,14 @@ func renderAmbiguousExplore(request string, results []LookupCandidate) string {
 		if file := strings.TrimSpace(node.SourceFile); file != "" {
 			lines = append(lines, fmt.Sprintf("   file: %s", file))
 		}
+	}
+	lines = append(lines, "", "Suggested exact follow-up queries:")
+	for _, candidate := range results {
+		label := strings.TrimSpace(candidate.Node.Label)
+		if label == "" {
+			label = candidate.Node.ID
+		}
+		lines = append(lines, fmt.Sprintf("  vela explore \"explain %s\"", label))
 	}
 	lines = append(lines, "", fmt.Sprintf("Refine the request or run `vela lookup %q` before asking for a strong graph claim.", request))
 	return strings.Join(lines, "\n")

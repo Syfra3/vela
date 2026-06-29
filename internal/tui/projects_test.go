@@ -53,7 +53,7 @@ func TestDeleteTrackedProjectsRemovesGraphNodesAndCacheEntries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("deleteTrackedProjects() error = %v", err)
 	}
-	if message != "Removed 1 tracked project(s)." {
+	if message != "Purged index for alpha." {
 		t.Fatalf("message = %q", message)
 	}
 
@@ -110,8 +110,13 @@ func TestProjectsModelMarksAndStartsActions(t *testing.T) {
 
 	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
 	model = updated.(ProjectsModel)
+	if cmd != nil || !model.confirmingPurge {
+		t.Fatal("expected delete action to wait for destructive confirmation")
+	}
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(ProjectsModel)
 	if cmd == nil || !model.running {
-		t.Fatal("expected delete command and running state")
+		t.Fatal("expected confirmed delete command and running state")
 	}
 
 	model.running = false
@@ -206,6 +211,84 @@ func TestProjectsModelStartsGraphStatusForSelectedProject(t *testing.T) {
 	}
 }
 
+// REQ-002/REQ-004 → SCN-003 → TestSCN003_ProjectsModelShowsSelectedProjectQueryResults
+func TestSCN003_ProjectsModelShowsSelectedProjectQueryResults(t *testing.T) {
+	// Scenario: User queries the selected project's graph from the TUI.
+	original := runTrackedProjectQueryFunc
+	t.Cleanup(func() { runTrackedProjectQueryFunc = original })
+	runTrackedProjectQueryFunc = func(project trackedProject, query string) (string, error) {
+		if project.Name != "alpha" || project.GraphPath != "/work/alpha/.vela/graph.json" {
+			t.Fatalf("queried project = %+v, want alpha graph", project)
+		}
+		if query != "explain AuthService" {
+			t.Fatalf("query = %q, want explain AuthService", query)
+		}
+		return "AuthService details", nil
+	}
+
+	model := ProjectsModel{
+		projects: []trackedProject{{Name: "alpha", NodeID: "/work/alpha", Path: "/work/alpha", GraphPath: "/work/alpha/.vela/graph.json"}},
+		selected: map[string]bool{},
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	model = updated.(ProjectsModel)
+	for _, r := range "explain AuthService" {
+		updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		model = updated.(ProjectsModel)
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(ProjectsModel)
+
+	view := model.ViewContent()
+	for _, want := range []string{"Query results for alpha", "source: alpha", "AuthService details"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected %q in query view, got %q", want, view)
+		}
+	}
+}
+
+// REQ-002/REQ-003 → SCN-004 → TestSCN004_ProjectsModelReportsUnreadableGraphRecoverably
+func TestSCN004_ProjectsModelReportsUnreadableGraphRecoverably(t *testing.T) {
+	// Scenario: TUI query shows recoverable status when graph is unavailable.
+	original := runTrackedProjectQueryFunc
+	t.Cleanup(func() { runTrackedProjectQueryFunc = original })
+	runTrackedProjectQueryFunc = func(project trackedProject, query string) (string, error) {
+		if project.Name != "alpha" {
+			t.Fatalf("queried project = %+v, want alpha", project)
+		}
+		return "", os.ErrPermission
+	}
+
+	model := ProjectsModel{
+		projects:   []trackedProject{{Name: "alpha", NodeID: "/work/alpha", Path: "/work/alpha", GraphPath: "/work/alpha/.vela/graph.json"}},
+		selected:   map[string]bool{},
+		termHeight: 40,
+	}
+
+	updated, _ := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
+	model = updated.(ProjectsModel)
+	for _, r := range "explain AuthService" {
+		updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		model = updated.(ProjectsModel)
+	}
+	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(ProjectsModel)
+
+	view := model.ViewContent()
+	for _, want := range []string{"selected graph is unreadable", "alpha", "permission denied"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected %q in recoverable query error view, got %q", want, view)
+		}
+	}
+	if model.quitting || model.querying {
+		t.Fatalf("model state after unreadable graph = quitting:%v querying:%v, want open for another action", model.quitting, model.querying)
+	}
+	if !strings.Contains(model.FooterHelp(), "q query graph") {
+		t.Fatalf("expected footer to remain on project actions, got %q", model.FooterHelp())
+	}
+}
+
 func TestProjectsModelGraphStatusRequiresTrackedGraph(t *testing.T) {
 	t.Parallel()
 
@@ -224,6 +307,182 @@ func TestProjectsModelGraphStatusRequiresTrackedGraph(t *testing.T) {
 	}
 	if _, ok := model.ConsumeGraphStatusPath(); ok {
 		t.Fatal("did not expect graph status path when graph is missing")
+	}
+}
+
+// REQ-004 → SCN-006 → TestSCN006_ProjectsModelDisambiguatesDuplicateProjectNames
+func TestSCN006_ProjectsModelDisambiguatesDuplicateProjectNames(t *testing.T) {
+	// Scenario: TUI disambiguates indexed projects with the same display name.
+	model := ProjectsModel{
+		projects: []trackedProject{
+			{Name: "api", NodeID: "registry:api:/work/services/api", Path: "/work/services/api"},
+			{Name: "api", NodeID: "registry:api:remote-only", Path: ""},
+		},
+		selected:   map[string]bool{},
+		termHeight: 24,
+	}
+
+	view := model.ViewContent()
+	if strings.Count(view, "api") < 2 {
+		t.Fatalf("expected both duplicate projects to be shown, got %q", view)
+	}
+	for _, want := range []string{"/work/services/api", "id: registry:api:remote-only"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected duplicate project distinguisher %q in view, got %q", want, view)
+		}
+	}
+}
+
+// REQ-005/REQ-012 → SCN-007 → TestSCN007_ProjectsModelCancelsPerProjectPurge
+func TestSCN007_ProjectsModelCancelsPerProjectPurge(t *testing.T) {
+	// Scenario: User cancels per-project purge in the TUI.
+	original := deleteTrackedProjectsFunc
+	t.Cleanup(func() { deleteTrackedProjectsFunc = original })
+	deleteTrackedProjectsFunc = func(string, []trackedProject) (string, error) {
+		t.Fatal("deleteTrackedProjectsFunc must not run when destructive confirmation is canceled")
+		return "", nil
+	}
+
+	model := ProjectsModel{
+		graphPath: "/tmp/registry.json",
+		projects: []trackedProject{
+			{Name: "alpha", NodeID: "/work/alpha", Path: "/work/alpha", GraphPath: "/work/alpha/.vela/graph.db"},
+			{Name: "beta", NodeID: "/work/beta", Path: "/work/beta", GraphPath: "/work/beta/.vela/graph.db"},
+		},
+		selected: map[string]bool{},
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	model = updated.(ProjectsModel)
+	if cmd != nil || !model.confirmingPurge {
+		t.Fatalf("expected purge to wait for destructive confirmation, confirming:%v cmd:%v", model.confirmingPurge, cmd != nil)
+	}
+	if !strings.Contains(model.ViewContent(), "Confirm destructive purge for alpha") {
+		t.Fatalf("expected confirmation to name alpha, got %q", model.ViewContent())
+	}
+
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	model = updated.(ProjectsModel)
+	if cmd != nil || model.confirmingPurge || model.running {
+		t.Fatalf("cancel state = confirming:%v running:%v cmd:%v, want no purge", model.confirmingPurge, model.running, cmd != nil)
+	}
+	if len(model.projects) != 2 || model.projects[0].Name != "alpha" || model.projects[1].Name != "beta" {
+		t.Fatalf("projects after cancel = %+v, want alpha and beta still indexed", model.projects)
+	}
+	if !strings.Contains(model.message, "Purge canceled") {
+		t.Fatalf("cancel message = %q, want purge canceled", model.message)
+	}
+}
+
+// REQ-005/REQ-012 → SCN-008 → TestSCN008_ProjectsModelConfirmsPerProjectPurge
+func TestSCN008_ProjectsModelConfirmsPerProjectPurge(t *testing.T) {
+	// Scenario: User confirms per-project purge in the TUI.
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	alphaGraphPath := filepath.Join(home, "alpha-output", "graph.json")
+	betaGraphPath := filepath.Join(home, "beta-output", "graph.json")
+	registryPath := writePurgeProjectsRegistry(t, home, alphaGraphPath, betaGraphPath)
+
+	model := ProjectsModel{
+		graphPath:  registryPath,
+		termHeight: 40,
+		projects: []trackedProject{
+			{Name: "alpha", NodeID: "/work/alpha", Path: "/work/alpha", GraphPath: alphaGraphPath},
+			{Name: "beta", NodeID: "/work/beta", Path: "/work/beta", GraphPath: betaGraphPath},
+		},
+		selected: map[string]bool{},
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	model = updated.(ProjectsModel)
+	if cmd != nil || !model.confirmingPurge {
+		t.Fatalf("expected purge confirmation before deleting, confirming:%v cmd:%v", model.confirmingPurge, cmd != nil)
+	}
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(ProjectsModel)
+	if cmd == nil || !model.running {
+		t.Fatalf("expected confirmed purge command, running:%v cmd:%v", model.running, cmd != nil)
+	}
+	actionMsg, ok := cmd().(projectsActionMsg)
+	if !ok {
+		t.Fatalf("purge command message = %T, want projectsActionMsg", cmd())
+	}
+	updated, _ = model.Update(actionMsg)
+	model = updated.(ProjectsModel)
+	if !strings.Contains(model.ViewContent(), "Purged index for alpha") {
+		t.Fatalf("view = %q, want purge result for alpha", model.ViewContent())
+	}
+
+	entries, err := registry.Load()
+	if err != nil {
+		t.Fatalf("registry.Load() error = %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name != "beta" {
+		t.Fatalf("entries after alpha purge = %+v, want beta only", entries)
+	}
+	if _, err := os.Stat(alphaGraphPath); !os.IsNotExist(err) {
+		t.Fatalf("alpha graph should be deleted, stat err = %v", err)
+	}
+	if _, err := os.Stat(betaGraphPath); err != nil {
+		t.Fatalf("beta graph should remain indexed, stat err = %v", err)
+	}
+}
+
+// REQ-005/REQ-012 → SCN-009 → TestSCN009_ProjectsModelConfirmsAllProjectsPurge
+func TestSCN009_ProjectsModelConfirmsAllProjectsPurge(t *testing.T) {
+	// Scenario: User confirms all-projects purge in the TUI.
+	original := deleteTrackedProjectsFunc
+	t.Cleanup(func() { deleteTrackedProjectsFunc = original })
+
+	var attempted []trackedProject
+	deleteTrackedProjectsFunc = func(_ string, projects []trackedProject) (string, error) {
+		attempted = append([]trackedProject(nil), projects...)
+		return "Purged index for alpha.\nFailed to purge beta: permission denied", os.ErrPermission
+	}
+
+	model := ProjectsModel{
+		graphPath:    "/tmp/registry.json",
+		termHeight:   40,
+		termWidth:    100,
+		scrollOffset: 3,
+		projects: []trackedProject{
+			{Name: "alpha", NodeID: "/work/alpha", Path: "/work/alpha", GraphPath: "/work/alpha/.vela/graph.db"},
+			{Name: "beta", NodeID: "/work/beta", Path: "/work/beta", GraphPath: "/work/beta/.vela/graph.db"},
+		},
+		selected: map[string]bool{},
+	}
+
+	updated, cmd := model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'D'}})
+	model = updated.(ProjectsModel)
+	if cmd != nil || !model.confirmingPurge {
+		t.Fatalf("expected all-projects purge to wait for destructive confirmation, confirming:%v cmd:%v", model.confirmingPurge, cmd != nil)
+	}
+	view := model.ViewContent()
+	for _, want := range []string{"Confirm destructive purge for all tracked projects", "alpha", "beta"} {
+		if !strings.Contains(view, want) {
+			t.Fatalf("expected confirmation view to contain %q, got %q", want, view)
+		}
+	}
+
+	updated, cmd = model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = updated.(ProjectsModel)
+	if cmd == nil || !model.running {
+		t.Fatalf("expected confirmed all-projects purge command, running:%v cmd:%v", model.running, cmd != nil)
+	}
+	actionMsg, ok := cmd().(projectsActionMsg)
+	if !ok {
+		t.Fatalf("purge command message = %T, want projectsActionMsg", cmd())
+	}
+	updated, _ = model.Update(actionMsg)
+	model = updated.(ProjectsModel)
+	if len(attempted) != 2 || attempted[0].Name != "alpha" || attempted[1].Name != "beta" {
+		t.Fatalf("attempted projects = %+v, want alpha and beta", attempted)
+	}
+	resultView := model.ViewContent()
+	for _, want := range []string{"Purged index for alpha", "Failed to purge beta"} {
+		if !strings.Contains(resultView, want) {
+			t.Fatalf("expected result view to contain %q, got %q", want, resultView)
+		}
 	}
 }
 
@@ -284,7 +543,7 @@ func TestMenuModelProjectsScreenUsesCurrentTerminalSize(t *testing.T) {
 	menu := NewMenuModel()
 	menu.termWidth = 91
 	menu.termHeight = 17
-	menu.cursor = 3
+	menu.cursor = 4
 
 	updated, _ := menu.handleMenuSelect()
 	menu = updated.(MenuModel)
@@ -354,6 +613,39 @@ func writeProjectsRegistry(t *testing.T, home string) string {
 		Entries: []registry.Entry{
 			{Name: "alpha", RepoRoot: "/work/alpha", GraphPath: filepath.Join(alphaOutDir, "graph.json"), ManifestPath: filepath.Join(alphaOutDir, "manifest.json"), ReportPath: filepath.Join(alphaOutDir, "GRAPH_REPORT.md")},
 			{Name: "vela", RepoRoot: "/work/vela", Remote: "https://github.com/org/vela.git", GraphPath: filepath.Join(velaOutDir, "graph.json"), ManifestPath: filepath.Join(velaOutDir, "manifest.json"), ReportPath: filepath.Join(velaOutDir, "GRAPH_REPORT.md")},
+		},
+	}, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal registry: %v", err)
+	}
+	if err := os.WriteFile(registryPath, append(data, '\n'), 0o644); err != nil {
+		t.Fatalf("write registry: %v", err)
+	}
+	return registryPath
+}
+
+func writePurgeProjectsRegistry(t *testing.T, home, alphaGraphPath, betaGraphPath string) string {
+	t.Helper()
+	for _, path := range []string{alphaGraphPath, betaGraphPath} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatalf("mkdir graph dir: %v", err)
+		}
+		if err := os.WriteFile(path, []byte("{}"), 0o644); err != nil {
+			t.Fatalf("write graph: %v", err)
+		}
+	}
+	registryPath := filepath.Join(home, ".vela", "registry.json")
+	if err := os.MkdirAll(filepath.Dir(registryPath), 0o755); err != nil {
+		t.Fatalf("mkdir registry dir: %v", err)
+	}
+	data, err := json.MarshalIndent(struct {
+		Version int              `json:"version"`
+		Entries []registry.Entry `json:"entries"`
+	}{
+		Version: 1,
+		Entries: []registry.Entry{
+			{Name: "alpha", RepoRoot: "/work/alpha", GraphPath: alphaGraphPath},
+			{Name: "beta", RepoRoot: "/work/beta", GraphPath: betaGraphPath},
 		},
 	}, "", "  ")
 	if err != nil {

@@ -97,7 +97,7 @@ func (e *Engine) collectReachability(subjectID string, limit int, direction edge
 			}
 			visited[nextID] = true
 			queue = append(queue, nextID)
-			results = append(results, fmt.Sprintf("%s via %s", e.describeRef(nextID), edge.Relation))
+			results = append(results, e.formatReachabilityEdge(nextID, edge))
 			if len(results) >= limit {
 				break
 			}
@@ -123,7 +123,7 @@ func (e *Engine) collectFileReachability(subjectID string, limit int, direction 
 		candidates = append(candidates, reachabilityCandidate{
 			id:    nextID,
 			edge:  edge,
-			label: fmt.Sprintf("%s via %s", e.describeRef(nextID), edge.Relation),
+			label: e.formatReachabilityEdge(nextID, edge),
 			score: fileReachabilityScore(nextID, edge, e.nodeByID),
 		})
 	}
@@ -226,13 +226,59 @@ func (e *Engine) collectImpact(subjectID string, limit int) []string {
 			continue
 		}
 		seen[node.ID] = true
-		results = append(results, fmt.Sprintf("%s via %s", describeNode(node), pathText))
+		line := fmt.Sprintf("%s via %s", describeNode(node), pathText)
+		if edge, ok := e.edgeBetween(node.ID, subjectID); ok {
+			line += formatImpactCompatibilityMetadata(node, edge)
+		}
+		results = append(results, line)
 		if len(results) >= limit {
 			break
 		}
 	}
 	sort.Strings(results)
 	return results
+}
+
+func formatImpactCompatibilityMetadata(node types.Node, edge types.Edge) string {
+	if edge.Metadata == nil {
+		return ""
+	}
+	parts := make([]string, 0, 5)
+	if backing := edgeBackingLabel(edge); backing != "" {
+		parts = append(parts, "backing="+backing)
+	}
+	if stableID := metadataValue(edge.Metadata, "stable_id"); stableID != "" {
+		parts = append(parts, "stable_id="+stableID)
+	}
+	if strings.TrimSpace(node.ID) != "" {
+		parts = append(parts, "impacted_id="+node.ID)
+	}
+	if artifact := types.EdgeEvidence(edge).SourceArtifact; artifact != "" {
+		parts = append(parts, "source="+artifact)
+	}
+	if snippet := metadataValue(edge.Metadata, "evidence_snippet"); snippet != "" {
+		parts = append(parts, "evidence="+snippet)
+	}
+	diagnostics := legacyUnavailableDiagnostics(edge.Metadata)
+	if len(diagnostics) > 0 {
+		parts = append(parts, "diagnostics="+strings.Join(diagnostics, "; "))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " {" + strings.Join(parts, ", ") + "}"
+}
+
+func legacyUnavailableDiagnostics(metadata map[string]interface{}) []string {
+	keys := []string{"source_file_hash", "source_range", "extractor_version"}
+	diagnostics := make([]string, 0, len(keys))
+	for _, key := range keys {
+		value := metadataValue(metadata, key)
+		if strings.Contains(value, "legacy-unavailable") {
+			diagnostics = append(diagnostics, value)
+		}
+	}
+	return diagnostics
 }
 
 func traverseEdge(edge types.Edge, current string, direction edgeDirection) (string, bool) {
@@ -247,6 +293,87 @@ func traverseEdge(edge types.Edge, current string, direction edgeDirection) (str
 		}
 	}
 	return "", false
+}
+
+func (e *Engine) formatReachabilityEdge(nodeID string, edge types.Edge) string {
+	line := fmt.Sprintf("%s via %s", e.describeRef(nodeID), edge.Relation)
+	if edge.Metadata == nil {
+		return line
+	}
+	parts := make([]string, 0, 4)
+	if backing := edgeBackingLabel(edge); backing != "" {
+		parts = append(parts, "backing="+backing)
+	}
+	if edge.Metadata["common_ir"] != true {
+		if len(parts) == 0 {
+			return line
+		}
+		return line + " {" + strings.Join(parts, ", ") + "}"
+	}
+	if kind, _ := edge.Metadata["ir_kind"].(string); kind != "" {
+		parts = append(parts, "kind="+kind)
+	}
+	if origin := normalizeCommonIROrigin(metadataValue(edge.Metadata, "ir_origin")); origin != "" {
+		parts = append(parts, "origin="+origin)
+	}
+	if confidence := normalizeCommonIRConfidence(metadataValue(edge.Metadata, "evidence_confidence")); confidence != "" {
+		parts = append(parts, "confidence="+confidence)
+	}
+	if freshness, _ := edge.Metadata["freshness"].(string); freshness != "" {
+		parts = append(parts, "freshness="+freshness)
+	}
+	if len(parts) == 0 {
+		return line
+	}
+	return line + " {" + strings.Join(parts, ", ") + "}"
+}
+
+func formatPersistedEnrichmentReuseMetadata(metadata map[string]any) []string {
+	if metadata == nil || metadata["common_ir"] != true || normalizeCommonIROrigin(metadataValue(metadata, "ir_origin")) != "exploration_enriched" {
+		return nil
+	}
+	parts := make([]string, 0, 9)
+	if kind := metadataValue(metadata, "ir_kind"); kind != "" {
+		parts = append(parts, "kind="+kind)
+	}
+	parts = append(parts, "origin=exploration_enriched")
+	if confidence := normalizeCommonIRConfidence(metadataValue(metadata, "evidence_confidence")); confidence != "" {
+		parts = append(parts, "confidence="+confidence)
+	}
+	if freshness := metadataValue(metadata, "freshness"); freshness != "" {
+		parts = append(parts, "freshness="+freshness)
+		if freshness == "fresh" {
+			parts = append(parts, "exploration_reused=true")
+		}
+	}
+	if sourceHash := metadataValue(metadata, "source_file_hash"); sourceHash != "" {
+		parts = append(parts, "source_hash="+sourceHash)
+	}
+	if lastSeen := metadataValue(metadata, "last_seen_at"); lastSeen != "" {
+		parts = append(parts, "last_seen="+lastSeen)
+	}
+	if snippet := metadataValue(metadata, "evidence_snippet"); snippet != "" {
+		parts = append(parts, "evidence="+snippet)
+	}
+	if sourceRange := metadataValue(metadata, "source_range"); sourceRange != "" {
+		parts = append(parts, "range="+sourceRange)
+	}
+	if extractor := persistedEnrichmentExtractor(metadata); extractor != "" {
+		parts = append(parts, "extractor="+extractor)
+	}
+	return parts
+}
+
+func persistedEnrichmentExtractor(metadata map[string]any) string {
+	name := metadataValue(metadata, "extractor_name")
+	version := metadataValue(metadata, "extractor_version")
+	if name == "" {
+		return version
+	}
+	if version == "" {
+		return name
+	}
+	return name + "@" + version
 }
 
 func isFileNode(node types.Node) bool {
