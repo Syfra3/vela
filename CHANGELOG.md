@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.2](https://github.com/Syfra3/vela/compare/v1.10.1...v1.10.2) (2026-06-29)
+
+
+### Bug Fixes
+
+* **mcp:** correct stock-chef graph selection ([#46](https://github.com/Syfra3/vela/issues/46)) ([2cfe650](https://github.com/Syfra3/vela/commit/2cfe6503c0e921d4edb1873b7a6136aea856a653))
+
 ## [1.10.1](https://github.com/Syfra3/vela/compare/v1.10.0...v1.10.1) (2026-06-29)
 
 
