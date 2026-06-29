@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.1](https://github.com/Syfra3/vela/compare/v1.10.0...v1.10.1) (2026-06-29)
+
+
+### Bug Fixes
+
+* **build:** normalize relative repo roots ([#43](https://github.com/Syfra3/vela/issues/43)) ([1ef6769](https://github.com/Syfra3/vela/commit/1ef67690c3e6142ed686793f9999930b149ece14))
+
 ## [1.10.0](https://github.com/Syfra3/vela/compare/v1.9.0...v1.10.0) (2026-06-29)
 
 
