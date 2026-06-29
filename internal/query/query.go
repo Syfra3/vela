@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	igraph "github.com/Syfra3/vela/internal/graph"
 	"gonum.org/v1/gonum/graph/path"
@@ -21,15 +22,73 @@ import (
 
 // Engine wraps a loaded graph and answers queries against it.
 type Engine struct {
-	graphPath     string
-	graph         *types.Graph
-	nodeByID      map[string]types.Node   // node ID → node
-	nodeByLabel   map[string][]types.Node // label → nodes (may be multiple)
-	canonicalToID map[string]string
-	edgeByTriple  map[string]types.Edge
-	directed      *simple.DirectedGraph
-	idToInt       map[string]int64
-	intToID       map[int64]string
+	graphPath        string
+	graph            *types.Graph
+	nodeByID         map[string]types.Node   // node ID → node
+	nodeByLabel      map[string][]types.Node // label → nodes (may be multiple)
+	canonicalToID    map[string]string
+	edgeByTriple     map[string]types.Edge
+	directed         *simple.DirectedGraph
+	idToInt          map[string]int64
+	intToID          map[int64]string
+	ambiguousCorpora []CorpusCandidate
+	unavailable      *UnavailableDiagnostic
+}
+
+// CorpusCandidate identifies a graph corpus that needs caller disambiguation.
+type CorpusCandidate struct {
+	Project   string
+	Root      string
+	GraphPath string
+}
+
+// UnavailableDiagnostic explains why the selected active graph cannot answer queries.
+type UnavailableDiagnostic struct {
+	Status     string
+	Message    string
+	Workspace  string
+	GraphPath  string
+	Candidates []CorpusCandidate
+}
+
+// NewUnavailableEngine returns an empty engine that reports a selected graph diagnostic instead of answering from fallback corpora.
+func NewUnavailableEngine(diagnostic UnavailableDiagnostic) *Engine {
+	eng := newEngine(&types.Graph{Metadata: map[string]interface{}{
+		"freshness_status":    string(FreshnessUnknown),
+		"freshness_source":    diagnostic.GraphPath,
+		"workspace_root":      diagnostic.Workspace,
+		"project":             "stock-chef",
+		"freshness_reason":    diagnostic.Message,
+		"recommended_actions": []string{"vela build", "vela update", "vela status"},
+	}})
+	eng.unavailable = &diagnostic
+	return eng
+}
+
+// UnavailableDiagnostic returns the active graph diagnostic that should preempt graph answers.
+func (e *Engine) UnavailableDiagnostic() *UnavailableDiagnostic {
+	if e == nil || e.unavailable == nil {
+		return nil
+	}
+	diagnostic := *e.unavailable
+	diagnostic.Candidates = append([]CorpusCandidate(nil), e.unavailable.Candidates...)
+	return &diagnostic
+}
+
+// SetAmbiguousCorpora records same-name graph candidates selected without an explicit workspace/root.
+func (e *Engine) SetAmbiguousCorpora(candidates []CorpusCandidate) {
+	if e == nil {
+		return
+	}
+	e.ambiguousCorpora = append([]CorpusCandidate(nil), candidates...)
+}
+
+// AmbiguousCorpora returns graph candidates that should be disambiguated before answering.
+func (e *Engine) AmbiguousCorpora() []CorpusCandidate {
+	if e == nil || len(e.ambiguousCorpora) < 2 {
+		return nil
+	}
+	return append([]CorpusCandidate(nil), e.ambiguousCorpora...)
 }
 
 // Neighbor describes a directly connected node and the edge relating it.
@@ -59,8 +118,8 @@ func LoadFromFile(graphPath string) (*Engine, error) {
 		if err != nil {
 			return nil, err
 		}
-		eng.graphPath = graphDBPath
-		eng.attachManifestFreshness(graphDBPath)
+		eng.graphPath = graphPath
+		eng.attachManifestFreshness(graphDBPath, graphPath)
 		return eng, nil
 	}
 
@@ -164,25 +223,35 @@ func loadFromSQLite(graphDBPath string) (*Engine, error) {
 	return newEngine(g), nil
 }
 
-func (e *Engine) attachManifestFreshness(graphDBPath string) {
+func (e *Engine) attachManifestFreshness(graphDBPath, graphSourcePath string) {
 	if e == nil || e.graph == nil {
 		return
 	}
 	if e.graph.Metadata == nil {
 		e.graph.Metadata = make(map[string]interface{})
 	}
+	e.graph.Metadata["freshness_source"] = graphSourcePath
 	manifestPath := filepath.Join(filepath.Dir(graphDBPath), "manifest.json")
 	manifest, err := loadRuntimeManifest(manifestPath)
 	if err != nil {
 		e.graph.Metadata["freshness_status"] = string(FreshnessUnknown)
 		e.graph.Metadata["recommended_actions"] = []string{"vela build"}
+		e.graph.Metadata["freshness_reason"] = fmt.Sprintf("runtime graph freshness is unknown because %s is unavailable; run `vela build`", manifestPath)
 		return
+	}
+	if strings.TrimSpace(manifest.RepoRoot) != "" {
+		e.graph.Metadata["workspace_root"] = manifest.RepoRoot
+		e.graph.Metadata["project"] = filepath.Base(filepath.Clean(manifest.RepoRoot))
+	}
+	if !manifest.GeneratedAt.IsZero() {
+		e.graph.Metadata["graph_updated_at"] = manifest.GeneratedAt.UTC().Format(time.RFC3339)
 	}
 	stale := staleRuntimeManifestFiles(manifest)
 	if len(stale) > 0 {
 		e.graph.Metadata["freshness_status"] = string(FreshnessStale)
 		e.graph.Metadata["stale_files"] = stale
 		e.graph.Metadata["recommended_actions"] = []string{"vela update", "vela build"}
+		e.graph.Metadata["freshness_reason"] = fmt.Sprintf("runtime graph is stale because indexed file content changed: %s; run `vela update` or `vela build`", strings.Join(stale, ", "))
 		return
 	}
 	e.graph.Metadata["freshness_status"] = string(FreshnessFresh)

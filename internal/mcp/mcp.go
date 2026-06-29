@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/Syfra3/vela/internal/app"
@@ -11,12 +12,12 @@ import (
 	"github.com/mark3labs/mcp-go/server"
 )
 
-const serverInstructions = `Vela exposes read-only graph-truth dependency queries through the MCP ` + "`vela_explore`" + ` tool and specialized graph tools.
+const serverInstructions = `Vela exposes read-only graph-truth dependency queries through the MCP ` + "`explore`" + ` tool and specialized graph tools.
 
 Treat Vela as a structural graph tool, not as free-text or keyword search.
 
 Rules:
-- For structural, architectural, flow, dependency, ownership, or impact questions, call ` + "`vela_explore`" + ` first.
+- For structural, architectural, flow, dependency, ownership, or impact questions, call ` + "`explore`" + ` first.
 - Treat returned source snippets and graph paths as already-read evidence.
 - Preserve raw grep or file reads for exact text lookup, stale files named by Vela, unavailable graphs, or verification of latest source.
 - Do not send bag-of-words or full feature descriptions directly to graph query tools.
@@ -32,7 +33,7 @@ Valid structural queries:
 - explain X
 
 Workflow:
-1. Start structural questions with ` + "`vela_explore`" + ` so Vela can route to the right graph primitive.
+1. Start structural questions with ` + "`explore`" + ` so Vela can route to the right graph primitive.
 2. Find exact node candidates before specialized tool calls when more precision is needed.
 3. Run dependency, reverse dependency, impact, path, or explain queries on the most specific exact label or ID.
 4. If the subject is ambiguous, list candidates or ask a clarifying question instead of guessing.`
@@ -51,16 +52,16 @@ func NewServer(engine *query.Engine) *server.MCPServer {
 func registerTools(srv *server.MCPServer, engine *query.Engine) {
 	registerExploreTool(srv, engine)
 	registerLookupTool(srv, engine)
-	registerQueryTool(srv, engine, "vela_dependencies", types.QueryKindDependencies, false)
-	registerQueryTool(srv, engine, "vela_reverse_dependencies", types.QueryKindReverseDependencies, false)
-	registerQueryTool(srv, engine, "vela_impact", types.QueryKindImpact, false)
-	registerQueryTool(srv, engine, "vela_path", types.QueryKindPath, true)
-	registerQueryTool(srv, engine, "vela_explain", types.QueryKindExplain, false)
+	registerQueryTool(srv, engine, "dependencies", types.QueryKindDependencies, false)
+	registerQueryTool(srv, engine, "reverse_dependencies", types.QueryKindReverseDependencies, false)
+	registerQueryTool(srv, engine, "impact", types.QueryKindImpact, false)
+	registerQueryTool(srv, engine, "path", types.QueryKindPath, true)
+	registerQueryTool(srv, engine, "explain", types.QueryKindExplain, false)
 	registerStatusTool(srv, engine)
 }
 
 func registerExploreTool(srv *server.MCPServer, engine *query.Engine) {
-	srv.AddTool(markmcp.NewTool("vela_explore",
+	srv.AddTool(markmcp.NewTool("explore",
 		markmcp.WithDescription("Resolve broad graph context requests into graph-backed candidates."),
 		markmcp.WithReadOnlyHintAnnotation(true),
 		markmcp.WithString("query", markmcp.Required(), markmcp.Description("Natural-language request to resolve")),
@@ -95,7 +96,7 @@ func handleExploreToolWithConnectTimeCatchUp(engine *query.Engine, catchUpRunnin
 }
 
 func registerLookupTool(srv *server.MCPServer, engine *query.Engine) {
-	srv.AddTool(markmcp.NewTool("vela_lookup",
+	srv.AddTool(markmcp.NewTool("lookup",
 		markmcp.WithDescription("Resolve a term into exact graph node candidates."),
 		markmcp.WithReadOnlyHintAnnotation(true),
 		markmcp.WithString("term", markmcp.Required(), markmcp.Description("Term to resolve")),
@@ -117,7 +118,7 @@ func handleLookupTool(engine *query.Engine) server.ToolHandlerFunc {
 }
 
 func registerStatusTool(srv *server.MCPServer, engine *query.Engine) {
-	srv.AddTool(markmcp.NewTool("vela_status",
+	srv.AddTool(markmcp.NewTool("status",
 		markmcp.WithDescription("Report Vela runtime graph status."),
 		markmcp.WithReadOnlyHintAnnotation(true),
 	), handleStatusTool(engine))
@@ -156,6 +157,12 @@ func handleQueryTool(engine *query.Engine, kind string) server.ToolHandlerFunc {
 		if err != nil {
 			return markmcp.NewToolResultStructuredOnly(engine.DiagnosticResult(kind, "VALIDATION_ERROR", err.Error())), nil
 		}
+		if diagnostic := engine.UnavailableDiagnostic(); diagnostic != nil {
+			return markmcp.NewToolResultText(formatUnavailableActiveGraph(queryReq.Subject, *diagnostic)), nil
+		}
+		if candidates := engine.AmbiguousCorpora(); len(candidates) > 1 {
+			return markmcp.NewToolResultText(formatCorpusAmbiguity(queryReq.Subject, candidates)), nil
+		}
 		switch queryReq.Kind {
 		case types.QueryKindExplain:
 			return markmcp.NewToolResultStructuredOnly(engine.ExplainResult(queryReq.Subject)), nil
@@ -168,6 +175,81 @@ func handleQueryTool(engine *query.Engine, kind string) server.ToolHandlerFunc {
 		if err != nil {
 			return markmcp.NewToolResultStructuredOnly(engine.DiagnosticResult(kind, "QUERY_ERROR", err.Error())), nil
 		}
+		output = appendSelectedGraphEvidence(output, engine.Freshness())
 		return markmcp.NewToolResultText(output), nil
 	}
+}
+
+func formatUnavailableActiveGraph(subject string, diagnostic query.UnavailableDiagnostic) string {
+	var b strings.Builder
+	status := strings.TrimSpace(diagnostic.Status)
+	if status == "" {
+		status = "unavailable"
+	}
+	fmt.Fprintf(&b, "Status: %s\n", status)
+	message := strings.TrimSpace(diagnostic.Message)
+	if message == "" {
+		message = "active workspace graph is missing or unreadable"
+	}
+	fmt.Fprintf(&b, "MCP cannot answer %q because %s.\n", subject, message)
+	if diagnostic.Workspace != "" {
+		fmt.Fprintf(&b, "Active workspace root: %s\n", diagnostic.Workspace)
+	}
+	if diagnostic.GraphPath != "" {
+		fmt.Fprintf(&b, "Expected active graph: %s\n", diagnostic.GraphPath)
+	}
+	if len(diagnostic.Candidates) > 0 {
+		b.WriteString("Other stock-chef corpora were not used automatically:\n")
+		for _, candidate := range diagnostic.Candidates {
+			fmt.Fprintf(&b, "- project=%s", candidate.Project)
+			if candidate.Root != "" {
+				fmt.Fprintf(&b, " root=%s", candidate.Root)
+			}
+			if candidate.GraphPath != "" {
+				fmt.Fprintf(&b, " graph_path=%s", candidate.GraphPath)
+			}
+			b.WriteByte('\n')
+		}
+	}
+	b.WriteString("Guidance: run vela build, vela update, or vela status in the active workspace, or choose an explicit corpus/root with --graph; no dep-eval nodes or edges were used as fallback.")
+	return b.String()
+}
+
+func formatCorpusAmbiguity(subject string, candidates []query.CorpusCandidate) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Status: ambiguous\n")
+	fmt.Fprintf(&b, "MCP cannot choose a single graph corpus for %q without an active workspace root or explicit corpus selector.\n", subject)
+	b.WriteString("Candidates:\n")
+	for _, candidate := range candidates {
+		fmt.Fprintf(&b, "- project=%s", candidate.Project)
+		if candidate.Root != "" {
+			fmt.Fprintf(&b, " root=%s", candidate.Root)
+		}
+		if candidate.GraphPath != "" {
+			fmt.Fprintf(&b, " graph_path=%s", candidate.GraphPath)
+		}
+		b.WriteByte('\n')
+	}
+	b.WriteString("Disambiguate: choose an explicit corpus by running from the intended workspace or passing --graph / an explicit corpus path; no nodes or edges were merged across candidates.")
+	return b.String()
+}
+
+func appendSelectedGraphEvidence(output string, freshness query.Freshness) string {
+	parts := make([]string, 0, 4)
+	if freshness.SelectedGraphPath != "" {
+		parts = append(parts, fmt.Sprintf("selected_graph_path=%s", freshness.SelectedGraphPath))
+	}
+	if freshness.WorkspaceRoot != "" {
+		parts = append(parts, fmt.Sprintf("workspace_root=%s", freshness.WorkspaceRoot))
+	}
+	if freshness.Project != "" {
+		parts = append(parts, fmt.Sprintf("project=%s", freshness.Project))
+	}
+	if freshness.Status != "" {
+		parts = append(parts, fmt.Sprintf("freshness=%s", freshness.Status))
+	}
+	if len(parts) == 0 {
+		return output
+	}
+	return output + "\n\nGraph evidence: " + strings.Join(parts, ", ")
 }

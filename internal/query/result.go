@@ -73,6 +73,12 @@ type Fact struct {
 // Freshness describes whether graph data used by a Result is fresh enough to trust.
 type Freshness struct {
 	Status             FreshnessStatus `json:"status"`
+	Source             string          `json:"source,omitempty"`
+	SelectedGraphPath  string          `json:"selected_graph_path,omitempty"`
+	Project            string          `json:"project,omitempty"`
+	WorkspaceRoot      string          `json:"workspace_root,omitempty"`
+	GraphUpdatedAt     string          `json:"graph_updated_at,omitempty"`
+	Reason             string          `json:"reason,omitempty"`
 	StaleFiles         []string        `json:"stale_files,omitempty"`
 	RecommendedActions []string        `json:"recommended_actions,omitempty"`
 }
@@ -564,6 +570,22 @@ func (e *Engine) Freshness() Freshness {
 		case FreshnessFresh, FreshnessStale:
 			freshness.Status = FreshnessStatus(status)
 		}
+	}
+	if source, ok := e.graph.Metadata["freshness_source"].(string); ok {
+		freshness.Source = source
+		freshness.SelectedGraphPath = source
+	}
+	if project, ok := e.graph.Metadata["project"].(string); ok {
+		freshness.Project = project
+	}
+	if workspaceRoot, ok := e.graph.Metadata["workspace_root"].(string); ok {
+		freshness.WorkspaceRoot = workspaceRoot
+	}
+	if graphUpdatedAt, ok := e.graph.Metadata["graph_updated_at"].(string); ok {
+		freshness.GraphUpdatedAt = graphUpdatedAt
+	}
+	if reason, ok := e.graph.Metadata["freshness_reason"].(string); ok {
+		freshness.Reason = reason
 	}
 	freshness.StaleFiles = metadataStringSlice(e.graph.Metadata["stale_files"])
 	freshness.RecommendedActions = metadataStringSlice(e.graph.Metadata["recommended_actions"])

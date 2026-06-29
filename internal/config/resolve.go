@@ -38,10 +38,10 @@ func RegistryFilePath() string {
 
 // FindGraphFile resolves graph.json for the current working directory.
 // Search order:
-//  1. ~/.vela/graph.json          — canonical global store
-//  2. ~/.vela/vela-out/graph.json — legacy global store
-//  3. ./.vela/graph.json          — local override
-//  4. ./vela-out/graph.json       — legacy repo-local store
+//  1. ./.vela/graph.json          — active workspace graph
+//  2. ./vela-out/graph.json       — legacy repo-local store
+//  3. ~/.vela/graph.json          — canonical global store
+//  4. ~/.vela/vela-out/graph.json — legacy global store
 func FindGraphFile(startDir string) (string, error) {
 	if startDir == "" {
 		var err error
@@ -56,30 +56,30 @@ func FindGraphFile(startDir string) (string, error) {
 		abs = startDir
 	}
 
-	home := velaHomeOrFallback()
-
-	// 1. ~/.vela/graph.json
-	canonical := filepath.Join(home, graphFileName)
-	if _, err := os.Stat(canonical); err == nil {
-		return canonical, nil
-	}
-
-	// 2. ~/.vela/vela-out/graph.json
-	legacyGlobal := filepath.Join(home, legacyOutSubDir, graphFileName)
-	if _, err := os.Stat(legacyGlobal); err == nil {
-		return legacyGlobal, nil
-	}
-
-	// 3. ./.vela/graph.json
+	// 1. ./.vela/graph.json
 	local := filepath.Join(abs, ".vela", graphFileName)
 	if _, err := os.Stat(local); err == nil {
 		return local, nil
 	}
 
-	// 4. legacy ./vela-out/graph.json
+	// 2. legacy ./vela-out/graph.json
 	legacy := filepath.Join(abs, legacyOutSubDir, graphFileName)
 	if _, err := os.Stat(legacy); err == nil {
 		return legacy, nil
+	}
+
+	home := velaHomeOrFallback()
+
+	// 3. ~/.vela/graph.json
+	canonical := filepath.Join(home, graphFileName)
+	if _, err := os.Stat(canonical); err == nil {
+		return canonical, nil
+	}
+
+	// 4. ~/.vela/vela-out/graph.json
+	legacyGlobal := filepath.Join(home, legacyOutSubDir, graphFileName)
+	if _, err := os.Stat(legacyGlobal); err == nil {
+		return legacyGlobal, nil
 	}
 
 	return "", fmt.Errorf("graph.json not found — run: vela extract <path>")
