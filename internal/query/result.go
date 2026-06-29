@@ -274,6 +274,7 @@ func (e *Engine) ExplainResult(label string) Result {
 			continue
 		}
 		evidence := types.EdgeEvidence(edge)
+		evidence.Confidence = runtimeCommonIRConfidence(edge.Metadata, evidence.Confidence)
 		fact := Fact{
 			Subject:    edge.Source,
 			Predicate:  edge.Relation,
@@ -281,7 +282,7 @@ func (e *Engine) ExplainResult(label string) Result {
 			Confidence: evidence.Confidence,
 			Source:     evidence.SourceArtifact,
 			Layer:      evidence.Layer,
-			Metadata:   edge.Metadata,
+			Metadata:   runtimeCommonIRMetadata(edge.Metadata),
 		}
 		if hasEvidence(evidence) {
 			fact.Evidence = []types.Evidence{evidence}
@@ -298,6 +299,7 @@ func (e *Engine) ExplainResult(label string) Result {
 	} else {
 		rankInterfaceConflicts(&result)
 	}
+	appendMissingTestUsageDiagnostics(&result, e, nodeSet)
 	appendFreshnessDiagnostics(&result)
 
 	return result
@@ -307,11 +309,68 @@ func appendFreshnessDiagnostics(result *Result) {
 	if result == nil || result.Freshness.Status != FreshnessStale {
 		return
 	}
+	if result.Status == ResultStatusOK {
+		result.Status = ResultStatusPartial
+	}
+	result.Confidence = ""
 	message := "runtime graph is stale; run `vela update` or `vela build`"
 	if len(result.Freshness.StaleFiles) > 0 {
 		message = fmt.Sprintf("runtime graph is stale for %s; run `vela update` or `vela build`", strings.Join(result.Freshness.StaleFiles, ", "))
 	}
 	result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "STALE_GRAPH", Message: message})
+}
+
+func appendMissingTestUsageDiagnostics(result *Result, e *Engine, nodeSet map[string]bool) {
+	if result == nil || e == nil || !explainedNodeSetContainsKind(e, nodeSet, "schema") {
+		return
+	}
+	if graphHasNodeKind(e.graph, "testusage") || graphHasNodeKind(e.graph, "test_usage") || graphHasCoverageEdge(e.graph, nodeSet) {
+		return
+	}
+	if result.Status == ResultStatusOK {
+		result.Status = ResultStatusPartial
+	}
+	result.Diagnostics = append(result.Diagnostics, Diagnostic{
+		Code:    "TEST_USAGE_NOT_INDEXED",
+		Message: "TestUsage category is unknown/not indexed for this runtime graph; request targeted exploration or rebuild with TestUsage extraction before claiming test coverage is known-empty",
+	})
+}
+
+func explainedNodeSetContainsKind(e *Engine, nodeSet map[string]bool, kind string) bool {
+	for id := range nodeSet {
+		node, ok := e.nodeByID[id]
+		if ok && strings.EqualFold(node.NodeType, kind) {
+			return true
+		}
+	}
+	return false
+}
+
+func graphHasNodeKind(g *types.Graph, kind string) bool {
+	if g == nil {
+		return false
+	}
+	for _, node := range g.Nodes {
+		if strings.EqualFold(node.NodeType, kind) {
+			return true
+		}
+	}
+	return false
+}
+
+func graphHasCoverageEdge(g *types.Graph, nodeSet map[string]bool) bool {
+	if g == nil {
+		return false
+	}
+	for _, edge := range g.Edges {
+		if !nodeSet[edge.Source] && !nodeSet[edge.Target] {
+			continue
+		}
+		if strings.EqualFold(edge.Relation, "covered_by_test") || strings.EqualFold(metadataValue(edge.Metadata, "ir_kind"), "COVERED_BY_TEST") {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) factsForNodeSet(nodeSet map[string]bool) []Fact {
@@ -331,11 +390,63 @@ func subjectFromNode(node types.Node) Subject {
 
 func factFromEdge(edge types.Edge) Fact {
 	evidence := types.EdgeEvidence(edge)
-	fact := Fact{Subject: edge.Source, Predicate: edge.Relation, Object: edge.Target, Confidence: evidence.Confidence, Source: evidence.SourceArtifact, Layer: evidence.Layer, Metadata: edge.Metadata}
+	evidence.Confidence = runtimeCommonIRConfidence(edge.Metadata, evidence.Confidence)
+	fact := Fact{Subject: edge.Source, Predicate: edge.Relation, Object: edge.Target, Confidence: evidence.Confidence, Source: evidence.SourceArtifact, Layer: evidence.Layer, Metadata: runtimeCommonIRMetadata(edge.Metadata)}
 	if hasEvidence(evidence) {
 		fact.Evidence = []types.Evidence{evidence}
 	}
 	return fact
+}
+
+func runtimeCommonIRMetadata(metadata map[string]any) map[string]any {
+	if metadata == nil || metadata["common_ir"] != true {
+		return metadata
+	}
+	normalized := make(map[string]any, len(metadata))
+	for key, value := range metadata {
+		normalized[key] = value
+	}
+	if origin := normalizeCommonIROrigin(metadataValue(metadata, "ir_origin")); origin != "" {
+		normalized["ir_origin"] = origin
+	}
+	if confidence := normalizeCommonIRConfidence(metadataValue(metadata, "evidence_confidence")); confidence != "" {
+		normalized["evidence_confidence"] = confidence
+	}
+	return normalized
+}
+
+func runtimeCommonIRConfidence(metadata map[string]any, confidence types.Confidence) types.Confidence {
+	if metadata == nil || metadata["common_ir"] != true {
+		return confidence
+	}
+	if normalized := normalizeCommonIRConfidence(string(confidence)); normalized != "" {
+		return types.Confidence(normalized)
+	}
+	return confidence
+}
+
+func normalizeCommonIROrigin(origin string) string {
+	switch origin {
+	case "deterministic_extractor", "deterministic":
+		return "deterministic"
+	case "exploration_enriched", "inferred":
+		return origin
+	default:
+		return origin
+	}
+}
+
+func normalizeCommonIRConfidence(confidence string) string {
+	switch confidence {
+	case "declared", "extracted", "high":
+		return "high"
+	case "inferred", "medium":
+		return "medium"
+	case "ambiguous", "legacy", "low":
+		return "low"
+	default:
+		return confidence
+	}
 }
 
 func rankInterfaceConflicts(result *Result) {
@@ -423,7 +534,23 @@ func metadataValue(metadata map[string]any, key string) string {
 }
 
 func factWeight(fact Fact) float64 {
-	return types.Evidence{Confidence: fact.Confidence}.Weight()
+	weight := types.Evidence{Confidence: fact.Confidence}.Weight()
+	if fact.Metadata == nil {
+		return weight
+	}
+	switch normalizeCommonIROrigin(metadataValue(fact.Metadata, "ir_origin")) {
+	case "deterministic":
+		weight += 0.20
+	case "exploration_enriched":
+		weight -= 0.10
+	}
+	switch metadataValue(fact.Metadata, "claim_status") {
+	case "authoritative":
+		weight += 0.10
+	case "conflict":
+		weight -= 0.10
+	}
+	return weight
 }
 
 // Freshness reports the runtime graph freshness state attached at load time.

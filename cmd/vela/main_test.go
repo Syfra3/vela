@@ -837,6 +837,60 @@ func TestSCN024_CLIMCPEquivalenceFixtureUsesSharedCoreSchema(t *testing.T) {
 	}
 }
 
+// REQ-015/REQ-011 → SCN-016 → TestSCN016_CLIBoundaryLabelsLegacyAndIREvidence
+func TestSCN016_CLIBoundaryLabelsLegacyAndIREvidence(t *testing.T) {
+	// Scenario: Prior runtime and low-level graph behavior coexists with the new IR.
+	graphPath := writeSCN016MixedRuntimeGraphForCLI(t)
+	out := &bytes.Buffer{}
+	root := rootCmd()
+	root.SetOut(out)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"query", "dependencies", "CheckoutService", "--graph", graphPath, "--limit", "5"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(query dependencies) error = %v", err)
+	}
+
+	stdout := out.String()
+	for _, want := range []string{"LegacyGateway", "legacy-backed", "IRRepository", "IR-backed", "kind=DEPENDS_ON", "origin=deterministic"} {
+		if !strings.Contains(stdout, want) {
+			t.Fatalf("expected CLI output to contain %q, got:\n%s", want, stdout)
+		}
+	}
+	for _, forbidden := range []string{"full replacement", "fully replaced", "completed full replacement", "Phase 1 replaced prior runtime"} {
+		if strings.Contains(strings.ToLower(stdout), strings.ToLower(forbidden)) {
+			t.Fatalf("CLI output must not claim Phase 1 fully replaced prior runtime behavior via %q, got:\n%s", forbidden, stdout)
+		}
+	}
+}
+
+func writeSCN016MixedRuntimeGraphForCLI(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	velaDir := filepath.Join(dir, ".vela")
+	if err := os.Mkdir(velaDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	graphJSON := filepath.Join(velaDir, "graph.json")
+	if err := os.WriteFile(graphJSON, []byte(`{"nodes":[],"edges":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	graph := &types.Graph{
+		Nodes: []types.Node{
+			{ID: "checkout-service", Label: "CheckoutService", NodeType: "service", SourceFile: "checkout.go"},
+			{ID: "legacy-gateway", Label: "LegacyGateway", NodeType: "client", SourceFile: "legacy_gateway.go"},
+			{ID: "ir-repository", Label: "IRRepository", NodeType: "repository", SourceFile: "ir_repository.go"},
+		},
+		Edges: []types.Edge{
+			{Source: "checkout-service", Target: "legacy-gateway", Relation: string(types.FactKindDependsOn), Metadata: map[string]interface{}{"evidence_type": "legacy-runtime", "evidence_source_artifact": "legacy_runtime.go", "evidence_confidence": "legacy"}},
+			{Source: "checkout-service", Target: "ir-repository", Relation: string(types.FactKindDependsOn), Metadata: map[string]interface{}{"common_ir": true, "ir_kind": "DEPENDS_ON", "ir_origin": "deterministic", "freshness": "fresh", "evidence_type": "common-ir", "evidence_source_artifact": "ir_runtime.go", "evidence_confidence": "high"}},
+		},
+	}
+	if err := export.WriteSQLiteGraphAtomic(graph, velaDir); err != nil {
+		t.Fatalf("WriteSQLiteGraphAtomic error: %v", err)
+	}
+	return graphJSON
+}
+
 // REQ-014 → SCN-025 → TestSCN025_RealWorkspaceSmokeReportIsRedactedReleaseProof
 func TestSCN025_RealWorkspaceSmokeReportIsRedactedReleaseProof(t *testing.T) {
 	// Scenario: Real workspace smoke test proves release behavior outside toy fixtures.

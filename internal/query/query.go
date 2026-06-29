@@ -528,7 +528,11 @@ func (e *Engine) renderPathWithEvidence(pathIDs, labels []string) string {
 			continue
 		}
 		ev := types.EdgeEvidence(edge)
+		ev.Confidence = runtimeCommonIRConfidence(edge.Metadata, ev.Confidence)
 		parts := make([]string, 0, 2)
+		if backing := edgeBackingLabel(edge); backing != "" {
+			parts = append(parts, "backing="+backing)
+		}
 		if ev.Confidence != "" {
 			parts = append(parts, "confidence="+string(ev.Confidence))
 		}
@@ -844,7 +848,11 @@ func nodeIDs(nodes []types.Node) []string {
 func (e *Engine) formatExplainEdge(edge types.Edge) string {
 	line := fmt.Sprintf("%s --[%s]--> %s", e.describeRef(edge.Source), edge.Relation, e.describeRef(edge.Target))
 	ev := types.EdgeEvidence(edge)
+	ev.Confidence = runtimeCommonIRConfidence(edge.Metadata, ev.Confidence)
 	parts := make([]string, 0, 5)
+	if backing := edgeBackingLabel(edge); backing != "" {
+		parts = append(parts, "backing="+backing)
+	}
 	if ev.Layer != "" {
 		parts = append(parts, "layer="+string(ev.Layer))
 	}
@@ -872,6 +880,7 @@ func (e *Engine) formatExplainEdge(edge types.Edge) string {
 	if suggestions := metadataStringSlice(edge.Metadata["binding_suggestions"]); len(suggestions) > 0 {
 		parts = append(parts, "suggestions="+strings.Join(suggestions, ","))
 	}
+	parts = append(parts, formatPersistedEnrichmentReuseMetadata(edge.Metadata)...)
 	if len(parts) == 0 {
 		return line
 	}
@@ -901,6 +910,20 @@ func describeNode(node types.Node) string {
 		return label
 	}
 	return fmt.Sprintf("%s [%s]", label, strings.Join(parts, "/"))
+}
+
+func edgeBackingLabel(edge types.Edge) string {
+	if edge.Metadata == nil {
+		return ""
+	}
+	if edge.Metadata["common_ir"] == true {
+		return "IR-backed"
+	}
+	evidenceType := strings.ToLower(metadataValue(edge.Metadata, "evidence_type"))
+	if strings.Contains(evidenceType, "legacy") || metadataValue(edge.Metadata, "stable_id") != "" || metadataValue(edge.Metadata, "evidence_confidence") == "legacy" {
+		return "legacy-backed"
+	}
+	return ""
 }
 
 func sortedKeys[V any](values map[string]V) []string {
