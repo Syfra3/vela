@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.0](https://github.com/Syfra3/vela/compare/v1.9.0...v1.10.0) (2026-06-29)
+
+
+### Features
+
+* improve explore information ([#40](https://github.com/Syfra3/vela/issues/40)) ([93f6c4c](https://github.com/Syfra3/vela/commit/93f6c4c2b42da0c84615d118e353f35d7741cb88))
+
 ## [1.9.0](https://github.com/Syfra3/vela/compare/v1.8.0...v1.9.0) (2026-06-27)
 
 
