@@ -2,400 +2,267 @@
   <img src="assets/vela-header.png" alt="Vela" width="100%"/>
 </div>
 
-# Vela - Knowledge Explorer & Graph Builder
+# Vela - Graph-Truth for Codebases
 
-A high-performance, privacy-first knowledge graph builder for codebases, documentation, and technical content. Built in Go with pluggable LLM providers (local or remote) for graph extraction and analysis.
-
-## Why Vela?
-
-- **Privacy-First**: Run entirely locally, no data sent to cloud by default
-- **Flexible LLM**: Pluggable providers (Ollama, llama.cpp, Anthropic Claude, OpenAI GPT-4o)
-- **High Performance**: Go-native AST parsing, graph construction, and clustering
-- **Beautiful TUI**: Interactive Bubbletea UI with real-time extraction progress
-- **Microservice Mapping**: Perfect for understanding multi-repo architectures
-- **Zero Token Waste**: Use local 8B models for free graph extraction
-
-## Features
-
-- **Code Extraction**: Tree-sitter AST parsing for 22 languages (Go, Python, TypeScript, Rust, Java, etc.)
-- **Doc Extraction**: LLM-powered Named Entity Recognition & Relationship Extraction from markdown, PDFs, and comments
-- **Graph Building**: Automatic construction of knowledge graph with gonum
-- **Community Detection**: Leiden clustering (via graspologic Python wrapper) to find logical groupings
-- **Interactive TUI**: Real-time progress tracking, estimated time, extraction percentage
-- **Multiple Outputs**: graph.json (queryable), graph.html (interactive), GRAPH_REPORT.md (human-readable)
-- **Caching**: SHA256-based incremental updates
-- **Pluggable LLMs**: Use local models (Ollama, llama.cpp) or remote APIs (Claude, GPT-4o)
+Vela is a local-first graph-truth index for codebases: it builds evidence-backed dependency graphs and exposes read-only structural queries through the CLI and MCP.
 
 ## Quick Start
 
 ```bash
-# Build Vela
+# Build the CLI from source.
 go build -o vela ./cmd/vela
 
-# Run the local PR quality gate
-make verify
+# Build graph outputs for a repo or workspace.
+./vela build ./my-repo
 
-# Extract knowledge graph from a folder
-./vela extract ./my-repo
+# Check graph health and freshness.
+./vela status --graph ./my-repo/.vela/graph.json
 
-# Query an extracted graph
-vela search --graph "./examples/wallet-service/.vela/graph.json" "explain Transaction"
-vela search --graph "./examples/wallet-service/.vela/graph.json" "who uses Transaction"
-vela search --graph "./examples/api-service/.vela/graph.json" "impact of OrderStatusDto"
-vela search --graph "./examples/mobile-app/.vela/graph.json" "who uses OrderListScreen"
+# Discover candidates before structural queries.
+./vela explore --graph ./my-repo/.vela/graph.json "where is billing handled?"
+./vela lookup --graph ./my-repo/.vela/graph.json "BillingService"
 
-# Start interactive TUI to monitor extraction
-./vela extract ./my-repo --tui
+# Ask structural graph questions after you have exact node names.
+./vela search --graph ./my-repo/.vela/graph.json "explain BillingService"
+./vela search --graph ./my-repo/.vela/graph.json "who uses BillingService"
+./vela search --graph ./my-repo/.vela/graph.json "path BillingController -> BillingService"
 
-# Configure LLM provider
-VELA_LLM_PROVIDER=local ./vela extract ./my-repo
-VELA_LLM_MODEL=llama2 ./vela extract ./my-repo
-VELA_LLM_ENDPOINT=http://localhost:11434 ./vela extract ./my-repo
+# Start the default stdio MCP server for coding agents.
+./vela serve --graph ./my-repo/.vela/graph.json
 ```
 
-## Installation
+Expected `build` output includes `graph:`, `html:`, `report:`, `files:`, and `facts:` lines. The primary generated files live under `<repo>/.vela/`.
 
-### What Vela is for
+## What Vela Is
 
-Vela is the **graph extraction and retrieval** layer.
+| Vela does | Vela does not do |
+| --- | --- |
+| Build local code and workspace graphs from repository files. | Act as durable chat memory or a notes database. Use Ancora for that. |
+| Answer dependency, impact, path, and explanation questions from graph facts. | Replace grep, ripgrep, or exact file reads for raw text lookup. |
+| Preserve evidence, confidence, freshness, and diagnostics where available. | Invent architecture truth from broad free-text prompts. |
+| Expose the same graph-query core through CLI, MCP, and legacy HTTP debug mode. | Treat stale `graph.json` as trusted runtime truth for repo-local graphs. |
 
-Use Vela when you want to:
-- extract a graph from a repo or workspace
-- query graph structure with MCP tools
-- run Vela by itself without Ancora
+The happy path is: build the graph, discover exact candidates, then run structural queries on those exact nodes.
 
-Do **not** use Vela as your durable memory database. That is Ancora's job.
+## Build and Verify
 
-### Install from source
-
-```bash
-git clone https://github.com/Syfra3/vela.git
-cd vela
-go build -o vela ./cmd/vela
-
-# Optional: move it somewhere in PATH
-sudo mv vela /usr/local/bin/
-
-# Verify
-vela --help
-```
-
-### Local quality gate
-
-Use the same gate locally that CI runs on pull requests:
+Vela is a Go project. The required Go version is declared in `go.mod`.
 
 ```bash
+# Build release-style local binary.
+make build
+
+# Install to ~/.local/bin.
+make install
+
+# Run the full local gate used by this repo.
 make verify
 ```
 
-Install repository-managed hooks to catch issues before push:
+`make verify` runs `fmt-check`, pinned `golangci-lint`, scoped tests, and `build`. Tests are intentionally scoped to `./cmd/... ./internal/... ./pkg/...` because fixture directories under `tests/fixtures/detect/**` are not valid standalone Go packages.
+
+For quick command-surface checks during documentation or CLI work:
 
 ```bash
-make hooks-install
+go run ./cmd/vela --help
+go test ./cmd/vela -run TestRootCommandExposesReducedBuildAndQuerySurface -count=1
 ```
 
-Notes:
-- `make lint` bootstraps the pinned `golangci-lint` version automatically.
-- `make verify` uses `gotestsum` when available and falls back to `go test -v`.
-- Vela intentionally scopes automated tests to `./cmd/... ./internal/... ./pkg/...` because `tests/fixtures/detect/**` contains fixture files that are expected to break raw `go test ./...` analysis.
+## Graph Lifecycle
 
-### MCP usage
+| Step | Command | Behavior |
+| --- | --- | --- |
+| Build | `vela build <path>` | Scans source files, runs available SCIP drivers, merges graph facts, writes `.vela/graph.json`, `.vela/graph.db`, `.vela/manifest.json`, `.vela/graph.html`, and `.vela/GRAPH_REPORT.md`. |
+| Rebuild safely | `vela update <path>` | Uses the same build path with manifest-aware generated-state snapshotting. If update fails, previous generated graph state is restored. |
+| Watch | `vela watch <path>` | Watches `.go`, `.py`, `.ts`, `.tsx`, `.js`, and `.jsx` files and refreshes graph outputs after changes. |
+| Check health | `vela status --graph <path>` | Reports freshness, counts, confidence distribution, graph quality, structure, communities, and top nodes. Alias: `vela bench`. |
+| Keep fresh | `vela hooks install <path>` | Installs repo-local `post-commit` and `post-checkout` hook blocks for graph freshness. |
 
-Vela now exposes a real **stdio MCP server**.
+`vela extract <path>` still exists as a compatibility alias for `vela build <path>`.
 
-```bash
-# Start Vela as an MCP server over stdio
-vela serve
+## Runtime Storage
+
+| File | Role |
+| --- | --- |
+| `.vela/graph.db` | Primary v0.4 runtime query store for repo-local graphs. Required for trusted answers when querying `.vela/graph.json`. |
+| `.vela/graph.json` | Export/debug artifact and graph selection handle. For repo-local `.vela/graph.json`, Vela loads sibling `graph.db` as query truth. |
+| `.vela/manifest.json` | Freshness metadata. Query results can report `fresh`, `stale`, `unknown`, or `warming` state. |
+| `.vela/GRAPH_REPORT.md` | Human-readable graph report. |
+| `.vela/graph.html` | Local visual graph export. |
+| `~/.vela/registry.json` | Global tracked-repository registry used for project/corpus discovery and ambiguity diagnostics. |
+
+Custom or legacy graph JSON files outside a repo-local `.vela/` directory can still be loaded as compatibility data, but the active product direction is SQLite-backed runtime truth.
+
+## Inputs and Evidence
+
+The active public build path supports code and workspace topology evidence.
+
+| Input | Evidence |
+| --- | --- |
+| `.go`, `.py`, `.ts`, `.tsx`, `.js`, `.jsx` | Repo-layer file, symbol, call/reference, and projected file-dependency facts from local extraction. |
+| SCIP drivers for Go, TypeScript, and Python | Optional semantic artifacts under `.vela/scip/*.scip` when drivers are available. Missing drivers are reported as warnings and structural extraction continues. |
+| `.vela/workspace.yaml` | Declared workspace routing facts for organizations, repositories, services, interfaces, and known service links. |
+
+Minimal workspace topology example:
+
+```yaml
+organization:
+  name: Acme
+repositories:
+  - name: billing-api
+    services:
+      - name: billing
+        kind: api
+interfaces:
+  - name: billing-http
+    service: billing
+    kind: http
+known_links:
+  - from: checkout
+    to: billing
+    interface: billing-http
 ```
 
-That command is for MCP clients.
-It does **not** print a normal terminal UI.
+## Query Model
 
-If you want the old HTTP server for debugging or legacy use:
+Vela separates discovery from structural reasoning.
 
-```bash
-vela serve --http --port 7700
+| Need | Use | Why |
+| --- | --- | --- |
+| Broad context or feature-planning prompt | `vela explore <request>` | Returns graph-backed candidates and suggested next queries. This is discovery, not proof. |
+| Ambiguous term | `vela lookup <term>` | Finds exact node candidates before structural graph queries. |
+| Natural-language structural question | `vela search <query>` | Parses valid structural forms and runs the matching graph query. |
+| Explicit query kind | `vela query <kind> ...` or root `vela explain`, `vela impact`, `vela path` | Avoids query parsing when the kind is already known. |
+
+Valid `vela search` forms:
+
+```text
+who uses X
+what uses X
+where is X used?
+what does X depend on
+dependencies of X
+impact of X
+what breaks if X changes?
+what is affected by X?
+path A -> B
+path from A to B
+how does A reach B?
+explain X
 ```
 
-### Three simple ways to use Vela
-
-#### 1. Vela only
-
-Use this if you only want graph extraction and graph retrieval.
+Good examples:
 
 ```bash
-# Build graph
-vela extract ./my-repo
-
-# Let an MCP client talk to Vela
-vela serve
-```
-
-#### 2. Ancora + Vela
-
-Use this if you want:
-- Ancora for long-term memory
-- Vela for graph retrieval
-- one primary MCP surface from Ancora
-
-In this setup:
-- Ancora stays the main MCP server
-- Vela runs behind Ancora for `vela_*` graph tools
-- memory writes still belong to Ancora
-
-#### 3. Local CLI only
-
-Use this if you just want to generate and inspect graphs yourself.
-
-```bash
-vela extract ./my-repo
-vela query "nodes"
-vela path AuthService Database
-vela explain AuthService
-```
-
-### How To Use `vela search`
-
-`vela search` is a structural graph query command over `graph.json`. It is not a free-text, grep-style, or bag-of-words search tool.
-
-Use it when you already know the exact node label, file path, type, interface, DTO, or module you want to inspect.
-
-If you do not know the exact node yet, use `vela lookup <term>` first.
-
-```bash
-vela lookup --graph "./examples/wallet-service/.vela/graph.json" "transaction"
-```
-
-Valid query forms:
-
-- `who uses X`
-- `what uses X`
-- `where is X used?`
-- `what does X depend on`
-- `dependencies of X`
-- `impact of X`
-- `what breaks if X changes?`
-- `path A -> B`
-- `path from A to B`
-- `how does A reach B?`
-- `explain X`
-
-Examples:
-
-```bash
-vela search --graph "./examples/wallet-service/.vela/graph.json" "explain Transaction"
-vela search --graph "./examples/wallet-service/.vela/graph.json" "who uses Transaction"
-vela search --graph "./examples/wallet-service/.vela/graph.json" "what does Transaction depend on"
-vela search --graph "./examples/wallet-service/.vela/graph.json" "impact of MovementStatusDto"
-vela search --graph "./examples/wallet-service/.vela/graph.json" "path TransactionController -> TransactionMapper"
+vela lookup --graph ./my-repo/.vela/graph.json "transaction"
+vela search --graph ./my-repo/.vela/graph.json "explain TransactionMapper"
+vela search --graph ./my-repo/.vela/graph.json "who uses TransactionMapper"
+vela search --graph ./my-repo/.vela/graph.json "impact of MovementStatusDto"
+vela search --graph ./my-repo/.vela/graph.json "path TransactionController -> TransactionMapper"
 ```
 
 Bad examples:
 
 ```bash
-vela search --graph "./examples/wallet-service/.vela/graph.json" "movement status mobile app dto contract"
-vela search --graph "./examples/wallet-service/.vela/graph.json" "billing"
-vela search --graph "./examples/wallet-service/.vela/graph.json" "print the movement extract"
+vela search --graph ./my-repo/.vela/graph.json "movement status mobile app dto contract"
+vela search --graph ./my-repo/.vela/graph.json "billing"
+vela search --graph ./my-repo/.vela/graph.json "print the movement extract"
 ```
 
-Those fail because `search` only accepts structural query forms. Broad feature requests need discovery first.
+Those are broad discovery prompts or keyword searches. Use `explore`, `lookup`, grep, or file reads first, then query exact graph nodes.
 
-### Feature Planning Workflow
+## CLI Surface
 
-For product prompts like "add movement status to the mobile app" or "change the card contract", do not call `vela search` with the whole feature description.
+| Command | Purpose |
+| --- | --- |
+| `vela` or `vela tui` | Launch the interactive TUI when stdout is a TTY. |
+| `vela build <path>` | Build graph-truth outputs. |
+| `vela update <path>` | Refresh generated graph outputs with rollback on failed update. |
+| `vela watch <path>` | Auto-refresh graph outputs on source changes. |
+| `vela status [--graph path]` | Show graph health and freshness. Alias: `bench`. |
+| `vela explore <request>` | Default broad agent surface for graph-backed structural context. |
+| `vela lookup <term>` | Resolve a term into candidate nodes. |
+| `vela search <query>` | Route supported structural natural-language forms to graph queries. |
+| `vela query dependencies <subject>` | Show outgoing dependencies. |
+| `vela query reverse_dependencies <subject>` | Show incoming dependencies and users. |
+| `vela query impact <subject>` or `vela impact <subject>` | Show reverse-impact facts. Supports `--format json`. |
+| `vela query path <subject> <target>` or `vela path <subject> <target>` | Find graph-backed path evidence between two endpoints. Supports `--format json`. |
+| `vela query explain <subject>` or `vela explain <subject>` | Explain a node with graph facts and evidence. Supports `--format json`. |
+| `vela serve [graph-file]` | Serve stdio MCP tools by default. Use `--http --port 7700` for legacy HTTP debug endpoints. |
+| `vela install` | Initialize `.vela/graph.db` and optionally install OpenCode or Claude Code MCP integration. |
+| `vela uninstall` | Remove selected agent integrations while preserving project indexes. |
+| `vela purge` | Refuse single-project purge without `--confirm` or `--force`; current single-project mode preserves `.vela/graph.db` even when confirmed. Use `vela purge --all --confirm` or `--force` to delete tracked project indexes. |
+| `vela hooks install/status/uninstall <path>` | Manage Vela-managed Git hook blocks. |
+| `vela compatibility` | Show language compatibility evidence levels. |
+| `vela version` | Print version information. |
 
-Use this workflow instead:
-
-1. Discover the concrete repos, files, DTOs, types, mappers, controllers, or screens involved.
-2. If the exact node is still unclear, run `vela lookup <term>` to get candidates.
-3. Pick the most specific real node labels available in each graph.
-4. Run `vela search` on those exact nodes.
-5. Build the plan from producer, contract, consumer, and rollout risk.
-
-Example workflow for a feature:
-
-1. Find candidate nodes such as `Transaction`, `TransactionMapper`, `MovementStatusDto`, or `MovementListScreen`.
-2. Then run structural queries like:
+Common flags:
 
 ```bash
-vela search --graph "./examples/wallet-service/.vela/graph.json" "explain Transaction"
-vela search --graph "./examples/wallet-service/.vela/graph.json" "who uses Transaction"
-vela search --graph "./examples/wallet-service/.vela/graph.json" "impact of MovementStatusDto"
-vela search --graph "./examples/wallet-service/.vela/graph.json" "who uses MovementListScreen"
+vela build ./repo --language go --driver scip-go --out-dir ./repo/.vela
+vela lookup "AuthService" --graph ./repo/.vela/graph.json --limit 5
+vela explain "AuthService" --graph ./repo/.vela/graph.json --format json
 ```
 
-This tells you:
+## MCP Surface
 
-- where the data shape lives
-- who maps it
-- who consumes it
-- what is affected by a contract change
-
-### Agent Rule Of Thumb
-
-Agents should treat `vela search` as a graph-truth relationship tool.
-
-- Do not pass bag-of-words or full feature prompts into `vela search`.
-- Do not guess generic node names like `movement` or `transaction` unless the exact node is already known.
-- For broad planning questions, discover exact node candidates first, then query the graph with those exact labels.
-
-See `docs/VELA_LOOKUP_AND_AMBIGUITY_SPEC.md` for the proposed `vela lookup` discovery command and safe ambiguity handling rules.
-
-### Example MCP config
-
-If you want to register Vela directly as its own MCP server:
-
-#### Claude Code
-
-Create `~/.claude/mcp/vela.json`:
-
-```json
-{
-  "command": "vela",
-  "args": ["serve"]
-}
-```
-
-#### OpenCode
-
-Add to `~/.config/opencode/mcp_settings.json`:
-
-```json
-{
-  "mcpServers": {
-    "vela": {
-      "command": "vela",
-      "args": ["serve"]
-    }
-  }
-}
-```
-
-### Which tool should I install?
-
-- Install **Ancora only** if you want memory.
-- Install **Vela only** if you want graph extraction and graph retrieval.
-- Install **both** if you want memory + graph retrieval together.
-
-## Architecture
-
-### Hybrid Go + Python Design
-
-**Go Layer (90%)**:
-- CLI/TUI (Bubbletea)
-- File detection & traversal
-- Tree-sitter AST parsing (via `go-tree-sitter`)
-- Graph construction (via `gonum/graph`)
-- Export to JSON/HTML/Obsidian
-- LLM client management
-- Progress tracking & worker pools
-
-**Python Layer (10%)**:
-- Community detection (Leiden via `graspologic` when available, NetworkX modularity fallback otherwise)
-- Specialized extractors (if needed)
-- Runs as subprocess, called only when necessary
-
-Install the baseline clustering dependency explicitly if you want community detection to run reliably across Python versions:
+`vela serve` starts a stdio MCP server by default. It is meant for MCP clients and does not print a terminal UI.
 
 ```bash
-python3 -m venv .venv
-.venv/bin/pip install -r requirements-clustering.txt
+vela serve --graph ./my-repo/.vela/graph.json
 ```
 
-That installs the NetworkX fallback backend used by `scripts/leiden.py` when Leiden is unavailable.
+Registered MCP tools use unprefixed names:
 
-If you specifically want the Leiden backend, install `graspologic` into that same virtualenv when it supports your Python version:
+| Tool | Purpose |
+| --- | --- |
+| `explore` | Resolve broad graph context requests into graph-backed candidates. |
+| `lookup` | Resolve a term into exact graph node candidates. |
+| `dependencies` | Return direct outgoing dependencies for a node. |
+| `reverse_dependencies` | Return direct incoming dependencies and users for a node. |
+| `impact` | Return reverse-impact facts. |
+| `path` | Return graph-backed path evidence between two nodes. |
+| `explain` | Explain a node with evidence-bearing graph facts. |
+| `status` | Report runtime graph freshness/status. |
+
+Some MCP clients display these with a server prefix such as `vela_explore` or `vela_explain`, but the registered tool names above are the current source of truth.
+
+Legacy HTTP debug mode is still available:
 
 ```bash
-.venv/bin/pip install -r requirements-clustering-leiden.txt
+vela serve --http --port 7700 --graph ./my-repo/.vela/graph.json
 ```
 
-### Pluggable LLM Interface
+HTTP debug endpoints are `GET /graph`, `GET /query?kind=dependencies&subject=AuthService&limit=5`, and `GET /health`.
 
-```go
-type LLMProvider interface {
-    ExtractGraph(ctx context.Context, text string) (Nodes, Edges, error)
-    Health(ctx context.Context) error
-}
-```
+## Agent Guidance
 
-Providers:
-- **Local**: Ollama or llama.cpp (0 tokens, 0 cost)
-- **Remote**: Anthropic Claude (flexible, powerful)
-- **Remote**: OpenAI GPT-4o (expensive, excellent quality)
+Treat Vela as structural graph truth, not keyword search.
 
-## Configuration
+1. Start broad product or architecture prompts with discovery.
+2. Identify concrete files, symbols, DTOs, services, repositories, or modules.
+3. Use `vela lookup` if the exact node label is unclear.
+4. Run structural queries only after choosing exact subjects or path endpoints.
+5. Treat stale or unavailable graph diagnostics as blockers for trusted graph answers.
 
-Create `~/.vela/config.yaml`:
+Do not send bag-of-words prompts or whole feature descriptions directly to `vela search`.
 
-```yaml
-llm:
-  provider: "local"  # local | anthropic | openai
-  model: "llama2"    # depends on provider
-  endpoint: "http://localhost:11434"  # for local providers
-  api_key: ""        # for remote providers
+## Relevant Docs
 
-extraction:
-  code_languages: ["go", "python", "typescript", "rust"]
-  include_docs: true
-  include_images: true
-  chunk_size: 8000   # tokens per chunk for large docs
+Older design docs and reports are historical snapshots. Use this README and the MCP/CLI source for current command and tool names.
 
-ui:
-  theme: "dark"
-  show_progress: true
-```
+| File | Why read it |
+| --- | --- |
+| `AGENTS.md` | Runtime guidance for agents using Vela structural queries. |
+| `docs/VELA_ARCHITECTURE.md` | Active graph-truth architecture model and layer boundaries. |
+| `docs/VELA_LOOKUP_AND_AMBIGUITY_SPEC.md` | Historical design context for the lookup/search split and ambiguity handling. |
+| `docs/GRAPH_DOMAIN_SCHEMAS.md` | Domain boundaries for graph views and truth models. |
+| `reports/VELA_V0_4_ARCHIVE.md` | Historical v0.4 archive scope, gate evidence, and known hardening follow-ups. |
+| `reports/SCN-025-real-workspace-smoke.md` | Redacted real-workspace smoke proof. |
 
-## Repository Structure
+## Current Boundaries
 
-```
-vela/
-├── cmd/vela/
-│   └── main.go                 # CLI entry point
-├── internal/
-│   ├── detect/
-│   │   └── detect.go           # File collection & filtering
-│   ├── extract/
-│   │   ├── extract.go          # Dispatcher
-│   │   ├── code.go             # Tree-sitter AST extraction
-│   │   ├── doc.go              # LLM-based doc extraction
-│   │   ├── pdf.go              # PDF text extraction
-│   │   └── schema.go           # Extraction result types
-│   ├── graph/
-│   │   ├── build.go            # Graph construction (gonum)
-│   │   ├── cluster.go          # Community detection wrapper
-│   │   ├── analyze.go          # God nodes + surprises
-│   │   └── types.go            # Graph node/edge types
-│   ├── llm/
-│   │   ├── client.go           # LLM interface
-│   │   ├── local.go            # Ollama/llama.cpp provider
-│   │   ├── anthropic.go        # Claude provider
-│   │   └── openai.go           # GPT-4o provider
-│   ├── tui/
-│   │   ├── app.go              # Bubbletea app
-│   │   ├── progress.go         # Progress tracking component
-│   │   └── styles.go           # UI styling
-│   ├── report/
-│   │   └── report.go           # GRAPH_REPORT.md generation
-│   ├── export/
-│   │   ├── json.go             # graph.json export
-│   │   ├── html.go             # Interactive visualization
-│   │   └── obsidian.go         # Obsidian vault export
-│   ├── cache/
-│   │   └── cache.go            # SHA256-based caching
-│   └── security/
-│       └── security.go         # Input validation
-├── pkg/
-│   └── types/
-│       └── types.go            # Shared types
-├── tests/
-│   └── fixtures/               # Test data
-├── go.mod
-├── go.sum
-├── LICENSE
-└── README.md
-```
-
-## License
-
-MIT
+- Full `go test ./...` is not the active gate because malformed detect fixture packages are intentionally present under `tests/fixtures/detect/**`.
+- `vela search` is structural-only. Use `explore`, `lookup`, grep, or file reads for discovery and raw text lookup.
+- Repo-local trusted query answers require a usable `.vela/graph.db`; stale or missing runtime storage should be fixed with `vela update` or `vela build` before relying on answers.
+- Vela's active product surface is local graph build/query plus MCP. Durable memory writes belong to Ancora, not Vela.
