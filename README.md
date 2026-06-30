@@ -1,3 +1,7 @@
+<div align="center">
+  <img src="assets/vela-header.png" alt="Vela" width="100%"/>
+</div>
+
 # Vela - Knowledge Explorer & Graph Builder
 
 A high-performance, privacy-first knowledge graph builder for codebases, documentation, and technical content. Built in Go with pluggable LLM providers (local or remote) for graph extraction and analysis.
