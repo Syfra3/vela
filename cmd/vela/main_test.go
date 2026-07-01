@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -116,6 +117,798 @@ func TestSCN011_CompatibilityCLIInstallInitializesProjectGraphAndOpenCode(t *tes
 		if !strings.Contains(stdout.String(), want) {
 			t.Fatalf("expected install output to contain %q, got %q", want, stdout.String())
 		}
+	}
+}
+
+// REQ-001/REQ-006 → SCN-001 → TestSCN001_InstallClusteringCreatesRepoLocalVenvAndVerifiesNetworkx
+func TestSCN001_InstallClusteringCreatesRepoLocalVenvAndVerifiesNetworkx(t *testing.T) {
+	// Scenario: Install baseline clustering into a new repo-local virtual environment
+	projectDir := t.TempDir()
+	requirementsPath := filepath.Join(projectDir, "requirements-clustering.txt")
+	if err := os.WriteFile(requirementsPath, []byte("networkx\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(requirements-clustering.txt) error = %v", err)
+	}
+
+	originalRunCommand := runClusteringInstallCommand
+	originalVerify := verifyClusteringNetworkX
+	t.Cleanup(func() {
+		runClusteringInstallCommand = originalRunCommand
+		verifyClusteringNetworkX = originalVerify
+	})
+
+	var commands [][]string
+	runClusteringInstallCommand = func(name string, args ...string) error {
+		commands = append(commands, append([]string{name}, args...))
+		if name == "python3" && len(args) == 3 && args[0] == "-m" && args[1] == "venv" {
+			pythonPath := filepath.Join(args[2], "bin", "python3")
+			if err := os.MkdirAll(filepath.Dir(pythonPath), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(pythonPath, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+		}
+		return nil
+	}
+	var verifiedPython string
+	verifyClusteringNetworkX = func(pythonPath string) error {
+		verifiedPython = pythonPath
+		return nil
+	}
+
+	var stdout bytes.Buffer
+	root := rootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"install", "--project", projectDir, "--clustering"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(install --clustering) error = %v", err)
+	}
+
+	venvDir := filepath.Join(projectDir, ".venv")
+	pythonPath := filepath.Join(venvDir, "bin", "python3")
+	if _, err := os.Stat(venvDir); err != nil {
+		t.Fatalf("expected repo-local .venv created: %v", err)
+	}
+	if verifiedPython != pythonPath {
+		t.Fatalf("verified python = %q, want %q", verifiedPython, pythonPath)
+	}
+	wantCommands := [][]string{
+		{"python3", "-m", "venv", venvDir},
+		{filepath.Join(venvDir, "bin", "pip"), "install", "-r", requirementsPath},
+	}
+	if fmt.Sprint(commands) != fmt.Sprint(wantCommands) {
+		t.Fatalf("install commands = %#v, want %#v", commands, wantCommands)
+	}
+	for _, want := range []string{"created repo-local .venv", "installed dependencies from requirements-clustering.txt", "verified networkx", "clustering installation succeeded"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected install output to contain %q, got %q", want, stdout.String())
+		}
+	}
+}
+
+// REQ-001/REQ-006 → SCN-002 → TestSCN002_InstallClusteringReusesExistingWritableRepoLocalVenv
+func TestSCN002_InstallClusteringReusesExistingWritableRepoLocalVenv(t *testing.T) {
+	// Scenario: Reuse an existing writable repo-local virtual environment
+	projectDir := t.TempDir()
+	requirementsPath := filepath.Join(projectDir, "requirements-clustering.txt")
+	if err := os.WriteFile(requirementsPath, []byte("networkx\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(requirements-clustering.txt) error = %v", err)
+	}
+	venvDir := filepath.Join(projectDir, ".venv")
+	pythonPath := filepath.Join(venvDir, "bin", "python3")
+	if err := os.MkdirAll(filepath.Dir(pythonPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.venv/bin) error = %v", err)
+	}
+	if err := os.WriteFile(pythonPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(.venv/bin/python3) error = %v", err)
+	}
+
+	originalRunCommand := runClusteringInstallCommand
+	originalVerify := verifyClusteringNetworkX
+	t.Cleanup(func() {
+		runClusteringInstallCommand = originalRunCommand
+		verifyClusteringNetworkX = originalVerify
+	})
+
+	var commands [][]string
+	runClusteringInstallCommand = func(name string, args ...string) error {
+		commands = append(commands, append([]string{name}, args...))
+		return nil
+	}
+	var verifiedPython string
+	verifyClusteringNetworkX = func(pythonPath string) error {
+		verifiedPython = pythonPath
+		return nil
+	}
+
+	var stdout bytes.Buffer
+	root := rootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"install", "--project", projectDir, "--clustering"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(install --clustering) error = %v", err)
+	}
+
+	if verifiedPython != pythonPath {
+		t.Fatalf("verified python = %q, want %q", verifiedPython, pythonPath)
+	}
+	wantCommands := [][]string{
+		{filepath.Join(venvDir, "bin", "pip"), "install", "-r", requirementsPath},
+	}
+	if fmt.Sprint(commands) != fmt.Sprint(wantCommands) {
+		t.Fatalf("install commands = %#v, want %#v", commands, wantCommands)
+	}
+	for _, want := range []string{"using existing repo-local .venv", "installed dependencies from requirements-clustering.txt", "verified networkx", "clustering installation succeeded"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected install output to contain %q, got %q", want, stdout.String())
+		}
+	}
+}
+
+// REQ-002/REQ-006 → SCN-003 → TestSCN003_InstallClusteringFailsWhenExistingRepoLocalVenvIsNotWritable
+func TestSCN003_InstallClusteringFailsWhenExistingRepoLocalVenvIsNotWritable(t *testing.T) {
+	// Scenario: Fail clearly when the existing virtual environment is not writable
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, "requirements-clustering.txt"), []byte("networkx\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(requirements-clustering.txt) error = %v", err)
+	}
+	venvDir := filepath.Join(projectDir, ".venv")
+	readOnlyActivation := filepath.Join(venvDir, "bin", "activate")
+	if err := os.MkdirAll(filepath.Dir(readOnlyActivation), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.venv/bin) error = %v", err)
+	}
+	if err := os.WriteFile(readOnlyActivation, []byte("readonly activation\n"), 0o444); err != nil {
+		t.Fatalf("WriteFile(.venv/bin/activate) error = %v", err)
+	}
+
+	originalRunCommand := runClusteringInstallCommand
+	originalVerify := verifyClusteringNetworkX
+	t.Cleanup(func() {
+		runClusteringInstallCommand = originalRunCommand
+		verifyClusteringNetworkX = originalVerify
+		_ = os.Chmod(readOnlyActivation, 0o644)
+	})
+
+	var commands [][]string
+	runClusteringInstallCommand = func(name string, args ...string) error {
+		commands = append(commands, append([]string{name}, args...))
+		return nil
+	}
+	verifyClusteringNetworkX = func(pythonPath string) error {
+		t.Fatalf("verifyClusteringNetworkX(%q) called before writable preflight passed", pythonPath)
+		return nil
+	}
+
+	var stdout bytes.Buffer
+	root := rootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"install", "--project", projectDir, "--clustering"})
+	err := root.Execute()
+
+	if err == nil {
+		t.Fatal("Execute(install --clustering) error = nil, want not-writable repo-local .venv failure")
+	}
+	if len(commands) != 0 {
+		t.Fatalf("install commands = %#v, want none before writable preflight passes", commands)
+	}
+	combined := err.Error() + stdout.String()
+	for _, want := range []string{"repo-local .venv", "not writable", "--repair-venv", "manual remediation"} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("expected error/output to contain %q, got error %q stdout %q", want, err.Error(), stdout.String())
+		}
+	}
+}
+
+// REQ-003/REQ-006 → SCN-004 → TestSCN004_InstallClusteringRepairVenvMakesRepoLocalVenvWritableBeforeInstalling
+func TestSCN004_InstallClusteringRepairVenvMakesRepoLocalVenvWritableBeforeInstalling(t *testing.T) {
+	// Scenario: Explicit repair mode makes the repo-local virtual environment writable before installing
+	projectDir := t.TempDir()
+	requirementsPath := filepath.Join(projectDir, "requirements-clustering.txt")
+	if err := os.WriteFile(requirementsPath, []byte("networkx\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(requirements-clustering.txt) error = %v", err)
+	}
+	venvDir := filepath.Join(projectDir, ".venv")
+	pythonPath := filepath.Join(venvDir, "bin", "python3")
+	readOnlyActivation := filepath.Join(venvDir, "bin", "activate")
+	if err := os.MkdirAll(filepath.Dir(readOnlyActivation), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.venv/bin) error = %v", err)
+	}
+	if err := os.WriteFile(pythonPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(.venv/bin/python3) error = %v", err)
+	}
+	if err := os.WriteFile(readOnlyActivation, []byte("readonly activation\n"), 0o444); err != nil {
+		t.Fatalf("WriteFile(.venv/bin/activate) error = %v", err)
+	}
+
+	originalRunCommand := runClusteringInstallCommand
+	originalVerify := verifyClusteringNetworkX
+	t.Cleanup(func() {
+		runClusteringInstallCommand = originalRunCommand
+		verifyClusteringNetworkX = originalVerify
+		_ = os.Chmod(readOnlyActivation, 0o644)
+	})
+
+	var commands [][]string
+	runClusteringInstallCommand = func(name string, args ...string) error {
+		commands = append(commands, append([]string{name}, args...))
+		return nil
+	}
+	var verifiedPython string
+	verifyClusteringNetworkX = func(pythonPath string) error {
+		verifiedPython = pythonPath
+		return nil
+	}
+
+	var stdout bytes.Buffer
+	root := rootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"install", "--project", projectDir, "--clustering", "--repair-venv"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(install --clustering --repair-venv) error = %v", err)
+	}
+
+	if verifiedPython != pythonPath {
+		t.Fatalf("verified python = %q, want %q", verifiedPython, pythonPath)
+	}
+	info, err := os.Stat(readOnlyActivation)
+	if err != nil {
+		t.Fatalf("Stat(.venv/bin/activate) error = %v", err)
+	}
+	if info.Mode().Perm()&0o200 == 0 {
+		t.Fatalf("expected repair mode to make repo-local .venv activation file user-writable, mode = %v", info.Mode().Perm())
+	}
+	wantCommands := [][]string{
+		{filepath.Join(venvDir, "bin", "pip"), "install", "-r", requirementsPath},
+	}
+	if fmt.Sprint(commands) != fmt.Sprint(wantCommands) {
+		t.Fatalf("install commands = %#v, want %#v", commands, wantCommands)
+	}
+	for _, want := range []string{"repaired repo-local .venv permissions", "installed dependencies from requirements-clustering.txt", "verified networkx", "clustering installation succeeded"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected install output to contain %q, got %q", want, stdout.String())
+		}
+	}
+}
+
+// REQ-003/REQ-006 → SCN-005 → TestSCN005_InstallClusteringRepairVenvReportsUnrecoverablePermissionFailure
+func TestSCN005_InstallClusteringRepairVenvReportsUnrecoverablePermissionFailure(t *testing.T) {
+	// Scenario: Explicit repair mode reports unrecoverable permission failures
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, "requirements-clustering.txt"), []byte("networkx\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(requirements-clustering.txt) error = %v", err)
+	}
+	venvDir := filepath.Join(projectDir, ".venv")
+	readOnlyActivation := filepath.Join(venvDir, "bin", "activate")
+	if err := os.MkdirAll(filepath.Dir(readOnlyActivation), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.venv/bin) error = %v", err)
+	}
+	if err := os.WriteFile(readOnlyActivation, []byte("readonly activation\n"), 0o444); err != nil {
+		t.Fatalf("WriteFile(.venv/bin/activate) error = %v", err)
+	}
+
+	originalRunCommand := runClusteringInstallCommand
+	originalVerify := verifyClusteringNetworkX
+	originalChmod := chmodClusteringVenvPath
+	t.Cleanup(func() {
+		runClusteringInstallCommand = originalRunCommand
+		verifyClusteringNetworkX = originalVerify
+		chmodClusteringVenvPath = originalChmod
+		_ = os.Chmod(readOnlyActivation, 0o644)
+	})
+
+	underlyingErr := errors.New("operation not permitted")
+	chmodClusteringVenvPath = func(path string, mode os.FileMode) error {
+		if path == readOnlyActivation {
+			return underlyingErr
+		}
+		return os.Chmod(path, mode)
+	}
+	var commands [][]string
+	runClusteringInstallCommand = func(name string, args ...string) error {
+		commands = append(commands, append([]string{name}, args...))
+		return nil
+	}
+	verifyClusteringNetworkX = func(pythonPath string) error {
+		t.Fatalf("verifyClusteringNetworkX(%q) called after unrecoverable repair failure", pythonPath)
+		return nil
+	}
+
+	var stdout bytes.Buffer
+	root := rootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"install", "--project", projectDir, "--clustering", "--repair-venv"})
+	err := root.Execute()
+
+	if err == nil {
+		t.Fatal("Execute(install --clustering --repair-venv) error = nil, want unrecoverable repair failure")
+	}
+	if len(commands) != 0 {
+		t.Fatalf("install commands = %#v, want none after unrecoverable repair failure", commands)
+	}
+	combined := err.Error() + stdout.String()
+	for _, want := range []string{"repair repo-local .venv writability", readOnlyActivation, "operation not permitted"} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("expected error/output to contain %q, got error %q stdout %q", want, err.Error(), stdout.String())
+		}
+	}
+	for _, forbidden := range []string{"installed dependencies from requirements-clustering.txt", "clustering installation succeeded"} {
+		if strings.Contains(combined, forbidden) {
+			t.Fatalf("did not expect error/output to contain %q after unrecoverable repair failure, got error %q stdout %q", forbidden, err.Error(), stdout.String())
+		}
+	}
+}
+
+// REQ-004 → SCN-006 → TestSCN006_InstallClusteringKeepsOptionalLeidenSeparateByDefault
+func TestSCN006_InstallClusteringKeepsOptionalLeidenSeparateByDefault(t *testing.T) {
+	// Scenario: Baseline clustering install does not install optional Leiden dependencies
+	projectDir := t.TempDir()
+	requirementsPath := filepath.Join(projectDir, "requirements-clustering.txt")
+	if err := os.WriteFile(requirementsPath, []byte("networkx\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(requirements-clustering.txt) error = %v", err)
+	}
+
+	originalRunCommand := runClusteringInstallCommand
+	originalVerify := verifyClusteringNetworkX
+	t.Cleanup(func() {
+		runClusteringInstallCommand = originalRunCommand
+		verifyClusteringNetworkX = originalVerify
+	})
+
+	var commands [][]string
+	runClusteringInstallCommand = func(name string, args ...string) error {
+		commands = append(commands, append([]string{name}, args...))
+		if name == "python3" && len(args) == 3 && args[0] == "-m" && args[1] == "venv" {
+			pythonPath := filepath.Join(args[2], "bin", "python3")
+			if err := os.MkdirAll(filepath.Dir(pythonPath), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(pythonPath, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+		}
+		return nil
+	}
+	verifyClusteringNetworkX = func(pythonPath string) error {
+		return nil
+	}
+
+	var stdout bytes.Buffer
+	root := rootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"install", "--project", projectDir, "--clustering"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(install --clustering) error = %v", err)
+	}
+
+	wantCommands := [][]string{
+		{"python3", "-m", "venv", filepath.Join(projectDir, ".venv")},
+		{filepath.Join(projectDir, ".venv", "bin", "pip"), "install", "-r", requirementsPath},
+	}
+	if fmt.Sprint(commands) != fmt.Sprint(wantCommands) {
+		t.Fatalf("install commands = %#v, want only baseline requirements command %#v", commands, wantCommands)
+	}
+	combinedCommands := fmt.Sprint(commands)
+	for _, forbidden := range []string{"graspologic", "requirements-clustering-leiden.txt"} {
+		if strings.Contains(combinedCommands, forbidden) {
+			t.Fatalf("did not expect baseline install command to include optional Leiden dependency %q: %#v", forbidden, commands)
+		}
+	}
+	for _, want := range []string{"installed dependencies from requirements-clustering.txt", "optional Leiden support remains separate from baseline clustering support"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected install output to contain %q, got %q", want, stdout.String())
+		}
+	}
+}
+
+// REQ-004 → SCN-007 → TestSCN007_InstallClusteringPreservesExistingOptionalLeidenDependencies
+func TestSCN007_InstallClusteringPreservesExistingOptionalLeidenDependencies(t *testing.T) {
+	// Scenario: Existing optional Leiden dependencies are preserved
+	projectDir := t.TempDir()
+	requirementsPath := filepath.Join(projectDir, "requirements-clustering.txt")
+	if err := os.WriteFile(requirementsPath, []byte("networkx\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(requirements-clustering.txt) error = %v", err)
+	}
+	venvDir := filepath.Join(projectDir, ".venv")
+	pythonPath := filepath.Join(venvDir, "bin", "python3")
+	if err := os.MkdirAll(filepath.Dir(pythonPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.venv/bin) error = %v", err)
+	}
+	if err := os.WriteFile(pythonPath, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(.venv/bin/python3) error = %v", err)
+	}
+
+	originalRunCommand := runClusteringInstallCommand
+	originalVerify := verifyClusteringNetworkX
+	originalOptionalVersion := optionalLeidenDependencyVersion
+	t.Cleanup(func() {
+		runClusteringInstallCommand = originalRunCommand
+		verifyClusteringNetworkX = originalVerify
+		optionalLeidenDependencyVersion = originalOptionalVersion
+	})
+
+	var commands [][]string
+	runClusteringInstallCommand = func(name string, args ...string) error {
+		commands = append(commands, append([]string{name}, args...))
+		return nil
+	}
+	verifyClusteringNetworkX = func(pythonPath string) error {
+		return nil
+	}
+	var optionalChecks []string
+	optionalLeidenDependencyVersion = func(pythonPath string) (string, error) {
+		optionalChecks = append(optionalChecks, pythonPath)
+		return "graspologic 3.4.5", nil
+	}
+
+	var stdout bytes.Buffer
+	root := rootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"install", "--project", projectDir, "--clustering"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(install --clustering) error = %v", err)
+	}
+
+	if fmt.Sprint(optionalChecks) != fmt.Sprint([]string{pythonPath, pythonPath}) {
+		t.Fatalf("optional Leiden checks = %#v, want before and after checks against %q", optionalChecks, pythonPath)
+	}
+	wantCommands := [][]string{
+		{filepath.Join(venvDir, "bin", "pip"), "install", "-r", requirementsPath},
+	}
+	if fmt.Sprint(commands) != fmt.Sprint(wantCommands) {
+		t.Fatalf("install commands = %#v, want only baseline requirements command %#v", commands, wantCommands)
+	}
+	combinedCommands := fmt.Sprint(commands)
+	for _, forbidden := range []string{"uninstall", "--force-reinstall", "graspologic==", "graspologic<", "requirements-clustering-leiden.txt"} {
+		if strings.Contains(combinedCommands, forbidden) {
+			t.Fatalf("did not expect baseline install to remove or downgrade optional Leiden dependency via %q: %#v", forbidden, commands)
+		}
+	}
+	for _, want := range []string{"installed dependencies from requirements-clustering.txt", "preserved existing optional Leiden dependencies", "did not downgrade optional Leiden dependencies"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected install output to contain %q, got %q", want, stdout.String())
+		}
+	}
+}
+
+// REQ-005/REQ-006 → SCN-008 → TestSCN008_InstallClusteringWarnsExistingGraphCacheMayLackCommunityMetadata
+func TestSCN008_InstallClusteringWarnsExistingGraphCacheMayLackCommunityMetadata(t *testing.T) {
+	// Scenario: Successful install warns that an existing graph cache may lack community metadata
+	projectDir := t.TempDir()
+	requirementsPath := filepath.Join(projectDir, "requirements-clustering.txt")
+	if err := os.WriteFile(requirementsPath, []byte("networkx\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(requirements-clustering.txt) error = %v", err)
+	}
+	graphCachePath := filepath.Join(projectDir, ".vela", "graph.db")
+	graphCacheContent := []byte("existing graph cache built before clustering\n")
+	if err := os.MkdirAll(filepath.Dir(graphCachePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.vela) error = %v", err)
+	}
+	if err := os.WriteFile(graphCachePath, graphCacheContent, 0o644); err != nil {
+		t.Fatalf("WriteFile(graph cache) error = %v", err)
+	}
+
+	originalRunCommand := runClusteringInstallCommand
+	originalVerify := verifyClusteringNetworkX
+	t.Cleanup(func() {
+		runClusteringInstallCommand = originalRunCommand
+		verifyClusteringNetworkX = originalVerify
+	})
+
+	runClusteringInstallCommand = func(name string, args ...string) error {
+		if name == "python3" && len(args) == 3 && args[0] == "-m" && args[1] == "venv" {
+			pythonPath := filepath.Join(args[2], "bin", "python3")
+			if err := os.MkdirAll(filepath.Dir(pythonPath), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(pythonPath, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+		}
+		return nil
+	}
+	verifyClusteringNetworkX = func(pythonPath string) error {
+		return nil
+	}
+
+	var stdout bytes.Buffer
+	root := rootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"install", "--project", projectDir, "--clustering"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(install --clustering) error = %v", err)
+	}
+
+	remainingGraphCache, err := os.ReadFile(graphCachePath)
+	if err != nil {
+		t.Fatalf("ReadFile(graph cache) error = %v, want cache artifact preserved", err)
+	}
+	if string(remainingGraphCache) != string(graphCacheContent) {
+		t.Fatalf("graph cache content = %q, want preserved %q", remainingGraphCache, graphCacheContent)
+	}
+	for _, want := range []string{
+		"clustering installation succeeded",
+		"existing graph cache may have been built without community metadata",
+		"run `vela build " + projectDir + "` to rebuild graph metadata without deleting cache artifacts",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected install output to contain %q, got %q", want, stdout.String())
+		}
+	}
+	for _, forbidden := range []string{"deleted graph cache", "purged graph cache", "removed graph cache"} {
+		if strings.Contains(stdout.String(), forbidden) {
+			t.Fatalf("did not expect destructive graph cache message %q, got %q", forbidden, stdout.String())
+		}
+	}
+}
+
+// REQ-005/REQ-006 → SCN-009 → TestSCN009_InstallClusteringReportsNextBuildCanUseClusteringWhenNoGraphCacheExists
+func TestSCN009_InstallClusteringReportsNextBuildCanUseClusteringWhenNoGraphCacheExists(t *testing.T) {
+	// Scenario: No cache warning is needed when no graph cache exists
+	projectDir := t.TempDir()
+	requirementsPath := filepath.Join(projectDir, "requirements-clustering.txt")
+	if err := os.WriteFile(requirementsPath, []byte("networkx\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(requirements-clustering.txt) error = %v", err)
+	}
+
+	originalRunCommand := runClusteringInstallCommand
+	originalVerify := verifyClusteringNetworkX
+	t.Cleanup(func() {
+		runClusteringInstallCommand = originalRunCommand
+		verifyClusteringNetworkX = originalVerify
+	})
+
+	runClusteringInstallCommand = func(name string, args ...string) error {
+		if name == "python3" && len(args) == 3 && args[0] == "-m" && args[1] == "venv" {
+			pythonPath := filepath.Join(args[2], "bin", "python3")
+			if err := os.MkdirAll(filepath.Dir(pythonPath), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(pythonPath, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+		}
+		return nil
+	}
+	verifyClusteringNetworkX = func(pythonPath string) error {
+		return nil
+	}
+
+	var stdout bytes.Buffer
+	root := rootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"install", "--project", projectDir, "--clustering"})
+	if err := root.Execute(); err != nil {
+		t.Fatalf("Execute(install --clustering) error = %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(projectDir, ".vela", "graph.db")); !os.IsNotExist(err) {
+		t.Fatalf("graph cache stat err = %v, want no graph cache artifact", err)
+	}
+	for _, want := range []string{
+		"clustering installation succeeded",
+		"next graph build can use clustering",
+	} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("expected install output to contain %q, got %q", want, stdout.String())
+		}
+	}
+	for _, forbidden := range []string{
+		"existing graph cache may have been built without community metadata",
+		"delete graph cache",
+		"deleting graph cache",
+		"deleted graph cache",
+		"purged graph cache",
+		"removed graph cache",
+	} {
+		if strings.Contains(stdout.String(), forbidden) {
+			t.Fatalf("did not expect no-cache install output to contain %q, got %q", forbidden, stdout.String())
+		}
+	}
+}
+
+// REQ-005/REQ-006 → SCN-010 → TestSCN010_InstallClusteringForceRebuildSeparatesInstallSuccessFromRebuildFailure
+func TestSCN010_InstallClusteringForceRebuildSeparatesInstallSuccessFromRebuildFailure(t *testing.T) {
+	// Scenario: Explicit force rebuild separates install success from rebuild failure
+	projectDir := t.TempDir()
+	requirementsPath := filepath.Join(projectDir, "requirements-clustering.txt")
+	if err := os.WriteFile(requirementsPath, []byte("networkx\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(requirements-clustering.txt) error = %v", err)
+	}
+	graphCachePath := filepath.Join(projectDir, ".vela", "graph.db")
+	if err := os.MkdirAll(filepath.Dir(graphCachePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.vela) error = %v", err)
+	}
+	if err := os.WriteFile(graphCachePath, []byte("existing graph cache\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(graph cache) error = %v", err)
+	}
+
+	originalRunCommand := runClusteringInstallCommand
+	originalVerify := verifyClusteringNetworkX
+	originalRunBuildService := runBuildService
+	t.Cleanup(func() {
+		runClusteringInstallCommand = originalRunCommand
+		verifyClusteringNetworkX = originalVerify
+		runBuildService = originalRunBuildService
+	})
+
+	var commands [][]string
+	runClusteringInstallCommand = func(name string, args ...string) error {
+		commands = append(commands, append([]string{name}, args...))
+		if name == "python3" && len(args) == 3 && args[0] == "-m" && args[1] == "venv" {
+			pythonPath := filepath.Join(args[2], "bin", "python3")
+			if err := os.MkdirAll(filepath.Dir(pythonPath), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(pythonPath, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+		}
+		return nil
+	}
+	verifyClusteringNetworkX = func(pythonPath string) error {
+		return nil
+	}
+	rebuildErr := errors.New("synthetic graph rebuild failure")
+	var rebuildRequests []types.BuildRequest
+	runBuildService = func(ctx context.Context, outDir string, req types.BuildRequest) (buildOutput, error) {
+		rebuildRequests = append(rebuildRequests, req)
+		return buildOutput{}, rebuildErr
+	}
+
+	var stdout bytes.Buffer
+	root := rootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"install", "--project", projectDir, "--clustering", "--force-rebuild"})
+	err := root.Execute()
+
+	if err == nil {
+		t.Fatal("Execute(install --clustering --force-rebuild) error = nil, want rebuild failure")
+	}
+	if len(rebuildRequests) != 1 || rebuildRequests[0].RepoRoot != projectDir {
+		t.Fatalf("rebuild requests = %#v, want one force rebuild for %q", rebuildRequests, projectDir)
+	}
+	wantCommands := [][]string{
+		{"python3", "-m", "venv", filepath.Join(projectDir, ".venv")},
+		{filepath.Join(projectDir, ".venv", "bin", "pip"), "install", "-r", requirementsPath},
+	}
+	if fmt.Sprint(commands) != fmt.Sprint(wantCommands) {
+		t.Fatalf("install commands = %#v, want dependency installation before rebuild %#v", commands, wantCommands)
+	}
+	combined := err.Error() + stdout.String()
+	for _, want := range []string{
+		"clustering installation succeeded",
+		"graph rebuild failed after successful clustering install",
+		"synthetic graph rebuild failure",
+	} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("expected error/output to contain %q, got error %q stdout %q", want, err.Error(), stdout.String())
+		}
+	}
+	for _, forbidden := range []string{"roll back", "uninstall", "deleted graph cache", "purged graph cache", "removed graph cache"} {
+		if strings.Contains(combined, forbidden) {
+			t.Fatalf("did not expect force-rebuild failure output to contain %q, got error %q stdout %q", forbidden, err.Error(), stdout.String())
+		}
+	}
+}
+
+// REQ-002/REQ-006 → SCN-011 → TestSCN011_InstallClusteringTranslatesPermissionDeniedVenvPreparationToActionableError
+func TestSCN011_InstallClusteringTranslatesPermissionDeniedVenvPreparationToActionableError(t *testing.T) {
+	// Scenario: Permission-denied venv creation is translated into an actionable Vela error
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, "requirements-clustering.txt"), []byte("networkx\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(requirements-clustering.txt) error = %v", err)
+	}
+	venvDir := filepath.Join(projectDir, ".venv")
+	readOnlyActivation := filepath.Join(venvDir, "bin", "activate")
+	if err := os.MkdirAll(filepath.Dir(readOnlyActivation), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.venv/bin) error = %v", err)
+	}
+	if err := os.WriteFile(readOnlyActivation, []byte("readonly activation\n"), 0o444); err != nil {
+		t.Fatalf("WriteFile(.venv/bin/activate) error = %v", err)
+	}
+
+	originalRunCommand := runClusteringInstallCommand
+	originalVerify := verifyClusteringNetworkX
+	t.Cleanup(func() {
+		runClusteringInstallCommand = originalRunCommand
+		verifyClusteringNetworkX = originalVerify
+		_ = os.Chmod(readOnlyActivation, 0o644)
+	})
+
+	var commands [][]string
+	runClusteringInstallCommand = func(name string, args ...string) error {
+		commands = append(commands, append([]string{name}, args...))
+		return errors.New("permission denied")
+	}
+	verifyClusteringNetworkX = func(pythonPath string) error {
+		t.Fatalf("verifyClusteringNetworkX(%q) called after permission-denied venv preparation failure", pythonPath)
+		return nil
+	}
+
+	var stdout bytes.Buffer
+	root := rootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"install", "--project", projectDir, "--clustering"})
+	err := root.Execute()
+
+	if err == nil {
+		t.Fatal("Execute(install --clustering) error = nil, want actionable repo-local .venv permission-denied failure")
+	}
+	if len(commands) != 0 {
+		t.Fatalf("install commands = %#v, want none before actionable writable preflight passes", commands)
+	}
+	combined := err.Error() + stdout.String()
+	for _, want := range []string{"repo-local .venv", "not writable", readOnlyActivation, "permission denied", "--repair-venv"} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("expected error/output to contain %q, got error %q stdout %q", want, err.Error(), stdout.String())
+		}
+	}
+	for _, forbidden := range []string{"installed dependencies from requirements-clustering.txt", "clustering installation succeeded", "chmod", "chown"} {
+		if strings.Contains(combined, forbidden) {
+			t.Fatalf("did not expect permission-denied preparation failure to contain %q, got error %q stdout %q", forbidden, err.Error(), stdout.String())
+		}
+	}
+}
+
+// REQ-001/REQ-006 → SCN-012 → TestSCN012_InstallClusteringNetworkxVerificationFailurePreventsPartialSuccess
+func TestSCN012_InstallClusteringNetworkxVerificationFailurePreventsPartialSuccess(t *testing.T) {
+	// Scenario: Networkx verification failure prevents partial success
+	projectDir := t.TempDir()
+	requirementsPath := filepath.Join(projectDir, "requirements-clustering.txt")
+	if err := os.WriteFile(requirementsPath, []byte("networkx\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(requirements-clustering.txt) error = %v", err)
+	}
+
+	originalRunCommand := runClusteringInstallCommand
+	originalVerify := verifyClusteringNetworkX
+	t.Cleanup(func() {
+		runClusteringInstallCommand = originalRunCommand
+		verifyClusteringNetworkX = originalVerify
+	})
+
+	var commands [][]string
+	runClusteringInstallCommand = func(name string, args ...string) error {
+		commands = append(commands, append([]string{name}, args...))
+		if name == "python3" && len(args) == 3 && args[0] == "-m" && args[1] == "venv" {
+			pythonPath := filepath.Join(args[2], "bin", "python3")
+			if err := os.MkdirAll(filepath.Dir(pythonPath), 0o755); err != nil {
+				return err
+			}
+			return os.WriteFile(pythonPath, []byte("#!/bin/sh\nexit 0\n"), 0o755)
+		}
+		return nil
+	}
+	verificationErr := errors.New("synthetic networkx import failure")
+	verifyClusteringNetworkX = func(pythonPath string) error {
+		return verificationErr
+	}
+
+	var stdout bytes.Buffer
+	root := rootCmd()
+	root.SetOut(&stdout)
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"install", "--project", projectDir, "--clustering"})
+	err := root.Execute()
+
+	if err == nil {
+		t.Fatal("Execute(install --clustering) error = nil, want networkx verification failure")
+	}
+	wantCommands := [][]string{
+		{"python3", "-m", "venv", filepath.Join(projectDir, ".venv")},
+		{filepath.Join(projectDir, ".venv", "bin", "pip"), "install", "-r", requirementsPath},
+	}
+	if fmt.Sprint(commands) != fmt.Sprint(wantCommands) {
+		t.Fatalf("install commands = %#v, want dependency installation before verification failure %#v", commands, wantCommands)
+	}
+	combined := err.Error() + stdout.String()
+	for _, want := range []string{"installed dependencies from requirements-clustering.txt", "clustering verification failed", "synthetic networkx import failure"} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("expected error/output to contain %q, got error %q stdout %q", want, err.Error(), stdout.String())
+		}
+	}
+	if strings.Contains(combined, "clustering installation succeeded") {
+		t.Fatalf("did not expect verification failure to report clustering installation success, got error %q stdout %q", err.Error(), stdout.String())
 	}
 }
 
