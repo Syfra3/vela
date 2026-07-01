@@ -1,0 +1,53 @@
+version: vela-install-clustering
+status: scn-012-review-ready
+
+scope:
+  spec: specs/hard_spec.md
+  feature: features/vela_install_clustering.feature
+  scenarios:
+    - SCN-001
+    - SCN-002
+    - SCN-003
+    - SCN-004
+    - SCN-005
+    - SCN-006
+    - SCN-007
+    - SCN-008
+    - SCN-009
+    - SCN-010
+    - SCN-011
+    - SCN-012
+
+active_gate:
+  name: scn-001-through-scn-012-go-cli-verification
+  severity: blocking
+  thresholds:
+    required_commands_must_pass: 100%
+    allowed_failed_required_commands: 0
+  remediation_policy: >-
+    Any required command failure blocks Rotta review approval. Return to the
+    TDD implementer with the failing command output and do not approve until
+    the active gate passes.
+  rationale: >-
+    SCN-001 through SCN-012 implement the Go CLI clustering install workflow.
+    Rotta Judge should load these objective gates from this file and run the
+    configured commands instead of relying on hardcoded thresholds or legacy
+    workflow metadata.
+  commands:
+    - command: make verify
+      required: true
+    - command: go test ./cmd/vela -run 'TestSCN0(0[1-9]|1[0-2])_InstallClustering' -count=1
+      required: true
+
+review_evidence:
+  hard_spec: specs/hard_spec.md
+  feature: features/vela_install_clustering.feature
+  approval_marker: specs/.approved
+  implementation_marker: specs/.implementation-complete
+  tdd_log: .rotta/tdd-log.md
+  judge_report: reports/judge_report.md
+
+notes:
+  - Active scope is SCN-001 through SCN-012 for Vela clustering installation only.
+  - Full project verification uses make verify because this repository intentionally scopes tests away from invalid fixture packages under tests/fixtures/detect.
+  - This file records commands for Rotta Judge to execute; it does not record command results.

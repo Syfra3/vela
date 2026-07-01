@@ -1,10 +1,10 @@
-version: mcp-stock-chef-graph-correctness
+version: vela-install-clustering
 implemented: true
-status: scn-007-complete
+status: scn-012-complete
 
 workflow:
   spec: specs/hard_spec.md
-  feature: features/mcp_stock_chef_graph_correctness.feature
+  feature: features/vela_install_clustering.feature
 
 scenarios:
   - SCN-001
@@ -14,23 +14,32 @@ scenarios:
   - SCN-005
   - SCN-006
   - SCN-007
+  - SCN-008
+  - SCN-009
+  - SCN-010
+  - SCN-011
+  - SCN-012
 
 completion_notes:
-  - SCN-001 is implemented for the Vela MCP stock-chef graph correctness workflow.
-  - SCN-002 is implemented for MCP graph source evidence in query responses.
-  - SCN-003 is implemented for MCP freshness reason evidence when build or update guidance is recommended.
-  - SCN-004 is implemented for canonical MCP tool names that do not duplicate the server name prefix.
-  - SCN-005 is implemented for preferring the active real stock-chef workspace over same-name dep-eval corpus evidence in MCP graph-query responses.
-  - SCN-006 is implemented for returning an explicit MCP ambiguity response when same-name stock-chef corpora exist without an active workspace or explicit graph selector, including symbol-only graph-backed queries that do not mention the duplicate project name.
-  - SCN-007 is implemented for reporting a missing, invalid, or unreadable active stock-chef workspace graph without silently answering from an available dep-eval stock-chef corpus.
-  - Later scenarios in `features/mcp_stock_chef_graph_correctness.feature` are intentionally outside this completion marker.
-  - Approval evidence is recorded in `specs/.approved` for `features/mcp_stock_chef_graph_correctness.feature`.
-  - No runtime behavior is introduced by this marker; it only records Bob review precondition evidence.
+  - SCN-001 is implemented for installing baseline clustering dependencies into a new repo-local virtual environment.
+  - SCN-002 is implemented for reusing an existing writable repo-local virtual environment.
+  - SCN-003 is implemented for failing before dependency installation when the existing repo-local virtual environment is not writable.
+  - SCN-004 is implemented for explicit `--repair-venv` writability repair before installing.
+  - SCN-005 is implemented for reporting unrecoverable repair permission failures without claiming dependency installation success.
+  - SCN-006 is implemented for keeping optional Leiden dependencies separate from baseline clustering install.
+  - SCN-007 is implemented for preserving existing optional Leiden dependencies during baseline clustering install.
+  - SCN-008 is implemented for warning that an existing graph cache may lack community metadata and recommending a non-destructive rebuild.
+  - SCN-009 is implemented for reporting that the next graph build can use clustering when no graph cache exists.
+  - SCN-010 is implemented for separating explicit force-rebuild failure from successful clustering dependency installation.
+  - SCN-011 is implemented for translating permission-denied virtual environment preparation failures into actionable Vela errors.
+  - SCN-012 is implemented for failing clearly when `networkx` verification fails after dependency installation.
+  - Approval evidence is recorded in `specs/.approved` for `features/vela_install_clustering.feature`.
+  - No runtime behavior is introduced by this marker; it only records Rotta review precondition evidence.
 
 evidence:
   hard_spec: specs/hard_spec.md
-  feature: features/mcp_stock_chef_graph_correctness.feature
+  feature: features/vela_install_clustering.feature
   approval_marker: specs/.approved
-  quality_gates: .uncle-bob/quality-gates.yaml
-  tdd_log: .uncle-bob/tdd-log.md
+  quality_gates: .rotta/quality-gates.yaml
+  tdd_log: .rotta/tdd-log.md
   judge_report: reports/judge_report.md

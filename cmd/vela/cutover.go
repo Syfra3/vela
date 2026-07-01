@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -55,6 +56,29 @@ var runBuildService = func(ctx context.Context, outDir string, req types.BuildRe
 		Observe:   observe,
 	})
 }
+
+var runClusteringInstallCommand = func(name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return fmt.Errorf("%s %s: %w: %s", name, strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+var verifyClusteringNetworkX = func(pythonPath string) error {
+	return runClusteringInstallCommand(pythonPath, "-c", `import networkx`)
+}
+
+var optionalLeidenDependencyVersion = func(pythonPath string) (string, error) {
+	cmd := exec.Command(pythonPath, "-c", `import importlib.metadata as metadata; print("graspologic " + metadata.version("graspologic"))`)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", nil
+	}
+	return strings.TrimSpace(string(output)), nil
+}
+
+var chmodClusteringVenvPath = os.Chmod
 
 var runWatchService = func(ctx context.Context, outDir string, req types.BuildRequest, stdout, stderr io.Writer) error {
 	w, err := watch.New(req.RepoRoot, []string{".go", ".py", ".ts", ".tsx", ".js", ".jsx"}, func(changed []string) error {
@@ -195,6 +219,9 @@ func installCmd() *cobra.Command {
 	var opencodeDir string
 	var claudeDir string
 	var permissions []string
+	var clustering bool
+	var repairVenv bool
+	var forceRebuild bool
 
 	cmd := &cobra.Command{
 		Use:   "install",
@@ -202,6 +229,9 @@ func installCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if strings.TrimSpace(projectDir) == "" {
 				projectDir = "."
+			}
+			if clustering {
+				return installClusteringDependencies(cmd.Context(), projectDir, cmd.OutOrStdout(), repairVenv, forceRebuild)
 			}
 			targets := detectedInstallTargets()
 			if len(targets) == 0 {
@@ -258,7 +288,131 @@ func installCmd() *cobra.Command {
 	cmd.Flags().StringVar(&opencodeDir, "opencode-dir", "", "OpenCode configuration directory")
 	cmd.Flags().StringVar(&claudeDir, "claude-dir", "", "Claude Code integration directory")
 	cmd.Flags().StringSliceVar(&permissions, "permission", nil, "Permission setting to apply when supported by the selected agent")
+	cmd.Flags().BoolVar(&clustering, "clustering", false, "Install baseline clustering dependencies into the repo-local virtual environment")
+	cmd.Flags().BoolVar(&repairVenv, "repair-venv", false, "Repair repo-local virtual environment writability before installing clustering dependencies")
+	cmd.Flags().BoolVar(&forceRebuild, "force-rebuild", false, "Force a graph rebuild after successful clustering dependency installation")
 	return cmd
+}
+
+func installClusteringDependencies(ctx context.Context, projectDir string, stdout io.Writer, repairVenv bool, forceRebuild bool) error {
+	venvDir := filepath.Join(projectDir, ".venv")
+	pythonPath := filepath.Join(venvDir, "bin", "python3")
+	pipPath := filepath.Join(venvDir, "bin", "pip")
+	requirementsPath := filepath.Join(projectDir, "requirements-clustering.txt")
+
+	if _, err := os.Stat(venvDir); os.IsNotExist(err) {
+		if err := runClusteringInstallCommand("python3", "-m", "venv", venvDir); err != nil {
+			return fmt.Errorf("create repo-local .venv: %w", err)
+		}
+		fmt.Fprintln(stdout, "created repo-local .venv")
+	} else if err != nil {
+		return fmt.Errorf("inspect repo-local .venv: %w", err)
+	} else {
+		if repairVenv {
+			if err := repairRepoLocalVenvWritability(venvDir); err != nil {
+				return err
+			}
+			fmt.Fprintln(stdout, "repaired repo-local .venv permissions")
+		}
+		if err := ensureRepoLocalVenvWritable(venvDir); err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout, "using existing repo-local .venv")
+	}
+	optionalLeidenBefore, err := optionalLeidenDependencyVersion(pythonPath)
+	if err != nil {
+		return fmt.Errorf("inspect optional Leiden dependencies before baseline install: %w", err)
+	}
+
+	if err := runClusteringInstallCommand(pipPath, "install", "-r", requirementsPath); err != nil {
+		return fmt.Errorf("install dependencies from requirements-clustering.txt: %w", err)
+	}
+	fmt.Fprintln(stdout, "installed dependencies from requirements-clustering.txt")
+	fmt.Fprintln(stdout, "optional Leiden support remains separate from baseline clustering support")
+	if optionalLeidenBefore != "" {
+		optionalLeidenAfter, err := optionalLeidenDependencyVersion(pythonPath)
+		if err != nil {
+			return fmt.Errorf("inspect optional Leiden dependencies after baseline install: %w", err)
+		}
+		if optionalLeidenAfter != optionalLeidenBefore {
+			return fmt.Errorf("optional Leiden dependencies changed during baseline clustering install: before %q after %q", optionalLeidenBefore, optionalLeidenAfter)
+		}
+		fmt.Fprintln(stdout, "preserved existing optional Leiden dependencies")
+		fmt.Fprintln(stdout, "did not downgrade optional Leiden dependencies")
+	}
+
+	if err := verifyClusteringNetworkX(pythonPath); err != nil {
+		return fmt.Errorf("clustering verification failed: verify networkx from repo-local .venv: %w", err)
+	}
+	fmt.Fprintln(stdout, "verified networkx from repo-local .venv")
+	fmt.Fprintln(stdout, "clustering installation succeeded")
+	if forceRebuild {
+		if _, err := runBuildService(ctx, "", types.BuildRequest{RepoRoot: projectDir}, nil); err != nil {
+			fmt.Fprintf(stdout, "graph rebuild failed after successful clustering install: %v\n", err)
+			return fmt.Errorf("force graph rebuild failed after clustering install: %w", err)
+		}
+		fmt.Fprintln(stdout, "graph rebuild succeeded after clustering install")
+		return nil
+	}
+	if graphCacheExists(projectDir) {
+		fmt.Fprintln(stdout, "warning: existing graph cache may have been built without community metadata")
+		fmt.Fprintf(stdout, "run `vela build %s` to rebuild graph metadata without deleting cache artifacts\n", projectDir)
+	} else {
+		fmt.Fprintln(stdout, "next graph build can use clustering")
+	}
+	return nil
+}
+
+func graphCacheExists(projectDir string) bool {
+	_, err := os.Stat(filepath.Join(projectDir, ".vela", "graph.db"))
+	return err == nil
+}
+
+func repairRepoLocalVenvWritability(venvDir string) error {
+	if err := filepath.WalkDir(venvDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		mode := info.Mode()
+		if mode.Perm()&0o200 != 0 {
+			return nil
+		}
+		if err := chmodClusteringVenvPath(path, mode.Perm()|0o200); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("repair repo-local .venv writability: %w", err)
+	}
+	return nil
+}
+
+func ensureRepoLocalVenvWritable(venvDir string) error {
+	var blockedPath string
+	if err := filepath.WalkDir(venvDir, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if info.Mode().Perm()&0o200 == 0 {
+			blockedPath = path
+			return filepath.SkipAll
+		}
+		return nil
+	}); err != nil {
+		return fmt.Errorf("repo-local .venv is not writable: inspect %s: %w; rerun with --repair-venv or apply documented manual remediation", venvDir, err)
+	}
+	if blockedPath != "" {
+		return fmt.Errorf("repo-local .venv is not writable: %s lacks user write permission: permission denied; rerun with --repair-venv or apply documented manual remediation", blockedPath)
+	}
+	return nil
 }
 
 func detectedInstallTargets() []string {
