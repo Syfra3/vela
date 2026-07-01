@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.6](https://github.com/Syfra3/vela/compare/v1.10.5...v1.10.6) (2026-07-01)
+
+
+### Bug Fixes
+
+* add clustering install venv repair ([#51](https://github.com/Syfra3/vela/issues/51)) ([63c8fd4](https://github.com/Syfra3/vela/commit/63c8fd451177ff29e04cc5cbf45fe89ffc1375c2))
+
 ## [1.10.5](https://github.com/Syfra3/vela/compare/v1.10.4...v1.10.5) (2026-07-01)
 
 
