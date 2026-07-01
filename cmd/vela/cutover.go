@@ -27,23 +27,23 @@ import (
 
 type buildOutput = app.BuildResult
 
-var runPipelineBuild = func(ctx context.Context, outDir string, req types.BuildRequest) (pipeline.Result, error) {
+var runPipelineBuild = func(ctx context.Context, outDir string, req types.BuildRequest, observer pipeline.Observer) (pipeline.Result, error) {
 	registry, err := scip.DefaultRegistry()
 	if err != nil {
 		return pipeline.Result{}, fmt.Errorf("load SCIP registry: %w", err)
 	}
-	builder := pipeline.NewBuilder(pipeline.Config{Registry: registry, OutDir: outDir, Cluster: igraph.RunLeiden})
+	builder := pipeline.NewBuilder(pipeline.Config{Registry: registry, OutDir: outDir, Cluster: igraph.RunLeiden, Observer: observer})
 	return builder.Build(ctx, req)
 }
 
-var runBuildService = func(ctx context.Context, outDir string, req types.BuildRequest) (buildOutput, error) {
+var runBuildService = func(ctx context.Context, outDir string, req types.BuildRequest, observe func(app.BuildEvent)) (buildOutput, error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return buildOutput{}, err
 	}
 	return app.BuildService{
-		RunPipeline: func(ctx context.Context, outDir string, req types.BuildRequest, _ pipeline.Observer) (pipeline.Result, error) {
-			return runPipelineBuild(ctx, outDir, req)
+		RunPipeline: func(ctx context.Context, outDir string, req types.BuildRequest, observer pipeline.Observer) (pipeline.Result, error) {
+			return runPipelineBuild(ctx, outDir, req, observer)
 		},
 	}.Run(ctx, app.BuildRequest{
 		RepoRoot:  req.RepoRoot,
@@ -52,13 +52,14 @@ var runBuildService = func(ctx context.Context, outDir string, req types.BuildRe
 		Drivers:   req.Drivers,
 		Patchers:  req.Patchers,
 		Obsidian:  cfg.Obsidian,
+		Observe:   observe,
 	})
 }
 
 var runWatchService = func(ctx context.Context, outDir string, req types.BuildRequest, stdout, stderr io.Writer) error {
 	w, err := watch.New(req.RepoRoot, []string{".go", ".py", ".ts", ".tsx", ".js", ".jsx"}, func(changed []string) error {
 		fmt.Fprintf(stdout, "changed: %d files\n", len(changed))
-		result, buildErr := runBuildService(ctx, outDir, req)
+		result, buildErr := runBuildService(ctx, outDir, req, nil)
 		if buildErr != nil {
 			fmt.Fprintf(stderr, "update failed: %v\n", buildErr)
 			return buildErr
@@ -522,7 +523,7 @@ func newBuildCommand(use string, aliases []string, alias bool) *cobra.Command {
 				Languages: languages,
 				Drivers:   drivers,
 				Patchers:  patchers,
-			})
+			}, writeBuildEvent(cmd.ErrOrStderr()))
 			if err != nil {
 				if restoreErr := restoreGeneratedState(); restoreErr != nil {
 					return fmt.Errorf("%w; restoring previous graph state: %v", err, restoreErr)
@@ -552,6 +553,34 @@ func newBuildCommand(use string, aliases []string, alias bool) *cobra.Command {
 	cmd.Flags().StringSliceVar(&patchers, "patcher", nil, "Pipeline patchers to apply after drivers")
 	cmd.Flags().StringVar(&outDir, "out-dir", "", "Output directory for graph.json (default: <repo>/.vela)")
 	return cmd
+}
+
+func writeBuildEvent(w io.Writer) func(app.BuildEvent) {
+	return func(event app.BuildEvent) {
+		if w == nil {
+			return
+		}
+		switch event.Kind {
+		case app.BuildEventStart, app.BuildEventComplete:
+			if strings.TrimSpace(event.Message) != "" {
+				fmt.Fprintf(w, "%s\n", event.Message)
+			}
+		case app.BuildEventStage:
+			message := strings.TrimSpace(event.Message)
+			if message == "" {
+				message = string(event.Stage)
+			}
+			if event.Count > 0 {
+				fmt.Fprintf(w, "%s: %s (%d)\n", event.Stage, message, event.Count)
+				return
+			}
+			fmt.Fprintf(w, "%s: %s\n", event.Stage, message)
+		case app.BuildEventWarning:
+			if strings.TrimSpace(event.Message) != "" {
+				fmt.Fprintf(w, "warning: %s\n", event.Message)
+			}
+		}
+	}
 }
 
 type generatedFileSnapshot struct {

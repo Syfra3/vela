@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Syfra3/vela/internal/app"
 	"github.com/Syfra3/vela/internal/export"
 	igraph "github.com/Syfra3/vela/internal/graph"
 	"github.com/Syfra3/vela/internal/hooks"
@@ -625,7 +626,7 @@ func TestSCN019_UpdateFailurePreservesPreviousStaleGraphState(t *testing.T) {
 		t.Fatalf("WriteFile(main.go changed) error = %v", err)
 	}
 
-	runBuildService = func(_ context.Context, outDir string, req types.BuildRequest) (buildOutput, error) {
+	runBuildService = func(_ context.Context, outDir string, req types.BuildRequest, _ func(app.BuildEvent)) (buildOutput, error) {
 		if err := os.WriteFile(filepath.Join(outDir, "graph.json"), []byte(`{"corrupt":true}`), 0o644); err != nil {
 			t.Fatalf("WriteFile(corrupt graph) error = %v", err)
 		}
@@ -1673,8 +1674,13 @@ func TestBuildAndExtractCommandsRouteThroughSharedBuildService(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var captured types.BuildRequest
-			runBuildService = func(_ context.Context, outDir string, req types.BuildRequest) (buildOutput, error) {
+			runBuildService = func(_ context.Context, outDir string, req types.BuildRequest, observe func(app.BuildEvent)) (buildOutput, error) {
 				captured = req
+				if observe != nil {
+					observe(app.BuildEvent{Kind: app.BuildEventStart, Message: "build started"})
+					observe(app.BuildEvent{Kind: app.BuildEventStage, Stage: types.BuildStageDetect, Count: 3, Message: "detected source files"})
+					observe(app.BuildEvent{Kind: app.BuildEventComplete, Message: "build complete"})
+				}
 				return buildOutput{GraphPath: outDir + "/graph.json", HTMLPath: outDir + "/graph.html", ReportPath: outDir + "/GRAPH_REPORT.md", ObsidianPath: "/vault/obsidian", Files: 1}, nil
 			}
 
@@ -1700,6 +1706,16 @@ func TestBuildAndExtractCommandsRouteThroughSharedBuildService(t *testing.T) {
 			for _, want := range []string{"graph.json", "graph.html", "GRAPH_REPORT.md", "/vault/obsidian"} {
 				if !strings.Contains(stdout.String(), want) {
 					t.Fatalf("expected build output to mention %q, got %q", want, stdout.String())
+				}
+			}
+			for _, forbidden := range []string{"build started", "detected source files", "build complete"} {
+				if strings.Contains(stdout.String(), forbidden) {
+					t.Fatalf("stdout included progress %q; stdout must remain summary-only: %q", forbidden, stdout.String())
+				}
+			}
+			for _, want := range []string{"build started", "detect: detected source files (3)", "build complete"} {
+				if !strings.Contains(stderr.String(), want) {
+					t.Fatalf("expected stderr progress to include %q, got %q", want, stderr.String())
 				}
 			}
 		})
