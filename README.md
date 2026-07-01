@@ -8,27 +8,63 @@ Vela is a local-first graph-truth index for codebases: it builds evidence-backed
 
 ## Quick Start
 
-```bash
-# Build the CLI from source.
-go build -o vela ./cmd/vela
+### Installation
 
+#### Recommended: Homebrew (macOS/Linux)
+
+```bash
+# Add the Syfra tap (one time)
+brew tap Syfra3/tap
+
+# Install Vela
+brew install vela
+
+# Verify installation
+vela version
+```
+
+#### Alternative: Bash Install Script (all platforms)
+
+**Quick install:**
+
+```bash
+curl -sSL https://raw.githubusercontent.com/Syfra3/vela/main/scripts/install-vela.sh | bash
+```
+
+**Custom install directory:**
+
+```bash
+# Install to specific location (e.g., ~/.local/bin)
+export VELA_INSTALL_DIR=$HOME/.local/bin
+curl -sSL https://raw.githubusercontent.com/Syfra3/vela/main/scripts/install-vela.sh | bash
+
+# Make sure the directory is in your PATH
+echo 'export PATH="$HOME/.local/bin:$PATH"' >> ~/.bashrc  # or ~/.zshrc
+source ~/.bashrc
+```
+
+The install script detects your OS and architecture, downloads the matching binary from GitHub Releases, verifies the checksum when available, installs to `/usr/local/bin` or `$VELA_INSTALL_DIR`, and marks the binary executable.
+
+### First graph
+
+```bash
 # Build graph outputs for a repo or workspace.
-./vela build ./my-repo
+vela build ./my-repo
 
 # Check graph health and freshness.
-./vela status --graph ./my-repo/.vela/graph.json
+vela status --graph ./my-repo/.vela/graph.json
 
 # Discover candidates before structural queries.
-./vela explore --graph ./my-repo/.vela/graph.json "where is billing handled?"
-./vela lookup --graph ./my-repo/.vela/graph.json "BillingService"
+vela explore --graph ./my-repo/.vela/graph.json "where is billing handled?"
+vela lookup --graph ./my-repo/.vela/graph.json "BillingService"
 
 # Ask structural graph questions after you have exact node names.
-./vela search --graph ./my-repo/.vela/graph.json "explain BillingService"
-./vela search --graph ./my-repo/.vela/graph.json "who uses BillingService"
-./vela search --graph ./my-repo/.vela/graph.json "path BillingController -> BillingService"
+vela search --graph ./my-repo/.vela/graph.json "explain BillingService"
+vela search --graph ./my-repo/.vela/graph.json "who uses BillingService"
+vela search --graph ./my-repo/.vela/graph.json "path BillingController -> BillingService"
 
 # Start the default stdio MCP server for coding agents.
-./vela serve --graph ./my-repo/.vela/graph.json
+vela serve --graph ./my-repo/.vela/graph.json
 ```
 
 Expected `build` output includes `graph:`, `html:`, `report:`, `files:`, and `facts:` lines. The primary generated files live under `<repo>/.vela/`.
