@@ -347,7 +347,7 @@ func installClusteringDependencies(ctx context.Context, projectDir string, stdou
 	fmt.Fprintln(stdout, "verified networkx from repo-local .venv")
 	fmt.Fprintln(stdout, "clustering installation succeeded")
 	if forceRebuild {
-		if _, err := runBuildService(ctx, "", types.BuildRequest{RepoRoot: projectDir}); err != nil {
+		if _, err := runBuildService(ctx, "", types.BuildRequest{RepoRoot: projectDir}, nil); err != nil {
 			fmt.Fprintf(stdout, "graph rebuild failed after successful clustering install: %v\n", err)
 			return fmt.Errorf("force graph rebuild failed after clustering install: %w", err)
 		}

@@ -749,7 +749,7 @@ func TestSCN010_InstallClusteringForceRebuildSeparatesInstallSuccessFromRebuildF
 	}
 	rebuildErr := errors.New("synthetic graph rebuild failure")
 	var rebuildRequests []types.BuildRequest
-	runBuildService = func(ctx context.Context, outDir string, req types.BuildRequest) (buildOutput, error) {
+	runBuildService = func(ctx context.Context, outDir string, req types.BuildRequest, _ func(app.BuildEvent)) (buildOutput, error) {
 		rebuildRequests = append(rebuildRequests, req)
 		return buildOutput{}, rebuildErr
 	}
