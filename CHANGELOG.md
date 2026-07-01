@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.5](https://github.com/Syfra3/vela/compare/v1.10.4...v1.10.5) (2026-07-01)
+
+
+### Documentation
+
+* approve clustering install spec ([b48851e](https://github.com/Syfra3/vela/commit/b48851e4061e32ed1f8031c403768792020ef64d))
+
 ## [1.10.4](https://github.com/Syfra3/vela/compare/v1.10.3...v1.10.4) (2026-07-01)
 
 
