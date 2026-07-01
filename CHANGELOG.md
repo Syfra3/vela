@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.10.4](https://github.com/Syfra3/vela/compare/v1.10.3...v1.10.4) (2026-07-01)
+
+
+### Bug Fixes
+
+* show build progress feedback ([#49](https://github.com/Syfra3/vela/issues/49)) ([47a6a4e](https://github.com/Syfra3/vela/commit/47a6a4ea8e3be0466dc84eb4a159598c64e8498f))
+
 ## [1.10.3](https://github.com/Syfra3/vela/compare/v1.10.2...v1.10.3) (2026-07-01)
 
 
