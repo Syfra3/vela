@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.10.3](https://github.com/Syfra3/vela/compare/v1.10.2...v1.10.3) (2026-07-01)
+
+
+### Documentation
+
+* add README header image ([90bd68f](https://github.com/Syfra3/vela/commit/90bd68f99dac0af301fb6531f044ff3d31801398))
+* add Vela install quick start ([57032ef](https://github.com/Syfra3/vela/commit/57032ef4a4ad9a8670cc4a17581bc9c5436296a8))
+* refresh Vela README ([a418196](https://github.com/Syfra3/vela/commit/a4181961b7fd0fcddd025074c1f6fd742e81d680))
+
 ## [1.10.2](https://github.com/Syfra3/vela/compare/v1.10.1...v1.10.2) (2026-06-29)
 
 
