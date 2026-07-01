@@ -1,8 +1,8 @@
 version: 1
 approved_spec: specs/hard_spec.md
-approved_feature: features/mcp_stock_chef_graph_correctness.feature
+approved_feature: features/vela_install_clustering.feature
 current_workflow:
-  feature: features/mcp_stock_chef_graph_correctness.feature
+  feature: features/vela_install_clustering.feature
   spec: specs/hard_spec.md
   scenarios:
     - SCN-001
@@ -12,7 +12,25 @@ current_workflow:
     - SCN-005
     - SCN-006
     - SCN-007
+    - SCN-008
+    - SCN-009
+    - SCN-010
+    - SCN-011
+    - SCN-012
 approved_scenarios:
+  features/vela_install_clustering.feature:
+    - SCN-001
+    - SCN-002
+    - SCN-003
+    - SCN-004
+    - SCN-005
+    - SCN-006
+    - SCN-007
+    - SCN-008
+    - SCN-009
+    - SCN-010
+    - SCN-011
+    - SCN-012
   features/mcp_stock_chef_graph_correctness.feature:
     - SCN-001
     - SCN-002
