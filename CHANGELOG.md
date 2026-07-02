@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.11.0](https://github.com/Syfra3/vela/compare/v1.10.6...v1.11.0) (2026-07-02)
+
+
+### Features
+
+* add compact graph ranking tools ([#54](https://github.com/Syfra3/vela/issues/54)) ([8682d44](https://github.com/Syfra3/vela/commit/8682d445beec857e71d141e73314cb30a003bdff))
+
 ## [1.10.6](https://github.com/Syfra3/vela/compare/v1.10.5...v1.10.6) (2026-07-01)
 
 
