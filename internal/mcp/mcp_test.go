@@ -61,8 +61,8 @@ func callResultText(t *testing.T, res *mcppkg.CallToolResult) string {
 func TestNewServerRegistersQueryToolSurface(t *testing.T) {
 	srv := NewServer(newTestEngine(t))
 	tools := srv.ListTools()
-	if len(tools) != 8 {
-		t.Fatalf("expected 8 tools, got %d", len(tools))
+	if len(tools) != 11 {
+		t.Fatalf("expected 11 tools, got %d", len(tools))
 	}
 	want := map[string]bool{
 		"explore":              true,
@@ -72,6 +72,9 @@ func TestNewServerRegistersQueryToolSurface(t *testing.T) {
 		"impact":               true,
 		"path":                 true,
 		"explain":              true,
+		"rank":                 true,
+		"hotspots":             true,
+		"module_summary":       true,
 		"status":               true,
 	}
 	for _, tool := range tools {
@@ -83,6 +86,63 @@ func TestNewServerRegistersQueryToolSurface(t *testing.T) {
 	if len(want) != 0 {
 		t.Fatalf("missing tools: %v", want)
 	}
+}
+
+// REQ-compact-rank → SCN-015 → TestSCN015_MCPCompactRankingToolsReturnBoundedStructuredMetrics
+func TestSCN015_MCPCompactRankingToolsReturnBoundedStructuredMetrics(t *testing.T) {
+	// Scenario: tests cover Vela compact ranking behavior.
+	dir := t.TempDir()
+	path := writeRankMCPGraph(t, dir)
+	eng, err := query.LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile error: %v", err)
+	}
+	srv := NewServer(eng)
+
+	rankRes, err := srv.GetTool("rank").Handler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"scope": "apps/server-api/src/modules", "limit": 1, "examples": 1}}})
+	if err != nil {
+		t.Fatalf("rank handler error: %v", err)
+	}
+	rankCore := requireStructuredCoreResult(t, rankRes)
+	if rankCore.QueryKind != "rank" || len(rankCore.Rankings) != 1 {
+		t.Fatalf("rank core = %+v, want one bounded ranking", rankCore)
+	}
+	if rankCore.Rankings[0].Metrics.TotalDegree == 0 || rankCore.Rankings[0].OptionalMetrics["cross_package_consumers"] != "unavailable" {
+		t.Fatalf("rank metrics missing split counts/unavailable optional metrics: %+v", rankCore.Rankings[0])
+	}
+	if len(rankCore.Rankings[0].Examples) > 1 {
+		t.Fatalf("rank examples len = %d, want bounded <= 1", len(rankCore.Rankings[0].Examples))
+	}
+
+	summaryRes, err := srv.GetTool("module_summary").Handler(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"target": "inventory-module", "examples": 1}}})
+	if err != nil {
+		t.Fatalf("summary handler error: %v", err)
+	}
+	summaryCore := requireStructuredCoreResult(t, summaryRes)
+	if summaryCore.QueryKind != "module_summary" || summaryCore.Metrics == nil || len(summaryCore.Gaps) == 0 {
+		t.Fatalf("summary core = %+v, want metrics/gaps", summaryCore)
+	}
+}
+
+func writeRankMCPGraph(t *testing.T, dir string) string {
+	t.Helper()
+	g := map[string]interface{}{
+		"nodes": []map[string]interface{}{
+			{"id": "inventory-module", "label": "InventoryModule", "kind": "module", "file": "apps/server-api/src/modules/inventory/inventory.module.ts"},
+			{"id": "order-module", "label": "OrderModule", "kind": "module", "file": "apps/server-api/src/modules/order/order.module.ts"},
+			{"id": "menu-module", "label": "MenuModule", "kind": "module", "file": "apps/server-api/src/modules/menu/menu.module.ts"},
+		},
+		"edges": []map[string]interface{}{
+			{"from": "order-module", "to": "inventory-module", "kind": "imports"},
+			{"from": "inventory-module", "to": "menu-module", "kind": "imports"},
+		},
+	}
+	data, _ := json.MarshalIndent(g, "", "  ")
+	path := filepath.Join(dir, "rank-graph.json")
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 // REQ-003 → SCN-004 → TestSCN004_MCPServerExposesCanonicalToolNamesWithoutDuplicatedVelaPrefix
@@ -234,6 +294,8 @@ func TestSCN013_MCPAgentInstructionsPreferVelaExploreFirstWithoutAutoSyncPromise
 
 	for _, want := range []string{
 		"call `explore` first",
+		"call compact `rank` or `hotspots` first",
+		"Use `module_summary` for exact top candidates",
 		"structural, architectural, flow, dependency, ownership, or impact questions",
 		"source snippets and graph paths as already-read evidence",
 		"raw grep or file reads",

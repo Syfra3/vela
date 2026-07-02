@@ -18,6 +18,8 @@ Treat Vela as a structural graph tool, not as free-text or keyword search.
 
 Rules:
 - For structural, architectural, flow, dependency, ownership, or impact questions, call ` + "`explore`" + ` first.
+- For ranking/hotspot questions such as highest impact, most depended-on, most dependencies, central module, or biggest blast radius, call compact ` + "`rank`" + ` or ` + "`hotspots`" + ` first with low limits.
+- Use ` + "`module_summary`" + ` for exact top candidates instead of dumping all edges; full edge dumps require explicit opt-in via explain-style queries.
 - Treat returned source snippets and graph paths as already-read evidence.
 - Preserve raw grep or file reads for exact text lookup, stale files named by Vela, unavailable graphs, or verification of latest source.
 - Do not send bag-of-words or full feature descriptions directly to graph query tools.
@@ -31,6 +33,8 @@ Valid structural queries:
 - impact of X / what breaks if X changes?
 - path A -> B / path from A to B / how does A reach B?
 - explain X
+- rank/hotspots for highest-impact or module-ranking questions
+- module_summary X for bounded counts/examples on an exact node or path
 
 Workflow:
 1. Start structural questions with ` + "`explore`" + ` so Vela can route to the right graph primitive.
@@ -57,7 +61,54 @@ func registerTools(srv *server.MCPServer, engine *query.Engine) {
 	registerQueryTool(srv, engine, "impact", types.QueryKindImpact, false)
 	registerQueryTool(srv, engine, "path", types.QueryKindPath, true)
 	registerQueryTool(srv, engine, "explain", types.QueryKindExplain, false)
+	registerRankTool(srv, engine)
+	registerHotspotsTool(srv, engine)
+	registerModuleSummaryTool(srv, engine)
 	registerStatusTool(srv, engine)
+}
+
+func registerRankTool(srv *server.MCPServer, engine *query.Engine) {
+	srv.AddTool(markmcp.NewTool("rank",
+		markmcp.WithDescription("Rank graph nodes/files/modules with split structural metrics and bounded examples."),
+		markmcp.WithReadOnlyHintAnnotation(true),
+		markmcp.WithString("scope", markmcp.Description("Path, glob-like prefix, node ID, or label scope to rank within")),
+		markmcp.WithString("metric", markmcp.Description("Ranking metric: in_degree, out_degree, total_degree, or downstream_count")),
+		markmcp.WithNumber("limit", markmcp.Description("Maximum ranked candidates to include; default 10")),
+		markmcp.WithNumber("examples", markmcp.Description("Maximum examples per candidate; default 3")),
+	), func(ctx context.Context, req markmcp.CallToolRequest) (*markmcp.CallToolResult, error) {
+		_ = ctx
+		return markmcp.NewToolResultStructuredOnly(engine.RankResult(req.GetString("scope", ""), req.GetString("metric", ""), req.GetInt("limit", query.DefaultRankLimit), req.GetInt("examples", query.DefaultRankExamples))), nil
+	})
+}
+
+func registerHotspotsTool(srv *server.MCPServer, engine *query.Engine) {
+	srv.AddTool(markmcp.NewTool("hotspots",
+		markmcp.WithDescription("Ergonomic wrapper for highest-impact/dependency/centrality hotspot questions."),
+		markmcp.WithReadOnlyHintAnnotation(true),
+		markmcp.WithString("intent", markmcp.Description("Hotspot intent, e.g. highest impact, most dependencies, most depended-on")),
+		markmcp.WithString("scope", markmcp.Description("Optional path, glob-like prefix, node ID, or label scope")),
+		markmcp.WithNumber("limit", markmcp.Description("Maximum candidates; default 10")),
+		markmcp.WithNumber("examples", markmcp.Description("Maximum examples per candidate; default 3")),
+	), func(ctx context.Context, req markmcp.CallToolRequest) (*markmcp.CallToolResult, error) {
+		_ = ctx
+		return markmcp.NewToolResultStructuredOnly(engine.HotspotsResult(req.GetString("intent", ""), req.GetString("scope", ""), req.GetInt("limit", query.DefaultRankLimit), req.GetInt("examples", query.DefaultRankExamples))), nil
+	})
+}
+
+func registerModuleSummaryTool(srv *server.MCPServer, engine *query.Engine) {
+	srv.AddTool(markmcp.NewTool("module_summary",
+		markmcp.WithDescription("Summarize one exact graph node/path with counts, bounded examples, confidence, and gaps."),
+		markmcp.WithReadOnlyHintAnnotation(true),
+		markmcp.WithString("target", markmcp.Required(), markmcp.Description("Exact node ID, label, or path to summarize")),
+		markmcp.WithNumber("examples", markmcp.Description("Maximum incoming/outgoing examples; default 5")),
+	), func(ctx context.Context, req markmcp.CallToolRequest) (*markmcp.CallToolResult, error) {
+		_ = ctx
+		target := strings.TrimSpace(req.GetString("target", ""))
+		if target == "" {
+			return markmcp.NewToolResultStructuredOnly(engine.DiagnosticResult("module_summary", "VALIDATION_ERROR", "target is required")), nil
+		}
+		return markmcp.NewToolResultStructuredOnly(engine.ModuleSummaryResult(target, req.GetInt("examples", query.DefaultSummaryExamples))), nil
+	})
 }
 
 func registerExploreTool(srv *server.MCPServer, engine *query.Engine) {

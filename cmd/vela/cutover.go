@@ -652,6 +652,71 @@ func lookupCmd() *cobra.Command {
 	return cmd
 }
 
+func rankCmd() *cobra.Command {
+	var graphFile, scope, metric string
+	var limit, examples int
+	cmd := &cobra.Command{
+		Use:   "rank",
+		Short: "Rank graph nodes/files/modules with split compact metrics",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			engine, err := loadEngine(graphFile)
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(engine.RankResult(scope, metric, limit, examples))
+		},
+	}
+	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: ~/.vela/graph.json)")
+	cmd.Flags().StringVar(&scope, "scope", "", "Path, glob-like prefix, node ID, or label scope")
+	cmd.Flags().StringVar(&metric, "metric", "downstream_count", "Ranking metric: in_degree, out_degree, total_degree, downstream_count")
+	cmd.Flags().IntVar(&limit, "limit", query.DefaultRankLimit, "Maximum candidates to return")
+	cmd.Flags().IntVar(&examples, "examples", query.DefaultRankExamples, "Maximum examples per candidate")
+	return cmd
+}
+
+func hotspotsCmd() *cobra.Command {
+	var graphFile, scope string
+	var limit, examples int
+	cmd := &cobra.Command{
+		Use:   "hotspots <intent>",
+		Short: "Answer highest-impact/dependency hotspot questions with bounded metric breakdowns",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			engine, err := loadEngine(graphFile)
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(engine.HotspotsResult(args[0], scope, limit, examples))
+		},
+	}
+	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: ~/.vela/graph.json)")
+	cmd.Flags().StringVar(&scope, "scope", "", "Path, glob-like prefix, node ID, or label scope")
+	cmd.Flags().IntVar(&limit, "limit", query.DefaultRankLimit, "Maximum candidates to return")
+	cmd.Flags().IntVar(&examples, "examples", query.DefaultRankExamples, "Maximum examples per candidate")
+	return cmd
+}
+
+func moduleSummaryCmd() *cobra.Command {
+	var graphFile string
+	var examples int
+	cmd := &cobra.Command{
+		Use:   "module-summary <target>",
+		Short: "Summarize one graph node/path with compact metrics and bounded examples",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			engine, err := loadEngine(graphFile)
+			if err != nil {
+				return err
+			}
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(engine.ModuleSummaryResult(args[0], examples))
+		},
+	}
+	cmd.Flags().StringVar(&graphFile, "graph", "", "Path to graph.json (default: ~/.vela/graph.json)")
+	cmd.Flags().IntVar(&examples, "examples", query.DefaultSummaryExamples, "Maximum examples to return")
+	return cmd
+}
+
 func newBuildCommand(use string, aliases []string, alias bool) *cobra.Command {
 	var languages []string
 	var drivers []string

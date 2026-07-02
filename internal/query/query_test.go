@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -662,5 +663,148 @@ func TestStats(t *testing.T) {
 	}
 	if stats.NodeTypes["struct"] != 3 {
 		t.Fatalf("expected 3 struct nodes, got %d", stats.NodeTypes["struct"])
+	}
+}
+
+// REQ-compact-rank → SCN-001 → TestSCN001_RankGraphNodesWithinModulePathScopeCompactly
+func TestSCN001_RankGraphNodesWithinModulePathScopeCompactly(t *testing.T) {
+	// Scenario: rank graph nodes within module path scope compactly.
+	eng := newRankFixtureEngine()
+
+	result := eng.RankResult("apps/server-api/src/modules", "total_degree", 10, 3)
+
+	if result.Status != ResultStatusOK {
+		t.Fatalf("RankResult status = %q, want ok: %+v", result.Status, result.Diagnostics)
+	}
+	if len(result.Rankings) == 0 || result.Rankings[0].Subject.ID != "inventory-module" {
+		t.Fatalf("top rank = %+v, want inventory-module first", result.Rankings)
+	}
+	metrics := result.Rankings[0].Metrics
+	if metrics.InDegree != 2 || metrics.OutDegree != 2 || metrics.TotalDegree != 4 || metrics.DownstreamCount != 2 {
+		t.Fatalf("metrics = %+v, want split degree/downstream counts", metrics)
+	}
+	if len(result.Rankings[0].Examples) > 3 {
+		t.Fatalf("examples len = %d, want bounded <= 3", len(result.Rankings[0].Examples))
+	}
+	if got := result.Rankings[0].OptionalMetrics["cross_package_consumers"]; got != "unavailable" {
+		t.Fatalf("optional cross_package_consumers = %q, want explicit unavailable", got)
+	}
+	if strings.Contains(strings.ToLower(result.Answer), "score") {
+		t.Fatalf("rank answer should not collapse metrics into ambiguous score: %q", result.Answer)
+	}
+}
+
+// REQ-compact-rank → SCN-001 → TestSCN001_GlobRankScopeExcludesNonMatchingFiles
+func TestSCN001_GlobRankScopeExcludesNonMatchingFiles(t *testing.T) {
+	// Scenario: glob-like rank scopes include only exact glob matches.
+	eng := newEngine(&types.Graph{
+		Nodes: []types.Node{
+			{ID: "query-test", Label: "QueryTest", NodeType: "file", SourceFile: "internal/query/query_test.go"},
+			{ID: "rank-test", Label: "RankTest", NodeType: "file", SourceFile: "internal/query/rank_test.go"},
+			{ID: "query", Label: "Query", NodeType: "file", SourceFile: "internal/query/query.go"},
+			{ID: "result", Label: "Result", NodeType: "file", SourceFile: "internal/query/result.go"},
+		},
+		Metadata: map[string]interface{}{"freshness_status": "fresh"},
+	})
+
+	result := eng.RankResult("internal/query/*_test.go", "total_degree", 10, 0)
+
+	if result.Status != ResultStatusOK {
+		t.Fatalf("RankResult status = %q, want ok: %+v", result.Status, result.Diagnostics)
+	}
+	assertRankSubjects(t, result, []string{"query-test", "rank-test"})
+}
+
+// REQ-compact-rank → SCN-001 → TestSCN001_RecursiveModuleGlobExcludesServicesAndControllers
+func TestSCN001_RecursiveModuleGlobExcludesServicesAndControllers(t *testing.T) {
+	// Scenario: recursive module glob rank scopes include module files only.
+	result := newRankFixtureEngine().RankResult("apps/server-api/src/modules/**/*.module.ts", "total_degree", 10, 0)
+
+	if result.Status != ResultStatusOK {
+		t.Fatalf("RankResult status = %q, want ok: %+v", result.Status, result.Diagnostics)
+	}
+	assertRankSubjects(t, result, []string{"inventory-module", "menu-a", "menu-b", "order-module", "supplier-module"})
+}
+
+// REQ-compact-rank → SCN-003 → TestSCN003_HotspotsDistinguishMetricsAndExplainAmbiguity
+func TestSCN003_HotspotsDistinguishMetricsAndExplainAmbiguity(t *testing.T) {
+	// Scenario: hotspot intent returns metric breakdown and ambiguity explanation.
+	result := newRankFixtureEngine().HotspotsResult("highest impact", "apps/server-api/src/modules", 2, 1)
+
+	if len(result.Rankings) > 2 {
+		t.Fatalf("hotspot response len = %d, want bounded by limit", len(result.Rankings))
+	}
+	if !strings.Contains(result.Answer, "ambiguous") || !strings.Contains(result.Answer, "in_degree") || !strings.Contains(result.Answer, "downstream_count") {
+		t.Fatalf("hotspot answer missing ambiguity/metric explanation: %q", result.Answer)
+	}
+	if result.Rankings[0].Metrics.TotalDegree == 0 || result.Rankings[0].OptionalMetrics["cross_app_consumers"] != "unavailable" {
+		t.Fatalf("hotspot ranking missing metric breakdown/unavailable optional metrics: %+v", result.Rankings[0])
+	}
+}
+
+// REQ-compact-summary → SCN-005 → TestSCN005_ModuleSummaryCountsExamplesConfidenceAndGaps
+func TestSCN005_ModuleSummaryCountsExamplesConfidenceAndGaps(t *testing.T) {
+	// Scenario: module summary counts/examples/confidence/gaps.
+	result := newRankFixtureEngine().ModuleSummaryResult("inventory-module", 2)
+
+	if result.Status != ResultStatusOK || result.Metrics == nil {
+		t.Fatalf("summary result = %+v, want ok metrics", result)
+	}
+	if result.Metrics.InDegree != 2 || result.Metrics.OutDegree != 2 || len(result.Examples) > 2 {
+		t.Fatalf("summary metrics/examples = %+v len=%d", result.Metrics, len(result.Examples))
+	}
+	if !strings.Contains(result.ConfidenceAndLimits, "confidence") || len(result.Gaps) == 0 {
+		t.Fatalf("summary missing confidence/gaps: %+v", result)
+	}
+	if !strings.Contains(result.Gaps[0], "route/client extraction") {
+		t.Fatalf("summary gaps should document route/client non-implementation: %+v", result.Gaps)
+	}
+}
+
+// REQ-compact-summary → SCN-006 → TestSCN006_AmbiguousModuleSummaryTargetReturnsCandidates
+func TestSCN006_AmbiguousModuleSummaryTargetReturnsCandidates(t *testing.T) {
+	// Scenario: ambiguous summary target returns candidates.
+	result := newRankFixtureEngine().ModuleSummaryResult("MenuModule", 5)
+
+	if result.Status != ResultStatusAmbiguous || len(result.ResolvedSubjects) != 2 {
+		t.Fatalf("summary ambiguity = %+v, want two candidates", result)
+	}
+	if !queryDiagnosticContains(result.Diagnostics, "AMBIGUOUS_SUBJECT", "multiple candidates") {
+		t.Fatalf("diagnostics = %+v, want ambiguity diagnostic", result.Diagnostics)
+	}
+}
+
+func newRankFixtureEngine() *Engine {
+	return newEngine(&types.Graph{
+		Nodes: []types.Node{
+			{ID: "inventory-module", Label: "InventoryModule", NodeType: "module", SourceFile: "apps/server-api/src/modules/inventory/inventory.module.ts"},
+			{ID: "order-module", Label: "OrderModule", NodeType: "module", SourceFile: "apps/server-api/src/modules/order/order.module.ts"},
+			{ID: "supplier-module", Label: "SupplierModule", NodeType: "module", SourceFile: "apps/server-api/src/modules/supplier/supplier.module.ts"},
+			{ID: "menu-a", Label: "MenuModule", NodeType: "module", SourceFile: "apps/server-api/src/modules/menu/menu.module.ts"},
+			{ID: "menu-b", Label: "MenuModule", NodeType: "module", SourceFile: "apps/server-api/src/modules/menu-v2/menu.module.ts"},
+			{ID: "recipe-service", Label: "RecipeService", NodeType: "service", SourceFile: "apps/server-api/src/modules/recipe/recipe.service.ts"},
+			{ID: "recipe-controller", Label: "RecipeController", NodeType: "controller", SourceFile: "apps/server-api/src/modules/recipe/recipe.controller.ts"},
+		},
+		Edges: []types.Edge{
+			{Source: "order-module", Target: "inventory-module", Relation: "imports"},
+			{Source: "supplier-module", Target: "inventory-module", Relation: "imports"},
+			{Source: "inventory-module", Target: "menu-a", Relation: "imports"},
+			{Source: "inventory-module", Target: "recipe-service", Relation: "uses"},
+			{Source: "menu-a", Target: "recipe-service", Relation: "uses"},
+		},
+		Metadata: map[string]interface{}{"freshness_status": "fresh"},
+	})
+}
+
+func assertRankSubjects(t *testing.T, result Result, want []string) {
+	t.Helper()
+	got := make([]string, 0, len(result.Rankings))
+	for _, ranking := range result.Rankings {
+		got = append(got, ranking.Subject.ID)
+	}
+	sort.Strings(got)
+	sort.Strings(want)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("rank subjects = %v, want %v", got, want)
 	}
 }

@@ -49,6 +49,28 @@ type Result struct {
 	ConfidenceAndLimits   string           `json:"confidence_and_limits,omitempty"`
 	SuggestedNextQueries  []string         `json:"suggested_next_queries,omitempty"`
 	InterpretedIntent     string           `json:"interpreted_intent,omitempty"`
+	Rankings              []RankCandidate  `json:"rankings,omitempty"`
+	Metrics               *RankMetrics     `json:"metrics,omitempty"`
+	Examples              []Fact           `json:"examples,omitempty"`
+	Gaps                  []string         `json:"gaps,omitempty"`
+}
+
+// RankCandidate is a compact graph ranking row. Metrics are intentionally split
+// out so agents do not collapse different notions of importance into one score.
+type RankCandidate struct {
+	Subject         Subject           `json:"subject"`
+	Path            string            `json:"path,omitempty"`
+	Metrics         RankMetrics       `json:"metrics"`
+	OptionalMetrics map[string]string `json:"optional_metrics,omitempty"`
+	Examples        []Fact            `json:"examples,omitempty"`
+}
+
+// RankMetrics captures bounded structural counts for a graph node or file.
+type RankMetrics struct {
+	InDegree        int `json:"in_degree"`
+	OutDegree       int `json:"out_degree"`
+	TotalDegree     int `json:"total_degree"`
+	DownstreamCount int `json:"downstream_count"`
 }
 
 // Subject is a resolved graph subject included in a shared Result.
