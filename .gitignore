@@ -33,9 +33,13 @@ vela-out/
 results/.vela-graphs/
 *.graph.json
 *.graph.html
+.vela/graph.db
+.vela/graph.json
+.vela/graph.html
 .vela/GRAPH_REPORT.md
 .vela/manifest.json
 .vela/retrieval.db
+.vela/scip/
 *.graphml
 
 # Local workflow/spec artifacts
