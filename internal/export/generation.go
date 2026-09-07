@@ -553,13 +553,12 @@ func validateSQLiteAgreement(path string, g *types.Graph) error {
 			rows.Close()
 			return err
 		}
-		data, _ := json.Marshal(v)
 		v[4], err = normalizeMetadataJSON(v[4])
 		if err != nil {
 			rows.Close()
 			return err
 		}
-		data, _ = json.Marshal(v)
+		data, _ := json.Marshal(v)
 		actual[v[0]] = string(data)
 	}
 	err = rows.Err()
