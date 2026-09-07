@@ -99,6 +99,7 @@ func TestSCN004_BuildCreatesRuntimeAndGeneratedArtifacts(t *testing.T) {
 	writeTestFile(t, filepath.Join(repoRoot, "main.go"), "package main\n")
 
 	builder := NewBuilder(Config{
+		Source: harnessSource, // isolated identity; never invoke Git for this fixture
 		Detect: func(string) ([]string, error) {
 			return []string{filepath.Join(repoRoot, "main.go")}, nil
 		},
@@ -153,6 +154,7 @@ func TestSCN021_SingleRepoSQLiteFixturePersistsQueryableGraphFacts(t *testing.T)
 	writeTestFile(t, filepath.Join(repoRoot, "store.go"), "package fixture\nfunc Store() {}\n")
 
 	builder := NewBuilder(Config{
+		Source: harnessSource,
 		Detect: func(string) ([]string, error) {
 			return []string{filepath.Join(repoRoot, "handler.go"), filepath.Join(repoRoot, "store.go")}, nil
 		},
@@ -261,6 +263,7 @@ known_links:
 `)
 
 	builder := NewBuilder(Config{
+		Source: harnessSource,
 		Detect: func(string) ([]string, error) {
 			return []string{filepath.Join(repoRoot, "main.go")}, nil
 		},
@@ -1002,8 +1005,11 @@ func TestBuilderBuild_PrunesDeletedFilesFromCachedGraph(t *testing.T) {
 	currentExecutableChange = func() (time.Time, error) { return time.Time{}, nil }
 
 	builder := NewBuilder(Config{
-		Detect:       func(string) ([]string, error) { return []string{mainFile}, nil },
-		Scanner:      &fakeScanner{nodes: []types.Node{{ID: "should-not-run", Label: "should-not-run", NodeType: "function"}}},
+		Source: harnessSource, // no Git subprocess in this compatibility fixture
+		Detect: func(string) ([]string, error) { return []string{mainFile}, nil },
+		// R3 refreshes opaque scanner inputs instead of certifying legacy cache
+		// provenance. Preserve the existing Persist: WriteJSONAtomic combination.
+		Scanner:      &fakeScanner{nodes: graph.Nodes[:2]},
 		GraphBuilder: igraph.Build,
 		Persist:      export.WriteJSONAtomic,
 		OutDir:       outDir,

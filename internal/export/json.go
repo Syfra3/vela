@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/Syfra3/vela/internal/generation"
 	"github.com/Syfra3/vela/internal/graph"
 	"github.com/Syfra3/vela/pkg/types"
 )
@@ -52,24 +53,15 @@ type metaJSON struct {
 
 // WriteJSON serialises g to <outDir>/graph.json, creating outDir if necessary.
 func WriteJSON(g *types.Graph, outDir string) error {
-	g = canonicalGraph(g)
-	if err := os.MkdirAll(outDir, 0755); err != nil {
-		return fmt.Errorf("creating output dir %s: %w", outDir, err)
-	}
-	data, err := marshalGraph(g)
-	if err != nil {
-		return err
-	}
-	outPath := filepath.Join(outDir, "graph.json")
-	if err := os.WriteFile(outPath, data, 0644); err != nil {
-		return fmt.Errorf("writing %s: %w", outPath, err)
-	}
-	return nil
+	return generation.LegacyWrite(outDir, func(dir string) error { return writeJSONAtomic(g, dir) })
 }
 
 // WriteJSONAtomic serialises g to <outDir>/graph.json atomically using a
 // temp file + rename so a crash mid-write leaves the previous file intact.
 func WriteJSONAtomic(g *types.Graph, outDir string) error {
+	return generation.LegacyWrite(outDir, func(dir string) error { return writeJSONAtomic(g, dir) })
+}
+func writeJSONAtomic(g *types.Graph, outDir string) error {
 	g = canonicalGraph(g)
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		return fmt.Errorf("creating output dir %s: %w", outDir, err)
@@ -79,10 +71,15 @@ func WriteJSONAtomic(g *types.Graph, outDir string) error {
 		return err
 	}
 	outPath := filepath.Join(outDir, "graph.json")
-	tmp := outPath + ".tmp"
-	f, err := os.Create(tmp)
+	f, err := os.CreateTemp(outDir, ".graph-json-")
 	if err != nil {
 		return fmt.Errorf("creating temp file: %w", err)
+	}
+	tmp := f.Name()
+	if err := f.Chmod(0644); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
 	}
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()

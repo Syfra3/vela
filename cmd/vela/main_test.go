@@ -1438,10 +1438,10 @@ func TestSCN019_UpdateFailurePreservesPreviousStaleGraphState(t *testing.T) {
 		return buildOutput{}, fmt.Errorf("simulated interrupted update")
 	}
 
-	root := rootCmd()
+	root := updateCmd() // isolate this rollback fixture from unrelated CLI setup
 	root.SetOut(&bytes.Buffer{})
 	root.SetErr(&bytes.Buffer{})
-	root.SetArgs([]string{"update", repoRoot, "--out-dir", outDir})
+	root.SetArgs([]string{repoRoot, "--out-dir", outDir})
 	if err := root.Execute(); err == nil {
 		t.Fatal("Execute(update) error = nil, want interrupted update error")
 	}

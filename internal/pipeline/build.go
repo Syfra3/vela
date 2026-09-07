@@ -9,13 +9,14 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
 
-	"github.com/Syfra3/vela/internal/detect"
 	"github.com/Syfra3/vela/internal/export"
 	"github.com/Syfra3/vela/internal/extract"
+	"github.com/Syfra3/vela/internal/generation"
 	igraph "github.com/Syfra3/vela/internal/graph"
 	"github.com/Syfra3/vela/internal/scip"
 	"github.com/Syfra3/vela/pkg/types"
@@ -26,8 +27,8 @@ var ErrUnknownPatcher = errors.New("unknown pipeline patcher")
 
 var codeExtensions = []string{".go", ".py", ".ts", ".tsx", ".js", ".jsx"}
 
-const manifestVersion = 1
-const extractorFingerprint = "pipeline-build-v1"
+const manifestVersion = export.InventoryVersion
+const extractorFingerprint = export.ExtractorFingerprint
 
 const (
 	buildModeFullRebuild = "full_rebuild"
@@ -66,6 +67,8 @@ type Result struct {
 	DetectedFiles []string
 	GraphPath     string
 	StageReports  []StageReport
+	Snapshot      *export.Snapshot
+	CacheHits     int
 }
 
 type cacheReuseMode string
@@ -84,27 +87,33 @@ type manifestDiff struct {
 }
 
 type Config struct {
-	Detect       func(root string) ([]string, error)
-	Scanner      Scanner
-	Registry     *scip.Registry
-	Patchers     map[string]Patcher
-	GraphBuilder func([]types.Node, []types.Edge) (*igraph.Graph, error)
-	Cluster      func(*igraph.Graph) (map[string]int, error)
-	Persist      func(*types.Graph, string) error
-	OutDir       string
-	Observer     Observer
+	Detect                 func(root string) ([]string, error)
+	Scanner                Scanner
+	Registry               *scip.Registry
+	Patchers               map[string]Patcher
+	GraphBuilder           func([]types.Node, []types.Edge) (*igraph.Graph, error)
+	Cluster                func(*igraph.Graph) (map[string]int, error)
+	Persist                func(*types.Graph, string) error
+	OutDir                 string
+	Observer               Observer
+	Source                 func(string) *types.Source
+	DisableExtractionCache bool
 }
 
 type Builder struct {
-	detect       func(root string) ([]string, error)
-	scanner      Scanner
-	registry     *scip.Registry
-	patchers     map[string]Patcher
-	graphBuilder func([]types.Node, []types.Edge) (*igraph.Graph, error)
-	cluster      func(*igraph.Graph) (map[string]int, error)
-	persist      func(*types.Graph, string) error
-	outDir       string
-	observer     Observer
+	detect                 func(root string) ([]string, error)
+	scanner                Scanner
+	registry               *scip.Registry
+	patchers               map[string]Patcher
+	graphBuilder           func([]types.Node, []types.Edge) (*igraph.Graph, error)
+	cluster                func(*igraph.Graph) (map[string]int, error)
+	persist                func(*types.Graph, string) error
+	outDir                 string
+	observer               Observer
+	source                 func(string) *types.Source
+	defaultScanner         bool
+	disableExtractionCache bool
+	afterCapture           func()
 }
 
 type extractScanner struct{}
@@ -114,10 +123,9 @@ func (extractScanner) Scan(root string, files []string, src *types.Source) ([]ty
 }
 
 func NewBuilder(cfg Config) *Builder {
-	if cfg.Detect == nil {
-		cfg.Detect = func(root string) ([]string, error) {
-			return detect.Collect(root, codeExtensions)
-		}
+	defaultScanner := cfg.Scanner == nil
+	if cfg.Source == nil {
+		cfg.Source = extract.DetectProject
 	}
 	if cfg.Scanner == nil {
 		cfg.Scanner = extractScanner{}
@@ -125,22 +133,22 @@ func NewBuilder(cfg Config) *Builder {
 	if cfg.GraphBuilder == nil {
 		cfg.GraphBuilder = igraph.Build
 	}
-	if cfg.Persist == nil {
-		cfg.Persist = export.WriteJSONAtomic
-	}
 	if cfg.Patchers == nil {
 		cfg.Patchers = map[string]Patcher{}
 	}
 	return &Builder{
-		detect:       cfg.Detect,
-		scanner:      cfg.Scanner,
-		registry:     cfg.Registry,
-		patchers:     cfg.Patchers,
-		graphBuilder: cfg.GraphBuilder,
-		cluster:      cfg.Cluster,
-		persist:      cfg.Persist,
-		outDir:       cfg.OutDir,
-		observer:     cfg.Observer,
+		detect:                 cfg.Detect,
+		scanner:                cfg.Scanner,
+		registry:               cfg.Registry,
+		patchers:               cfg.Patchers,
+		graphBuilder:           cfg.GraphBuilder,
+		cluster:                cfg.Cluster,
+		persist:                cfg.Persist,
+		outDir:                 cfg.OutDir,
+		observer:               cfg.Observer,
+		source:                 cfg.Source,
+		defaultScanner:         defaultScanner,
+		disableExtractionCache: cfg.DisableExtractionCache,
 	}
 }
 
@@ -149,7 +157,7 @@ func (b *Builder) Build(ctx context.Context, req types.BuildRequest) (Result, er
 	if strings.TrimSpace(req.RepoRoot) == "" {
 		return Result{}, errors.New("pipeline repo root is required")
 	}
-	absRepoRoot, err := filepath.Abs(req.RepoRoot)
+	absRepoRoot, err := export.CanonicalRoot(req.RepoRoot)
 	if err != nil {
 		return Result{}, fmt.Errorf("resolve repo root %s: %w", req.RepoRoot, err)
 	}
@@ -162,60 +170,103 @@ func (b *Builder) Build(ctx context.Context, req types.BuildRequest) (Result, er
 		outDir = filepath.Join(req.RepoRoot, ".vela")
 	}
 
-	source := extract.DetectProject(req.RepoRoot)
+	w, err := export.AcquireWriter(ctx, outDir)
+	if err != nil {
+		return Result{}, err
+	}
+	defer w.Close()
+	outDir = w.Dir
+	source := b.source(req.RepoRoot)
+	if source != nil {
+		copy := *source
+		copy.Path = req.RepoRoot
+		source = &copy
+	}
 	b.emit(types.BuildStageDetect, 0, "starting detect stage")
-	files, err := b.detect(req.RepoRoot)
+	manifest, files, err := export.Inventory(req.RepoRoot, types.ManifestRequest{Languages: req.Languages, Drivers: req.Drivers, Patchers: req.Patchers})
 	if err != nil {
 		return Result{}, fmt.Errorf("detect stage: %w", err)
 	}
-	files = filterCodeFiles(files)
-	b.emit(types.BuildStageDetect, len(files), "detected source files")
-	manifest, err := buildManifest(req.RepoRoot, files)
-	if err != nil {
-		return Result{}, fmt.Errorf("manifest stage: %w", err)
+	if b.detect != nil {
+		detected, err := b.detect(req.RepoRoot)
+		if err != nil {
+			return Result{}, fmt.Errorf("detect stage: %w", err)
+		}
+		detected = filterCodeFiles(detected)
+		sort.Strings(detected)
+		if !reflect.DeepEqual(append([]string{}, detected...), append([]string{}, files...)) {
+			return Result{}, fmt.Errorf("custom discovery does not match complete eligible inventory")
+		}
 	}
-	if cached, mode, ok, err := loadCachedResult(req, outDir, manifest); err != nil {
-		return Result{}, fmt.Errorf("cache check: %w", err)
-	} else if ok {
-		if cached.GraphPath != "" && len(cached.DetectedFiles) == 0 {
-			cached.DetectedFiles = manifestPaths(manifest.Files)
+	b.emit(types.BuildStageDetect, len(files), "detected source files")
+	// Whole-graph unchanged/deletion shortcuts cannot establish source binding.
+	// Bound file artifacts are reused below; resolution always runs again.
+	manifest.SourceBinding = "unbound"
+	manifest.BindingReason = "custom scanner, external drivers or opaque patchers require live-root full extraction"
+	// Freeze the actual participating plan once. Registry presence is not an
+	// extractor: normal app/CLI builders always carry the default registry.
+	var drivers []scip.Driver
+	if b.registry != nil {
+		drivers, err = b.registry.Resolve(req)
+		if err != nil {
+			return Result{}, fmt.Errorf("driver stage: %w", err)
 		}
-		b.emit(types.BuildStagePersist, len(cached.Graph.Edges), "reused cached graph")
-		if mode == cacheReuseDeletedOnly && cached.Graph != nil && cached.GraphPath != "" {
-			if err := b.persist(cached.Graph, outDir); err != nil {
-				return Result{}, fmt.Errorf("persist stage: %w", err)
-			}
-			if err := export.WriteSQLiteGraphAtomic(cached.Graph, outDir); err != nil {
-				return Result{}, fmt.Errorf("persist runtime graph: %w", err)
-			}
-			manifest.GeneratedAt = time.Now().UTC()
-			manifest.BuildMode = buildModeDeletedOnly
-			if err := export.WriteManifestAtomic(manifest, outDir); err != nil {
-				return Result{}, fmt.Errorf("persist manifest: %w", err)
-			}
-		} else if cached.Graph != nil {
-			if err := ensureSQLiteRuntime(cached.Graph, outDir); err != nil {
-				return Result{}, err
+	}
+	eligible := b.defaultScanner && len(drivers) == 0 && len(req.Patchers) == 0 && source != nil
+	for _, file := range files {
+		rel, _ := filepath.Rel(req.RepoRoot, file)
+		for _, part := range strings.Split(filepath.ToSlash(filepath.Dir(rel)), "/") {
+			if part == ".git" || part == ".vela" || part == ".generations" || part == ".extraction-cache" || strings.HasPrefix(part, ".scip-build-") {
+				eligible = false
+				manifest.BindingReason = "eligible source lies outside the closed Go filesystem profile"
 			}
 		}
-		return cached, nil
+		if filepath.Ext(file) != ".go" {
+			eligible = false
+			manifest.BindingReason = "non-Go profile uses live-root full extraction"
+		}
+	}
+	var captured *sourceSnapshot
+	if eligible {
+		captured, err = captureSource(req.RepoRoot, manifest.Request)
+		if err != nil {
+			manifest.BindingReason = "closed Go input capture unavailable: " + err.Error()
+		} else {
+			defer captured.Close()
+			manifest = captured.Manifest
+			if b.afterCapture != nil {
+				b.afterCapture()
+			}
+		}
 	}
 
-	if b.registry != nil {
-		if err := b.registry.Bootstrap(ctx, req); err != nil {
-			return Result{}, fmt.Errorf("driver bootstrap stage: %w", err)
+	for _, driver := range drivers {
+		if bootstrapper, ok := driver.(scip.Bootstrapper); ok {
+			if err := bootstrapper.Bootstrap(ctx, scip.Request{RepoRoot: req.RepoRoot, Language: driver.Language()}.Normalize()); errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return Result{}, fmt.Errorf("driver bootstrap stage: %w", err)
+			}
 		}
 	}
 
 	b.emit(types.BuildStageScan, 0, "starting scan stage")
-	nodes, edges, err := b.scanner.Scan(req.RepoRoot, files, source)
+	var nodes []types.Node
+	var edges []types.Edge
+	cacheHits := 0
+	if captured != nil {
+		nodes, edges, cacheHits, err = scanCaptured(captured, source, outDir, b.disableExtractionCache)
+	} else {
+		nodes, edges, err = b.scanner.Scan(req.RepoRoot, files, source)
+	}
 	if err != nil {
 		return Result{}, fmt.Errorf("scan stage: %w", err)
 	}
 	b.emit(types.BuildStageScan, len(nodes), "scanned source graph")
 
 	b.emit(types.BuildStageDrivers, 0, "starting drivers stage")
-	facts, warnings, err := b.runDrivers(ctx, req)
+	facts, warnings, err := b.runDrivers(ctx, req, drivers)
+	if manifest.SourceBinding != generation.BoundGoProfile {
+		warnings = append(warnings, "unbound source provenance: "+manifest.BindingReason)
+	}
 	if err != nil {
 		return Result{}, err
 	}
@@ -230,7 +281,11 @@ func (b *Builder) Build(ctx context.Context, req types.BuildRequest) (Result, er
 	b.emit(types.BuildStageMerge, 0, "starting merge stage")
 	nodes, edges = MergeFacts(nodes, edges, facts)
 	edges = append(edges, projectFileDependencyEdges(nodes, edges)...)
-	workspaceNodes, workspaceEdges, err := loadWorkspaceYAMLTopology(req.RepoRoot)
+	topologyRoot := req.RepoRoot
+	if captured != nil {
+		topologyRoot = captured.Root
+	}
+	workspaceNodes, workspaceEdges, err := loadWorkspaceYAMLTopology(topologyRoot)
 	if err != nil {
 		return Result{}, fmt.Errorf("workspace topology stage: %w", err)
 	}
@@ -251,22 +306,32 @@ func (b *Builder) Build(ctx context.Context, req types.BuildRequest) (Result, er
 
 	tg := graph.ToTypes()
 	b.emit(types.BuildStagePersist, 0, "starting persist stage")
-	if err := b.persist(tg, outDir); err != nil {
-		return Result{}, fmt.Errorf("persist stage: %w", err)
-	}
-	if err := export.WriteSQLiteGraphAtomic(tg, outDir); err != nil {
-		return Result{}, fmt.Errorf("persist runtime graph: %w", err)
-	}
 	manifest.GeneratedAt = time.Now().UTC()
 	manifest.BuildMode = buildModeFullRebuild
-	if err := export.WriteManifestAtomic(manifest, outDir); err != nil {
-		return Result{}, fmt.Errorf("persist manifest: %w", err)
+	if captured != nil {
+		manifest.BuildMode = "closed_snapshot_rebuild"
+		manifest.ReuseReason = "full snapshot extraction: cache disabled or no exact consumed-byte/configuration/dependency identity match"
+		if cacheHits > 0 {
+			manifest.BuildMode = "closed_snapshot_owned_reuse"
+			manifest.ReuseReason = "exact-key file-owned artifacts reused; global resolution and projection rebuilt"
+		}
+	} else {
+		manifest.ReuseReason = manifest.BindingReason
+	}
+	manifest.Gaps = append([]string(nil), warnings...)
+	// Readers compare current sources to the captured vector. A stale snapshot
+	// remains consistent; live extraction never gains binding from hash equality.
+	snapshot, err := w.Publish(tg, manifest, b.persist)
+	if err != nil {
+		return Result{}, fmt.Errorf("persist stage: %w", err)
 	}
 	b.emit(types.BuildStageMerge, len(tg.Edges), "merged graph")
 	b.emit(types.BuildStagePersist, 1, "persisted graph")
 
 	return Result{
 		Graph:         tg,
+		Snapshot:      snapshot,
+		CacheHits:     cacheHits,
 		Facts:         facts,
 		Warnings:      append([]string(nil), warnings...),
 		DetectedFiles: files,
@@ -506,7 +571,15 @@ func loadCachedResult(req types.BuildRequest, outDir string, currentManifest *ty
 	if currentManifest == nil {
 		return Result{}, cacheReuseNone, false, nil
 	}
-	graphPath := filepath.Join(outDir, "graph.json")
+	entryPath := filepath.Join(outDir, "graph.json")
+	snapshot, err := export.ResolveGeneration(outDir)
+	if err != nil {
+		return Result{}, cacheReuseNone, false, err
+	}
+	graphPath := entryPath
+	if snapshot != nil {
+		graphPath = filepath.Join(snapshot.Dir, "graph.json")
+	}
 	info, err := os.Stat(graphPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -531,7 +604,7 @@ func loadCachedResult(req types.BuildRequest, outDir string, currentManifest *ty
 	if !exeChange.IsZero() && exeChange.After(info.ModTime()) {
 		return Result{}, cacheReuseNone, false, nil
 	}
-	manifestPath := filepath.Join(outDir, "manifest.json")
+	manifestPath := filepath.Join(filepath.Dir(graphPath), "manifest.json")
 	savedManifest, err := export.LoadManifest(manifestPath)
 	if err != nil {
 		return Result{}, cacheReuseNone, false, nil
@@ -550,7 +623,8 @@ func loadCachedResult(req types.BuildRequest, outDir string, currentManifest *ty
 	fileCount := len(currentManifest.Files)
 	return Result{
 		Graph:         g,
-		GraphPath:     graphPath,
+		GraphPath:     entryPath,
+		Snapshot:      snapshot,
 		DetectedFiles: manifestPaths(currentManifest.Files),
 		StageReports: []StageReport{
 			{Stage: types.BuildStageDetect, Count: fileCount},
@@ -634,7 +708,7 @@ func manifestReuseMode(saved, current *types.Manifest) (cacheReuseMode, manifest
 	if saved == nil || current == nil {
 		return cacheReuseNone, diff
 	}
-	if saved.Version != current.Version || saved.ExtractorFingerprint != current.ExtractorFingerprint {
+	if saved.Version != current.Version || saved.ExtractorFingerprint != current.ExtractorFingerprint || saved.ConfigFingerprint != current.ConfigFingerprint || saved.DiscoveryFingerprint != current.DiscoveryFingerprint || saved.RequestFingerprint != current.RequestFingerprint || saved.RepoRoot != current.RepoRoot {
 		return cacheReuseNone, diff
 	}
 	if len(diff.NewFiles) == 0 && len(diff.ChangedFiles) == 0 && len(diff.DeletedFiles) == 0 {
@@ -872,18 +946,27 @@ func filterCodeFiles(files []string) []string {
 	return filtered
 }
 
-func (b *Builder) runDrivers(ctx context.Context, req types.BuildRequest) ([]types.Fact, []string, error) {
-	if b.registry == nil {
+func (b *Builder) runDrivers(ctx context.Context, req types.BuildRequest, drivers []scip.Driver) ([]types.Fact, []string, error) {
+	if len(drivers) == 0 {
 		return nil, nil, nil
-	}
-	drivers, err := b.registry.Resolve(req)
-	if err != nil {
-		return nil, nil, fmt.Errorf("driver stage: %w", err)
 	}
 	facts := make([]types.Fact, 0)
 	warnings := make([]string, 0)
+	outDir := b.outDir
+	if outDir == "" {
+		outDir = filepath.Join(req.RepoRoot, ".vela")
+	}
+	outDir, err := filepath.Abs(outDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	ownedOutput, err := os.MkdirTemp(outDir, ".scip-build-")
+	if err != nil {
+		return nil, nil, err
+	}
+	defer os.RemoveAll(ownedOutput)
 	for _, driver := range drivers {
-		result, err := driver.Index(ctx, scip.Request{RepoRoot: req.RepoRoot, Language: driver.Language()}.Normalize())
+		result, err := driver.Index(ctx, scip.Request{RepoRoot: req.RepoRoot, Language: driver.Language(), OutputPath: filepath.Join(ownedOutput, driver.Language()+".scip")}.Normalize())
 		if err != nil {
 			var missing *scip.MissingBinaryError
 			if errors.As(err, &missing) {
