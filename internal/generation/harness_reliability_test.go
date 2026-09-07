@@ -61,6 +61,24 @@ func TestHarnessReliabilitySharedAliasBoundary(t *testing.T) {
 	}
 }
 
+func TestAdoptedRequiresDirectory(t *testing.T) {
+	root := t.TempDir()
+	regular := filepath.Join(root, "graph.db")
+	if err := os.WriteFile(regular, []byte("SQLite format 3\x00"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if generation.Adopted(regular) {
+		t.Fatal("regular artifact classified as adopted generation")
+	}
+	adopted := filepath.Join(root, ".vela")
+	if err := os.MkdirAll(filepath.Join(adopted, ".generations"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if !generation.Adopted(adopted) {
+		t.Fatal("generation directory not classified as adopted")
+	}
+}
+
 func TestHarnessReliabilityNestedOutputEntrypointsOwnTheirSelection(t *testing.T) {
 	parent := t.TempDir()
 	child := filepath.Join(parent, "sub")

@@ -18,6 +18,7 @@ import (
 
 	"github.com/Syfra3/vela/internal/app"
 	"github.com/Syfra3/vela/internal/export"
+	"github.com/Syfra3/vela/internal/generation"
 	igraph "github.com/Syfra3/vela/internal/graph"
 	"github.com/Syfra3/vela/internal/hooks"
 	"github.com/Syfra3/vela/internal/query"
@@ -285,7 +286,6 @@ func TestSCN003_InstallClusteringFailsWhenExistingRepoLocalVenvIsNotWritable(t *
 	root.SetErr(&bytes.Buffer{})
 	root.SetArgs([]string{"install", "--project", projectDir, "--clustering"})
 	err := root.Execute()
-
 	if err == nil {
 		t.Fatal("Execute(install --clustering) error = nil, want not-writable repo-local .venv failure")
 	}
@@ -1258,11 +1258,12 @@ func TestSCN014_CompatibilityCLIForcePurgeAllReportsPartialFailures(t *testing.T
 	alphaGraphDB := filepath.Join(alpha, ".vela", "graph.db")
 	betaGraphDB := filepath.Join(beta, ".vela", "graph.db")
 	writeGraphDBForPurgeTest(t, alphaGraphDB)
-	writeGraphDBForPurgeTest(t, betaGraphDB)
-	if err := os.Chmod(filepath.Dir(betaGraphDB), 0o500); err != nil {
-		t.Fatalf("Chmod(beta .vela) error = %v", err)
+	if err := os.MkdirAll(betaGraphDB, 0o755); err != nil {
+		t.Fatalf("MkdirAll(beta graph.db) error = %v", err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(filepath.Dir(betaGraphDB), 0o700) })
+	if err := os.WriteFile(filepath.Join(betaGraphDB, "locked"), []byte("fixture"), 0o644); err != nil {
+		t.Fatalf("WriteFile(beta graph.db fixture) error = %v", err)
+	}
 
 	registryPath := filepath.Join(home, ".vela", "registry.json")
 	if err := os.MkdirAll(filepath.Dir(registryPath), 0o755); err != nil {
@@ -2265,6 +2266,9 @@ func writeRuntimeGraphForMCPSelection(t *testing.T, outDir, repoRoot string, wit
 	if err := os.WriteFile(sourcePath, source, 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.WriteFile(filepath.Join(repoRoot, "go.mod"), []byte("module fixture\n\ngo 1.24\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	graphJSON := filepath.Join(outDir, "graph.json")
 	if err := os.WriteFile(graphJSON, []byte(`{"nodes":[],"edges":[]}`), 0o644); err != nil {
 		t.Fatal(err)
@@ -2280,13 +2284,21 @@ func writeRuntimeGraphForMCPSelection(t *testing.T, outDir, repoRoot string, wit
 		t.Fatalf("WriteSQLiteGraphAtomic error = %v", err)
 	}
 	if withManifest {
-		manifest := types.Manifest{
-			Version:     1,
-			RepoRoot:    repoRoot,
-			GeneratedAt: time.Now().UTC(),
-			BuildMode:   "full_rebuild",
-			Files:       []types.ManifestFile{{Path: "auth.go", SHA256: hexSHA256(source)}},
+		manifest, _, err := generation.Inventory(repoRoot, types.ManifestRequest{})
+		if err != nil {
+			t.Fatal(err)
 		}
+		closure, err := generation.ClosedInputs(repoRoot)
+		if err != nil {
+			t.Fatal(err)
+		}
+		manifest.GeneratedAt = time.Now().UTC()
+		manifest.BuildMode = "closed_snapshot_rebuild"
+		manifest.SourceBinding = generation.BoundGoProfile
+		manifest.ConsumedFiles = closure.Files
+		manifest.DirectoryFingerprint = closure.DirectoryFingerprint
+		manifest.DependencyFingerprint = closure.DependencyFingerprint
+		manifest.ClosureConfigFingerprint = closure.ConfigFingerprint
 		manifestData, err := json.Marshal(manifest)
 		if err != nil {
 			t.Fatal(err)
@@ -2453,15 +2465,16 @@ func captureStdout(t *testing.T, fn func()) string {
 func TestBuildAndExtractCommandsRouteThroughSharedBuildService(t *testing.T) {
 	restore := runBuildService
 	t.Cleanup(func() { runBuildService = restore })
+	repoRoot := t.TempDir()
 
 	tests := []struct {
 		name    string
 		args    []string
 		wantUse string
 	}{
-		{name: "build", args: []string{"build", "/repo", "--language", "go", "--driver", "scip-go"}, wantUse: "build"},
-		{name: "update", args: []string{"update", "/repo", "--language", "go", "--driver", "scip-go"}, wantUse: "update"},
-		{name: "extract alias", args: []string{"extract", "/repo", "--language", "go", "--driver", "scip-go"}, wantUse: "extract"},
+		{name: "build", args: []string{"build", repoRoot, "--language", "go", "--driver", "scip-go"}, wantUse: "build"},
+		{name: "update", args: []string{"update", repoRoot, "--language", "go", "--driver", "scip-go"}, wantUse: "update"},
+		{name: "extract alias", args: []string{"extract", repoRoot, "--language", "go", "--driver", "scip-go"}, wantUse: "extract"},
 	}
 
 	for _, tt := range tests {
@@ -2487,8 +2500,8 @@ func TestBuildAndExtractCommandsRouteThroughSharedBuildService(t *testing.T) {
 			if err := root.Execute(); err != nil {
 				t.Fatalf("Execute() error = %v", err)
 			}
-			if captured.RepoRoot != "/repo" {
-				t.Fatalf("RepoRoot = %q, want /repo", captured.RepoRoot)
+			if captured.RepoRoot != repoRoot {
+				t.Fatalf("RepoRoot = %q, want %q", captured.RepoRoot, repoRoot)
 			}
 			if len(captured.Languages) != 1 || captured.Languages[0] != "go" {
 				t.Fatalf("Languages = %v, want [go]", captured.Languages)
@@ -3219,6 +3232,9 @@ func writeFreshRefundStatusRuntimeGraph(t *testing.T) string {
 	if err := os.WriteFile(statusPath, statusSource, 0o644); err != nil {
 		t.Fatalf("WriteFile(refund status) error = %v", err)
 	}
+	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module fixture\n\ngo 1.24\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(go.mod) error = %v", err)
+	}
 	outDir := filepath.Join(repo, ".vela")
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(.vela) error = %v", err)
@@ -3245,18 +3261,21 @@ func writeFreshRefundStatusRuntimeGraph(t *testing.T) string {
 	if err := export.WriteSQLiteGraphAtomic(graph, outDir); err != nil {
 		t.Fatalf("WriteSQLiteGraphAtomic error = %v", err)
 	}
-	manifest := types.Manifest{
-		Version:              1,
-		RepoRoot:             repo,
-		GeneratedAt:          time.Now().UTC(),
-		ExtractorFingerprint: "test",
-		BuildMode:            "test",
-		Files: []types.ManifestFile{{
-			Path:   "services/refund_status.go",
-			SHA256: hexSHA256(statusSource),
-			Size:   int64(len(statusSource)),
-		}},
+	manifest, _, err := generation.Inventory(repo, types.ManifestRequest{})
+	if err != nil {
+		t.Fatalf("Inventory() error = %v", err)
 	}
+	closure, err := generation.ClosedInputs(repo)
+	if err != nil {
+		t.Fatalf("ClosedInputs() error = %v", err)
+	}
+	manifest.GeneratedAt = time.Now().UTC()
+	manifest.BuildMode = "closed_snapshot_rebuild"
+	manifest.SourceBinding = generation.BoundGoProfile
+	manifest.ConsumedFiles = closure.Files
+	manifest.DirectoryFingerprint = closure.DirectoryFingerprint
+	manifest.DependencyFingerprint = closure.DependencyFingerprint
+	manifest.ClosureConfigFingerprint = closure.ConfigFingerprint
 	manifestJSON, err := json.Marshal(manifest)
 	if err != nil {
 		t.Fatalf("Marshal(manifest) error = %v", err)

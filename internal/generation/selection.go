@@ -72,6 +72,10 @@ func Validate(dir string) (*Selection, error) {
 }
 
 func Adopted(out string) bool {
+	info, err := os.Lstat(out)
+	if err != nil || !info.IsDir() {
+		return false
+	}
 	for _, name := range []string{".current", ".generations", "seal.json"} {
 		if _, err := os.Lstat(filepath.Join(out, name)); !os.IsNotExist(err) {
 			return true
