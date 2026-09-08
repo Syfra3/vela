@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.1](https://github.com/Syfra3/vela/compare/v1.12.0...v1.12.1) (2026-09-08)
+
+
+### Bug Fixes
+
+* support generation locks on Windows ([b8d882e](https://github.com/Syfra3/vela/commit/b8d882e8c9078a2226fd94fef3f2efcf845aa98a))
+
 ## [1.12.0](https://github.com/Syfra3/vela/compare/v1.11.0...v1.12.0) (2026-09-08)
 
 
