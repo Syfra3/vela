@@ -40,16 +40,18 @@ func TestDeleteTrackedProjectsRemovesGraphNodesAndCacheEntries(t *testing.T) {
 	t.Setenv("HOME", home)
 	registryPath := writeProjectsRegistry(t, home)
 	cacheDir := filepath.Join(home, ".vela", "cache")
+	alphaRoot := filepath.Join(home, "work", "alpha")
+	velaRoot := filepath.Join(home, "work", "vela")
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		t.Fatalf("mkdir cache dir: %v", err)
 	}
-	cacheJSON := []byte("{\n  \"/work/alpha/main.go\": \"a\",\n  \"/work/vela/main.go\": \"b\"\n}")
+	cacheJSON := []byte("{\n  \"" + filepath.ToSlash(filepath.Join(alphaRoot, "main.go")) + "\": \"a\",\n  \"" + filepath.ToSlash(filepath.Join(velaRoot, "main.go")) + "\": \"b\"\n}")
 	if err := os.WriteFile(filepath.Join(cacheDir, "cache.json"), cacheJSON, 0o644); err != nil {
 		t.Fatalf("write cache: %v", err)
 	}
 
 	projectOutDir := filepath.Join(home, "alpha-output")
-	message, err := deleteTrackedProjects(registryPath, []trackedProject{{Name: "alpha", NodeID: "/work/alpha", Path: "/work/alpha", GraphPath: filepath.Join(projectOutDir, "graph.json")}})
+	message, err := deleteTrackedProjects(registryPath, []trackedProject{{Name: "alpha", NodeID: alphaRoot, Path: alphaRoot, GraphPath: filepath.Join(projectOutDir, "graph.json")}})
 	if err != nil {
 		t.Fatalf("deleteTrackedProjects() error = %v", err)
 	}
@@ -75,10 +77,10 @@ func TestDeleteTrackedProjectsRemovesGraphNodesAndCacheEntries(t *testing.T) {
 	if string(cacheData) == string(cacheJSON) {
 		t.Fatal("expected cache file to change")
 	}
-	if strings.Contains(string(cacheData), "/work/alpha/main.go") {
+	if strings.Contains(string(cacheData), filepath.ToSlash(filepath.Join(alphaRoot, "main.go"))) {
 		t.Fatalf("alpha cache entry still present: %s", string(cacheData))
 	}
-	if !strings.Contains(string(cacheData), "/work/vela/main.go") {
+	if !strings.Contains(string(cacheData), filepath.ToSlash(filepath.Join(velaRoot, "main.go"))) {
 		t.Fatalf("expected vela cache entry preserved: %s", string(cacheData))
 	}
 }
@@ -379,6 +381,8 @@ func TestSCN008_ProjectsModelConfirmsPerProjectPurge(t *testing.T) {
 	// Scenario: User confirms per-project purge in the TUI.
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	alphaRoot := filepath.Join(home, "work", "alpha")
+	betaRoot := filepath.Join(home, "work", "beta")
 	alphaGraphPath := filepath.Join(home, "alpha-output", "graph.json")
 	betaGraphPath := filepath.Join(home, "beta-output", "graph.json")
 	registryPath := writePurgeProjectsRegistry(t, home, alphaGraphPath, betaGraphPath)
@@ -387,8 +391,8 @@ func TestSCN008_ProjectsModelConfirmsPerProjectPurge(t *testing.T) {
 		graphPath:  registryPath,
 		termHeight: 40,
 		projects: []trackedProject{
-			{Name: "alpha", NodeID: "/work/alpha", Path: "/work/alpha", GraphPath: alphaGraphPath},
-			{Name: "beta", NodeID: "/work/beta", Path: "/work/beta", GraphPath: betaGraphPath},
+			{Name: "alpha", NodeID: alphaRoot, Path: alphaRoot, GraphPath: alphaGraphPath},
+			{Name: "beta", NodeID: betaRoot, Path: betaRoot, GraphPath: betaGraphPath},
 		},
 		selected: map[string]bool{},
 	}
@@ -595,6 +599,13 @@ func writeProjectsRegistry(t *testing.T, home string) string {
 	}
 	alphaOutDir := filepath.Join(home, "alpha-output")
 	velaOutDir := filepath.Join(home, "vela-output")
+	alphaRoot := filepath.Join(home, "work", "alpha")
+	velaRoot := filepath.Join(home, "work", "vela")
+	for _, root := range []string{alphaRoot, velaRoot} {
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatalf("mkdir project root: %v", err)
+		}
+	}
 	for _, outDir := range []string{alphaOutDir, velaOutDir} {
 		if err := os.MkdirAll(outDir, 0o755); err != nil {
 			t.Fatalf("mkdir output dir: %v", err)
@@ -611,8 +622,8 @@ func writeProjectsRegistry(t *testing.T, home string) string {
 	}{
 		Version: 1,
 		Entries: []registry.Entry{
-			{Name: "alpha", RepoRoot: "/work/alpha", GraphPath: filepath.Join(alphaOutDir, "graph.json"), ManifestPath: filepath.Join(alphaOutDir, "manifest.json"), ReportPath: filepath.Join(alphaOutDir, "GRAPH_REPORT.md")},
-			{Name: "vela", RepoRoot: "/work/vela", Remote: "https://github.com/org/vela.git", GraphPath: filepath.Join(velaOutDir, "graph.json"), ManifestPath: filepath.Join(velaOutDir, "manifest.json"), ReportPath: filepath.Join(velaOutDir, "GRAPH_REPORT.md")},
+			{Name: "alpha", RepoRoot: alphaRoot, GraphPath: filepath.Join(alphaOutDir, "graph.json"), ManifestPath: filepath.Join(alphaOutDir, "manifest.json"), ReportPath: filepath.Join(alphaOutDir, "GRAPH_REPORT.md")},
+			{Name: "vela", RepoRoot: velaRoot, Remote: "https://github.com/org/vela.git", GraphPath: filepath.Join(velaOutDir, "graph.json"), ManifestPath: filepath.Join(velaOutDir, "manifest.json"), ReportPath: filepath.Join(velaOutDir, "GRAPH_REPORT.md")},
 		},
 	}, "", "  ")
 	if err != nil {
@@ -626,6 +637,13 @@ func writeProjectsRegistry(t *testing.T, home string) string {
 
 func writePurgeProjectsRegistry(t *testing.T, home, alphaGraphPath, betaGraphPath string) string {
 	t.Helper()
+	alphaRoot := filepath.Join(home, "work", "alpha")
+	betaRoot := filepath.Join(home, "work", "beta")
+	for _, root := range []string{alphaRoot, betaRoot} {
+		if err := os.MkdirAll(root, 0o755); err != nil {
+			t.Fatalf("mkdir project root: %v", err)
+		}
+	}
 	for _, path := range []string{alphaGraphPath, betaGraphPath} {
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatalf("mkdir graph dir: %v", err)
@@ -644,8 +662,8 @@ func writePurgeProjectsRegistry(t *testing.T, home, alphaGraphPath, betaGraphPat
 	}{
 		Version: 1,
 		Entries: []registry.Entry{
-			{Name: "alpha", RepoRoot: "/work/alpha", GraphPath: alphaGraphPath},
-			{Name: "beta", RepoRoot: "/work/beta", GraphPath: betaGraphPath},
+			{Name: "alpha", RepoRoot: alphaRoot, GraphPath: alphaGraphPath},
+			{Name: "beta", RepoRoot: betaRoot, GraphPath: betaGraphPath},
 		},
 	}, "", "  ")
 	if err != nil {

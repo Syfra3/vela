@@ -99,6 +99,7 @@ func TestSCN004_BuildCreatesRuntimeAndGeneratedArtifacts(t *testing.T) {
 	writeTestFile(t, filepath.Join(repoRoot, "main.go"), "package main\n")
 
 	builder := NewBuilder(Config{
+		Source: harnessSource, // isolated identity; never invoke Git for this fixture
 		Detect: func(string) ([]string, error) {
 			return []string{filepath.Join(repoRoot, "main.go")}, nil
 		},
@@ -153,6 +154,7 @@ func TestSCN021_SingleRepoSQLiteFixturePersistsQueryableGraphFacts(t *testing.T)
 	writeTestFile(t, filepath.Join(repoRoot, "store.go"), "package fixture\nfunc Store() {}\n")
 
 	builder := NewBuilder(Config{
+		Source: harnessSource,
 		Detect: func(string) ([]string, error) {
 			return []string{filepath.Join(repoRoot, "handler.go"), filepath.Join(repoRoot, "store.go")}, nil
 		},
@@ -261,6 +263,7 @@ known_links:
 `)
 
 	builder := NewBuilder(Config{
+		Source: harnessSource,
 		Detect: func(string) ([]string, error) {
 			return []string{filepath.Join(repoRoot, "main.go")}, nil
 		},
@@ -591,7 +594,7 @@ func TestBuilderBuild_RunsDetectScanDriverPatchMergeAndPersist(t *testing.T) {
 		Persist: func(g *types.Graph, out string) error {
 			persisted = g
 			persistedPath = filepath.Join(out, "graph.json")
-			return nil
+			return export.WriteJSONAtomic(g, out)
 		},
 		OutDir: outDir,
 	})
@@ -626,8 +629,8 @@ func TestBuilderBuild_RunsDetectScanDriverPatchMergeAndPersist(t *testing.T) {
 	if persisted == nil {
 		t.Fatal("persisted graph = nil, want persisted graph")
 	}
-	if persistedPath != filepath.Join(outDir, "graph.json") {
-		t.Fatalf("persisted path = %q, want %q", persistedPath, filepath.Join(outDir, "graph.json"))
+	if filepath.Base(persistedPath) != "graph.json" || filepath.Dir(persistedPath) == outDir {
+		t.Fatalf("persisted path = %q, want private graph.json scratch path", persistedPath)
 	}
 	if clusterer.called != 1 {
 		t.Fatalf("clusterer called = %d, want 1", clusterer.called)
@@ -686,7 +689,7 @@ func TestBuilderBuild_BootstrapsDriversBeforeScan(t *testing.T) {
 		Scanner:      scanner,
 		Registry:     registry,
 		GraphBuilder: igraph.Build,
-		Persist:      func(*types.Graph, string) error { return nil },
+		Persist:      export.WriteJSONAtomic,
 	})
 
 	_, err = builder.Build(context.Background(), types.BuildRequest{RepoRoot: repoRoot, Languages: []string{"go"}})
@@ -698,7 +701,7 @@ func TestBuilderBuild_BootstrapsDriversBeforeScan(t *testing.T) {
 	}
 }
 
-func TestBuilderBuild_ReusesFreshPersistedGraphForDefaultBuild(t *testing.T) {
+func TestBuilderBuild_RebuildsLegacyPersistedGraphForDefaultBuild(t *testing.T) {
 	repoRoot := t.TempDir()
 	outDir := filepath.Join(repoRoot, ".vela")
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
@@ -739,7 +742,7 @@ func TestBuilderBuild_ReusesFreshPersistedGraphForDefaultBuild(t *testing.T) {
 		},
 		Scanner:      scanner,
 		GraphBuilder: igraph.Build,
-		Persist:      func(*types.Graph, string) error { t.Fatal("persist should be skipped on cache hit"); return nil },
+		Persist:      export.WriteJSONAtomic,
 		OutDir:       outDir,
 	})
 
@@ -747,14 +750,17 @@ func TestBuilderBuild_ReusesFreshPersistedGraphForDefaultBuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Build() error = %v", err)
 	}
-	if scanner.gotRoot != "" {
-		t.Fatal("expected scanner to be skipped on fresh cache hit")
+	if scanner.gotRoot != repoRoot {
+		t.Fatalf("scanner root = %q, want %q", scanner.gotRoot, repoRoot)
 	}
 	if result.GraphPath != filepath.Join(outDir, "graph.json") {
-		t.Fatalf("GraphPath = %q, want cached graph path", result.GraphPath)
+		t.Fatalf("GraphPath = %q, want rebuilt graph path", result.GraphPath)
 	}
 	if len(result.Graph.Nodes) != 1 {
-		t.Fatalf("cached graph nodes = %d, want 1", len(result.Graph.Nodes))
+		t.Fatalf("rebuilt graph nodes = %d, want 1", len(result.Graph.Nodes))
+	}
+	if result.Graph.Nodes[0].ID != "should-not-run" {
+		t.Fatalf("rebuilt graph node = %q, want fresh scanner output", result.Graph.Nodes[0].ID)
 	}
 	if len(result.StageReports) != 6 {
 		t.Fatalf("stage reports len = %d, want 6", len(result.StageReports))
@@ -796,7 +802,7 @@ func TestBuilderBuild_SkipsCacheWhenExecutableIsNewer(t *testing.T) {
 		Detect:       func(string) ([]string, error) { return []string{filepath.Join(repoRoot, "main.go")}, nil },
 		Scanner:      scanner,
 		GraphBuilder: igraph.Build,
-		Persist:      func(*types.Graph, string) error { return nil },
+		Persist:      export.WriteJSONAtomic,
 		OutDir:       outDir,
 	})
 
@@ -836,7 +842,7 @@ func TestBuilderBuild_FallsBackToFullRebuildWhenManifestMissing(t *testing.T) {
 		Detect:       func(string) ([]string, error) { return []string{filepath.Join(repoRoot, "main.go")}, nil },
 		Scanner:      scanner,
 		GraphBuilder: igraph.Build,
-		Persist:      func(*types.Graph, string) error { return nil },
+		Persist:      export.WriteJSONAtomic,
 		OutDir:       outDir,
 	})
 
@@ -888,7 +894,7 @@ func TestBuilderBuild_FallsBackToFullRebuildWhenManifestHashChanges(t *testing.T
 		Detect:       func(string) ([]string, error) { return []string{mainFile}, nil },
 		Scanner:      scanner,
 		GraphBuilder: igraph.Build,
-		Persist:      func(*types.Graph, string) error { return nil },
+		Persist:      export.WriteJSONAtomic,
 		OutDir:       outDir,
 	})
 
@@ -1002,8 +1008,11 @@ func TestBuilderBuild_PrunesDeletedFilesFromCachedGraph(t *testing.T) {
 	currentExecutableChange = func() (time.Time, error) { return time.Time{}, nil }
 
 	builder := NewBuilder(Config{
-		Detect:       func(string) ([]string, error) { return []string{mainFile}, nil },
-		Scanner:      &fakeScanner{nodes: []types.Node{{ID: "should-not-run", Label: "should-not-run", NodeType: "function"}}},
+		Source: harnessSource, // no Git subprocess in this compatibility fixture
+		Detect: func(string) ([]string, error) { return []string{mainFile}, nil },
+		// R3 refreshes opaque scanner inputs instead of certifying legacy cache
+		// provenance. Preserve the existing Persist: WriteJSONAtomic combination.
+		Scanner:      &fakeScanner{nodes: graph.Nodes[:2]},
 		GraphBuilder: igraph.Build,
 		Persist:      export.WriteJSONAtomic,
 		OutDir:       outDir,
@@ -1049,7 +1058,7 @@ func TestBuilderBuild_FailsWhenNamedPatcherMissing(t *testing.T) {
 	})
 
 	_, err := builder.Build(context.Background(), types.BuildRequest{
-		RepoRoot: "/repo",
+		RepoRoot: t.TempDir(),
 		Patchers: []string{"missing"},
 	})
 	if err == nil {
@@ -1068,7 +1077,7 @@ func TestBuilderBuild_EmitsObserverStageEvents(t *testing.T) {
 		Detect:       func(string) ([]string, error) { return []string{filepath.Join(repoRoot, "main.go")}, nil },
 		Scanner:      &fakeScanner{nodes: []types.Node{{ID: "svc", Label: "svc", NodeType: "function"}}},
 		GraphBuilder: igraph.Build,
-		Persist:      func(*types.Graph, string) error { return nil },
+		Persist:      export.WriteJSONAtomic,
 		Observer: func(event StageEvent) {
 			events = append(events, event)
 		},
@@ -1117,15 +1126,15 @@ func TestBuilderBuild_WarnsAndContinuesWhenDriverBinaryMissing(t *testing.T) {
 		Scanner:      &fakeScanner{nodes: []types.Node{{ID: "svc", Label: "svc", NodeType: "function"}}},
 		Registry:     registry,
 		GraphBuilder: igraph.Build,
-		Persist:      func(*types.Graph, string) error { return nil },
+		Persist:      export.WriteJSONAtomic,
 	})
 
 	result, err := builder.Build(context.Background(), types.BuildRequest{RepoRoot: repoRoot, Languages: []string{"typescript"}})
 	if err != nil {
 		t.Fatalf("Build() error = %v, want warning-only degrade", err)
 	}
-	if len(result.Warnings) != 1 {
-		t.Fatalf("warnings len = %d, want 1", len(result.Warnings))
+	if len(result.Warnings) != 2 {
+		t.Fatalf("warnings len = %d, want 2", len(result.Warnings))
 	}
 	if result.Warnings[0] != "SCIP driver unavailable: scip-typescript is not installed. Install it with: npm install -g @sourcegraph/scip-typescript (repo: "+repoRoot+")" {
 		t.Fatalf("warning = %q", result.Warnings[0])
@@ -1154,15 +1163,15 @@ func TestBuilderBuild_WarnsAndContinuesWhenDriverExecutionFails(t *testing.T) {
 		Scanner:      &fakeScanner{nodes: []types.Node{{ID: "svc", Label: "svc", NodeType: "function"}}},
 		Registry:     registry,
 		GraphBuilder: igraph.Build,
-		Persist:      func(*types.Graph, string) error { return nil },
+		Persist:      export.WriteJSONAtomic,
 	})
 
 	result, err := builder.Build(context.Background(), types.BuildRequest{RepoRoot: repoRoot, Languages: []string{"go"}})
 	if err != nil {
 		t.Fatalf("Build() error = %v, want warning-only degrade", err)
 	}
-	if len(result.Warnings) != 1 {
-		t.Fatalf("warnings len = %d, want 1", len(result.Warnings))
+	if len(result.Warnings) != 2 {
+		t.Fatalf("warnings len = %d, want 2", len(result.Warnings))
 	}
 	if got := result.Warnings[0]; !strings.Contains(got, "SCIP driver failed: scip-go: panic: nil pointer dereference") || !strings.Contains(got, "go install github.com/sourcegraph/scip-go/cmd/scip-go@latest") || !strings.Contains(got, repoRoot) {
 		t.Fatalf("warning = %q", got)
@@ -1184,7 +1193,7 @@ func TestBuilderBuild_WarnsAndContinuesWhenClusteringFails(t *testing.T) {
 		Scanner:      &fakeScanner{nodes: []types.Node{{ID: "svc", Label: "svc", NodeType: "function"}}},
 		GraphBuilder: igraph.Build,
 		Cluster:      clusterer.Run,
-		Persist:      func(*types.Graph, string) error { return nil },
+		Persist:      export.WriteJSONAtomic,
 	})
 
 	result, err := builder.Build(context.Background(), types.BuildRequest{RepoRoot: repoRoot})
@@ -1194,10 +1203,10 @@ func TestBuilderBuild_WarnsAndContinuesWhenClusteringFails(t *testing.T) {
 	if clusterer.called != 1 {
 		t.Fatalf("clusterer called = %d, want 1", clusterer.called)
 	}
-	if len(result.Warnings) != 1 {
-		t.Fatalf("warnings len = %d, want 1", len(result.Warnings))
+	if len(result.Warnings) != 2 {
+		t.Fatalf("warnings len = %d, want 2", len(result.Warnings))
 	}
-	if got := result.Warnings[0]; !strings.Contains(got, "Community detection unavailable") || !strings.Contains(got, "graspologic") {
+	if got := result.Warnings[1]; !strings.Contains(got, "Community detection unavailable") || !strings.Contains(got, "graspologic") {
 		t.Fatalf("warning = %q", got)
 	}
 }

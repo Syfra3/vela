@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/Syfra3/vela/internal/config"
+	"github.com/Syfra3/vela/internal/generation"
 	"github.com/Syfra3/vela/internal/hooks"
 	"github.com/Syfra3/vela/internal/registry"
 )
@@ -184,29 +186,32 @@ func uninstallAll() (uninstallResult, error) {
 	if err != nil {
 		return result, err
 	}
-	for _, repo := range repos {
-		if strings.TrimSpace(repo) == "" {
-			continue
+	err = generation.WithRemoval(context.Background(), targets, func() error {
+		for _, repo := range repos {
+			if strings.TrimSpace(repo) == "" {
+				continue
+			}
+			if err := hooks.Uninstall(repo); err != nil {
+				result.Warnings = append(result.Warnings, fmt.Sprintf("remove hooks %s: %v", repo, err))
+			}
+			if graphDB := filepath.Join(repo, ".vela", "graph.db"); fileExists(graphDB) {
+				result.PreservedIndexes = append(result.PreservedIndexes, graphDB)
+			}
 		}
-		if err := hooks.Uninstall(repo); err != nil {
-			result.Warnings = append(result.Warnings, fmt.Sprintf("remove hooks %s: %v", repo, err))
+		for _, target := range targets {
+			if _, err := os.Stat(target); os.IsNotExist(err) {
+				continue
+			} else if err != nil {
+				return fmt.Errorf("checking %s: %w", target, err)
+			}
+			if err := os.RemoveAll(target); err != nil {
+				return fmt.Errorf("removing %s: %w", target, err)
+			}
+			result.Removed = append(result.Removed, target)
 		}
-		if graphDB := filepath.Join(repo, ".vela", "graph.db"); fileExists(graphDB) {
-			result.PreservedIndexes = append(result.PreservedIndexes, graphDB)
-		}
-	}
-	for _, target := range targets {
-		if _, err := os.Stat(target); os.IsNotExist(err) {
-			continue
-		} else if err != nil {
-			return result, fmt.Errorf("checking %s: %w", target, err)
-		}
-		if err := os.RemoveAll(target); err != nil {
-			return result, fmt.Errorf("removing %s: %w", target, err)
-		}
-		result.Removed = append(result.Removed, target)
-	}
-	return result, nil
+		return nil
+	})
+	return result, err
 }
 
 func uninstallTargets() ([]string, error) {

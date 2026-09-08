@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"github.com/Syfra3/vela/internal/generation"
 	"os"
 	"path/filepath"
 )
@@ -58,13 +59,19 @@ func FindGraphFile(startDir string) (string, error) {
 
 	// 1. ./.vela/graph.json
 	local := filepath.Join(abs, ".vela", graphFileName)
-	if _, err := os.Stat(local); err == nil {
+	if found, err := generation.Candidate(local); found {
+		if err != nil {
+			return "", err
+		}
 		return local, nil
 	}
 
 	// 2. legacy ./vela-out/graph.json
 	legacy := filepath.Join(abs, legacyOutSubDir, graphFileName)
-	if _, err := os.Stat(legacy); err == nil {
+	if found, err := generation.Candidate(legacy); found {
+		if err != nil {
+			return "", err
+		}
 		return legacy, nil
 	}
 
@@ -72,13 +79,19 @@ func FindGraphFile(startDir string) (string, error) {
 
 	// 3. ~/.vela/graph.json
 	canonical := filepath.Join(home, graphFileName)
-	if _, err := os.Stat(canonical); err == nil {
+	if found, err := generation.Candidate(canonical); found {
+		if err != nil {
+			return "", err
+		}
 		return canonical, nil
 	}
 
 	// 4. ~/.vela/vela-out/graph.json
 	legacyGlobal := filepath.Join(home, legacyOutSubDir, graphFileName)
-	if _, err := os.Stat(legacyGlobal); err == nil {
+	if found, err := generation.Candidate(legacyGlobal); found {
+		if err != nil {
+			return "", err
+		}
 		return legacyGlobal, nil
 	}
 

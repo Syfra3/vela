@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Syfra3/vela/internal/export"
 	"github.com/Syfra3/vela/internal/pipeline"
 	"github.com/Syfra3/vela/pkg/types"
 )
@@ -238,14 +239,11 @@ func TestBuildServiceRun_MergesChildGitReposUnderNonRepoRoot(t *testing.T) {
 			seen = append(seen, req.RepoRoot)
 			repoName := filepath.Base(req.RepoRoot)
 			projectID := filepath.ToSlash(strings.TrimPrefix(req.RepoRoot, root+string(filepath.Separator)))
-			graphPath := filepath.Join(req.RepoRoot, ".vela", "graph.json")
-			return pipeline.Result{
-				GraphPath:     graphPath,
-				DetectedFiles: []string{filepath.Join(req.RepoRoot, "main.go")},
-				Facts:         []types.Fact{{From: projectID + ":a", To: projectID + ":b", Kind: types.FactKindDependsOn}},
-				Graph:         &types.Graph{Nodes: []types.Node{{ID: "project:" + projectID, Label: repoName, NodeType: string(types.NodeTypeProject), Source: &types.Source{Type: types.SourceTypeCodebase, ID: projectID, Name: repoName, Path: req.RepoRoot}}}},
-				StageReports:  []pipeline.StageReport{{Stage: types.BuildStageDetect, Count: 1}, {Stage: types.BuildStagePersist, Count: 1}},
-			}, nil
+			result := validatedChildResult(t, req.RepoRoot, repoName)
+			result.DetectedFiles = []string{filepath.Join(req.RepoRoot, "main.go")}
+			result.Facts = []types.Fact{{From: projectID + ":a", To: projectID + ":b", Kind: types.FactKindDependsOn}}
+			result.StageReports = []pipeline.StageReport{{Stage: types.BuildStageDetect, Count: 1}, {Stage: types.BuildStagePersist, Count: 1}}
+			return result, nil
 		},
 		WriteHTML:     func(*types.Graph, string) error { return nil },
 		WriteReport:   func(*types.Graph, string) error { return nil },
@@ -288,11 +286,7 @@ func TestBuildServiceRun_WritesPerRepoReportsForMultiRepoBuilds(t *testing.T) {
 	var reportOutDirs []string
 	svc := BuildService{
 		RunPipeline: func(_ context.Context, _ string, req types.BuildRequest, _ pipeline.Observer) (pipeline.Result, error) {
-			graphPath := filepath.Join(req.RepoRoot, ".vela", "graph.json")
-			return pipeline.Result{
-				GraphPath: graphPath,
-				Graph:     &types.Graph{Nodes: []types.Node{{ID: req.RepoRoot, Label: filepath.Base(req.RepoRoot), NodeType: string(types.NodeTypeProject)}}},
-			}, nil
+			return validatedChildResult(t, req.RepoRoot, filepath.Base(req.RepoRoot)), nil
 		},
 		WriteHTML: func(*types.Graph, string) error { return nil },
 		WriteReport: func(_ *types.Graph, out string) error {
@@ -345,11 +339,9 @@ func TestBuildServiceRun_PrefixesMultiRepoWarningsWithRepoPath(t *testing.T) {
 
 	svc := BuildService{
 		RunPipeline: func(_ context.Context, _ string, req types.BuildRequest, _ pipeline.Observer) (pipeline.Result, error) {
-			return pipeline.Result{
-				GraphPath: filepath.Join(req.RepoRoot, ".vela", "graph.json"),
-				Graph:     &types.Graph{Nodes: []types.Node{{ID: req.RepoRoot, Label: filepath.Base(req.RepoRoot), NodeType: string(types.NodeTypeProject)}}},
-				Warnings:  []string{"SCIP driver failed: scip-typescript: no files got indexed"},
-			}, nil
+			result := validatedChildResult(t, req.RepoRoot, filepath.Base(req.RepoRoot))
+			result.Warnings = []string{"SCIP driver failed: scip-typescript: no files got indexed"}
+			return result, nil
 		},
 		WriteHTML:     func(*types.Graph, string) error { return nil },
 		WriteReport:   func(*types.Graph, string) error { return nil },
@@ -374,6 +366,27 @@ func TestBuildServiceRun_PrefixesMultiRepoWarningsWithRepoPath(t *testing.T) {
 			t.Fatalf("warning = %q, want original warning text preserved", warning)
 		}
 	}
+}
+
+func validatedChildResult(t *testing.T, repoRoot, label string) pipeline.Result {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(repoRoot, "main.go"), []byte("package fixture\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest, _, err := export.Inventory(repoRoot, types.ManifestRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, err := export.AcquireWriter(context.Background(), filepath.Join(repoRoot, ".vela"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	snapshot, err := writer.Publish(&types.Graph{Nodes: []types.Node{{ID: "project", Label: label, NodeType: string(types.NodeTypeProject)}}}, manifest, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pipeline.Result{Graph: snapshot.Graph, Snapshot: snapshot, GraphPath: filepath.Join(repoRoot, ".vela", "graph.json")}
 }
 
 func sampleGraph() *types.Graph {

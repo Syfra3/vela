@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Syfra3/vela/internal/generation"
 	igraph "github.com/Syfra3/vela/internal/graph"
 	"gonum.org/v1/gonum/graph/path"
 	"gonum.org/v1/gonum/graph/simple"
@@ -53,11 +54,15 @@ type UnavailableDiagnostic struct {
 
 // NewUnavailableEngine returns an empty engine that reports a selected graph diagnostic instead of answering from fallback corpora.
 func NewUnavailableEngine(diagnostic UnavailableDiagnostic) *Engine {
+	project := ""
+	if strings.TrimSpace(diagnostic.Workspace) != "" {
+		project = filepath.Base(filepath.Clean(diagnostic.Workspace))
+	}
 	eng := newEngine(&types.Graph{Metadata: map[string]interface{}{
 		"freshness_status":    string(FreshnessUnknown),
 		"freshness_source":    diagnostic.GraphPath,
 		"workspace_root":      diagnostic.Workspace,
-		"project":             "stock-chef",
+		"project":             project,
 		"freshness_reason":    diagnostic.Message,
 		"recommended_actions": []string{"vela build", "vela update", "vela status"},
 	}})
@@ -111,6 +116,21 @@ type GraphStats struct {
 // locate the sibling v0.4 SQLite runtime store; graph.json remains export/debug
 // context and is not used as query truth.
 func LoadFromFile(graphPath string) (*Engine, error) {
+	{
+		snapshot, err := generation.Pin(graphPath)
+		if err != nil {
+			return nil, fmt.Errorf("runtime graph unavailable: %w", err)
+		}
+		if snapshot != nil {
+			eng, err := loadFromSQLite(filepath.Join(snapshot.Dir, "graph.db"))
+			if err != nil {
+				return nil, err
+			}
+			eng.graphPath = graphPath
+			eng.attachPinnedManifest(snapshot.Manifest, graphPath)
+			return eng, nil
+		}
+	}
 	if graphDBPath, ok, err := runtimeGraphDBPath(graphPath); err != nil {
 		return nil, err
 	} else if ok {
@@ -195,6 +215,9 @@ func requireRuntimeGraphDB(graphPath string) error {
 }
 
 func runtimeGraphDBPath(graphPath string) (string, bool, error) {
+	if filepath.Base(graphPath) == "graph.db" {
+		return graphPath, true, nil
+	}
 	if filepath.Base(graphPath) != "graph.json" || filepath.Base(filepath.Dir(graphPath)) != ".vela" {
 		return "", false, nil
 	}
@@ -210,7 +233,11 @@ func runtimeGraphDBPath(graphPath string) (string, bool, error) {
 }
 
 func loadFromSQLite(graphDBPath string) (*Engine, error) {
-	db, err := sql.Open("sqlite", graphDBPath)
+	uri, err := generation.ReadOnlyURI(graphDBPath)
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("sqlite", uri)
 	if err != nil {
 		return nil, fmt.Errorf("runtime graph unavailable: cannot open %s: %w; run `vela build` or `vela update`", graphDBPath, err)
 	}
@@ -239,6 +266,15 @@ func (e *Engine) attachManifestFreshness(graphDBPath, graphSourcePath string) {
 		e.graph.Metadata["freshness_reason"] = fmt.Sprintf("runtime graph freshness is unknown because %s is unavailable; run `vela build`", manifestPath)
 		return
 	}
+	e.attachPinnedManifest(manifest, graphSourcePath)
+}
+
+func (e *Engine) attachPinnedManifest(manifest *types.Manifest, graphSourcePath string) {
+	if e.graph.Metadata == nil {
+		e.graph.Metadata = make(map[string]interface{})
+	}
+	e.graph.Metadata["freshness_source"] = graphSourcePath
+	e.graph.Metadata["graph_generation"] = manifest.Generation
 	if strings.TrimSpace(manifest.RepoRoot) != "" {
 		e.graph.Metadata["workspace_root"] = manifest.RepoRoot
 		e.graph.Metadata["project"] = filepath.Base(filepath.Clean(manifest.RepoRoot))
@@ -246,12 +282,24 @@ func (e *Engine) attachManifestFreshness(graphDBPath, graphSourcePath string) {
 	if !manifest.GeneratedAt.IsZero() {
 		e.graph.Metadata["graph_updated_at"] = manifest.GeneratedAt.UTC().Format(time.RFC3339)
 	}
-	stale := staleRuntimeManifestFiles(manifest)
+	stale, checkErr := generation.VerifySources(manifest)
+	// Legacy manifests remain readable but cannot prove a complete inventory.
+	// They can still establish staleness for an already recorded changed file.
+	if !manifest.InventoryComplete {
+		legacy, _ := generation.CheckLegacy(manifest)
+		stale = append(stale, legacy...)
+	}
 	if len(stale) > 0 {
 		e.graph.Metadata["freshness_status"] = string(FreshnessStale)
 		e.graph.Metadata["stale_files"] = stale
 		e.graph.Metadata["recommended_actions"] = []string{"vela update", "vela build"}
 		e.graph.Metadata["freshness_reason"] = fmt.Sprintf("runtime graph is stale because indexed file content changed: %s; run `vela update` or `vela build`", strings.Join(stale, ", "))
+		return
+	}
+	if checkErr != nil {
+		e.graph.Metadata["freshness_status"] = string(FreshnessUnknown)
+		e.graph.Metadata["freshness_reason"] = "inventory verification incomplete: " + checkErr.Error()
+		e.graph.Metadata["recommended_actions"] = []string{"vela build"}
 		return
 	}
 	e.graph.Metadata["freshness_status"] = string(FreshnessFresh)
