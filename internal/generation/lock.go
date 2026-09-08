@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -100,12 +99,12 @@ func Acquire(ctx context.Context, out string) (*Lock, error) {
 			f.Close()
 			return nil, err
 		}
-		err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		err = lockFile(f, lockExclusive)
 		if err == nil {
 			transferred = true
 			return &Lock{Dir: abs, file: f, directories: directories}, nil
 		}
-		if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
+		if !lockUnavailable(err) {
 			f.Close()
 			return nil, err
 		}
@@ -124,7 +123,7 @@ func (l *Lock) Close() error {
 	defer l.directories.Close()
 	f := l.file
 	l.file = nil
-	err := syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	err := unlockFile(f)
 	e := f.Close()
 	if err != nil {
 		return err
@@ -146,7 +145,7 @@ func (g *directoryGuard) Close() {
 		return
 	}
 	for i := len(g.files) - 1; i >= 0; i-- {
-		_ = syscall.Flock(int(g.files[i].Fd()), syscall.LOCK_UN)
+		_ = unlockFile(g.files[i])
 		_ = g.files[i].Close()
 	}
 	g.files = nil
@@ -181,13 +180,13 @@ func canonicalFuture(path string) (string, error) {
 	}
 }
 
-func addDirectoryPlan(plan map[string]int, path string, mode int) {
+func addDirectoryPlan(plan map[string]lockMode, path string, mode lockMode) {
 	for p := path; ; p = filepath.Dir(p) {
-		m := syscall.LOCK_SH
+		m := lockShared
 		if p == path {
 			m = mode
 		}
-		if plan[p] != syscall.LOCK_EX {
+		if plan[p] != lockExclusive {
 			plan[p] = m
 		}
 		if filepath.Dir(p) == p {
@@ -196,12 +195,12 @@ func addDirectoryPlan(plan map[string]int, path string, mode int) {
 	}
 }
 
-func lockDirectories(ctx context.Context, plan map[string]int, create bool) (*directoryGuard, error) {
+func lockDirectories(ctx context.Context, plan map[string]lockMode, create bool) (*directoryGuard, error) {
 	paths := make([]string, 0, len(plan))
 	for p := range plan {
 		covered := false
 		for a := filepath.Dir(p); a != p; a = filepath.Dir(a) {
-			if plan[a] == syscall.LOCK_EX {
+			if plan[a] == lockExclusive {
 				covered = true
 				break
 			}
@@ -244,21 +243,20 @@ func lockDirectories(ctx context.Context, plan map[string]int, create bool) (*di
 				}
 			}
 		}
-		fd, err := syscall.Open(p, syscall.O_RDONLY|syscall.O_DIRECTORY|syscall.O_NOFOLLOW, 0)
+		f, err := openDirectory(p)
 		if err != nil {
 			return nil, err
 		}
-		f := os.NewFile(uintptr(fd), p)
 		g.files = append(g.files, f)
 		for {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
-			err = syscall.Flock(fd, plan[p]|syscall.LOCK_NB)
+			err = lockFile(f, plan[p])
 			if err == nil {
 				break
 			}
-			if err != syscall.EWOULDBLOCK && err != syscall.EAGAIN {
+			if !lockUnavailable(err) {
 				return nil, err
 			}
 			select {
@@ -298,8 +296,8 @@ func writerDirectories(ctx context.Context, out string) (*directoryGuard, error)
 			break
 		}
 	}
-	plan := map[string]int{}
-	addDirectoryPlan(plan, canonical, syscall.LOCK_SH)
+	plan := map[string]lockMode{}
+	addDirectoryPlan(plan, canonical, lockShared)
 	g, err := lockDirectories(ctx, plan, true)
 	if err != nil {
 		return nil, err
@@ -335,7 +333,7 @@ func removalDirectory(path string) (string, error) {
 // sequence. Callbacks must NOT reacquire writer/removal locks for guarded roots.
 // Refusal is still the only behavior for adopted layouts/stable lock deletion.
 func WithRemoval(ctx context.Context, targets []string, effects func() error) error {
-	plan := map[string]int{}
+	plan := map[string]lockMode{}
 	identities := map[string]string{}
 	for _, target := range targets {
 		if strings.TrimSpace(target) == "" {
@@ -353,14 +351,14 @@ func WithRemoval(ctx context.Context, targets []string, effects func() error) er
 		if filepath.Dir(dir) == dir {
 			return fmt.Errorf("filesystem-root removal refused")
 		}
-		addDirectoryPlan(plan, dir, syscall.LOCK_EX)
+		addDirectoryPlan(plan, dir, lockExclusive)
 		// Protect the lexical alias namespace as well as its canonical owner.
 		if info, err := os.Lstat(target); err == nil && info.Mode()&os.ModeSymlink != 0 {
 			parent, err := removalDirectory(filepath.Dir(target))
 			if err != nil {
 				return err
 			}
-			addDirectoryPlan(plan, parent, syscall.LOCK_EX)
+			addDirectoryPlan(plan, parent, lockExclusive)
 			actual, err := canonicalFuture(target)
 			if err != nil {
 				return err
@@ -369,7 +367,7 @@ func WithRemoval(ctx context.Context, targets []string, effects func() error) er
 			if err != nil {
 				return err
 			}
-			addDirectoryPlan(plan, owner, syscall.LOCK_EX)
+			addDirectoryPlan(plan, owner, lockExclusive)
 		}
 	}
 	g, err := lockDirectories(ctx, plan, false)
