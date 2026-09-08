@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.12.0](https://github.com/Syfra3/vela/compare/v1.11.0...v1.12.0) (2026-09-08)
+
+
+### Features
+
+* harden graph context reliability ([#56](https://github.com/Syfra3/vela/issues/56)) ([549775c](https://github.com/Syfra3/vela/commit/549775cc81340ae82bead9ffd562046c0eccd96a))
+
 ## [1.11.0](https://github.com/Syfra3/vela/compare/v1.10.6...v1.11.0) (2026-07-02)
 
 
