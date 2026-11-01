@@ -100,6 +100,7 @@ type Freshness struct {
 	Project            string          `json:"project,omitempty"`
 	WorkspaceRoot      string          `json:"workspace_root,omitempty"`
 	GraphUpdatedAt     string          `json:"graph_updated_at,omitempty"`
+	Generation         string          `json:"generation,omitempty"`
 	Reason             string          `json:"reason,omitempty"`
 	StaleFiles         []string        `json:"stale_files,omitempty"`
 	RecommendedActions []string        `json:"recommended_actions,omitempty"`
@@ -587,6 +588,7 @@ func (e *Engine) Freshness() Freshness {
 		return Freshness{Status: FreshnessUnknown}
 	}
 	freshness := Freshness{Status: FreshnessUnknown}
+	freshness.Generation, _ = e.graph.Metadata["graph_generation"].(string)
 	if status, ok := e.graph.Metadata["freshness_status"].(string); ok {
 		switch FreshnessStatus(status) {
 		case FreshnessFresh, FreshnessStale:

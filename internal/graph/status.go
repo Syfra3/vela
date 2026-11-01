@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Syfra3/vela/internal/extract"
+	"github.com/Syfra3/vela/internal/generation"
 	"github.com/Syfra3/vela/internal/hooks"
 	"github.com/Syfra3/vela/internal/registry"
 	"github.com/Syfra3/vela/pkg/types"
@@ -84,7 +85,22 @@ type RegistryStatusSnapshot struct {
 
 func LoadStatusSnapshot(path string, topN int) (StatusSnapshot, error) {
 	snapshot := StatusSnapshot{GraphPath: path}
+	pin, err := generation.Pin(path)
+	if err != nil {
+		snapshot.Freshness.Status = "unknown"
+		return snapshot, err
+	}
+	if pin != nil {
+		path = filepath.Join(pin.Dir, "graph.json")
+	}
 	fresh := loadFreshnessStats(path)
+	if pin != nil {
+		// Reports are mutable ancillary exports at the public output root, not
+		// truth artifacts copied into each immutable generation.
+		fresh.ReportPath = filepath.Join(filepath.Dir(filepath.Dir(pin.Dir)), "GRAPH_REPORT.md")
+		_, reportErr := os.Stat(fresh.ReportPath)
+		fresh.ReportPresent = reportErr == nil
+	}
 	metrics, err := LoadHealthMetrics(path, topN)
 	snapshot.Metrics = metrics
 	snapshot.Freshness = fresh
@@ -148,7 +164,7 @@ func LoadRegistryStatusSnapshot(entries []registry.Entry, topN int) RegistryStat
 }
 
 func loadFreshnessStats(graphPath string) FreshnessStats {
-	fresh := FreshnessStats{GraphPath: graphPath}
+	fresh := FreshnessStats{GraphPath: graphPath, Status: "unknown"}
 	if info, err := os.Stat(graphPath); err == nil {
 		fresh.GraphUpdatedAt = info.ModTime().UTC()
 	}
@@ -161,12 +177,19 @@ func loadFreshnessStats(graphPath string) FreshnessStats {
 		if manifest, loadErr := loadManifest(fresh.ManifestPath); loadErr == nil {
 			fresh.TrackedFiles = len(manifest.Files)
 			fresh.BuildMode = manifest.BuildMode
-			fresh.StaleFiles = staleManifestFiles(manifest)
+			var checkErr error
+			fresh.StaleFiles, checkErr = generation.VerifySources(manifest)
+			if !manifest.InventoryComplete {
+				legacy, _ := generation.CheckLegacy(manifest)
+				fresh.StaleFiles = append(fresh.StaleFiles, legacy...)
+			}
 			if len(fresh.StaleFiles) > 0 {
 				fresh.Status = "stale"
 				fresh.RecommendedActions = []string{"vela update", "vela build"}
-			} else {
+			} else if checkErr == nil {
 				fresh.Status = "fresh"
+			} else {
+				fresh.Status = "unknown"
 			}
 			if fresh.ManifestUpdatedAt.IsZero() && !manifest.GeneratedAt.IsZero() {
 				fresh.ManifestUpdatedAt = manifest.GeneratedAt.UTC()

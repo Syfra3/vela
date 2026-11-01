@@ -4,10 +4,13 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/Syfra3/vela/internal/generation"
 	"github.com/Syfra3/vela/pkg/types"
 	_ "modernc.org/sqlite"
 )
@@ -19,6 +22,9 @@ const runtimeSchemaVersion = "v0.4.0-minimal"
 // needed by the build/runtime artifact contract; later query scenarios can add
 // traversal-specific tables without making graph.json runtime truth again.
 func WriteSQLiteGraphAtomic(g *types.Graph, outDir string) error {
+	return generation.LegacyWrite(outDir, func(dir string) error { return writeSQLiteGraphAtomic(g, dir) })
+}
+func writeSQLiteGraphAtomic(g *types.Graph, outDir string) error {
 	if g == nil {
 		return fmt.Errorf("graph is nil")
 	}
@@ -29,7 +35,15 @@ func WriteSQLiteGraphAtomic(g *types.Graph, outDir string) error {
 	tmpPath := outPath + ".tmp"
 	_ = os.Remove(tmpPath)
 
-	db, err := sql.Open("sqlite", tmpPath)
+	// Match the read-side URI construction, but allow creating the private
+	// read/write database. URL.Path preserves literal ?, #, %, spaces and UTF-8;
+	// passing a raw pathname lets the driver interpret filename bytes as a DSN.
+	absTmpPath, err := filepath.Abs(tmpPath)
+	if err != nil {
+		return fmt.Errorf("resolving temp sqlite graph: %w", err)
+	}
+	u := url.URL{Scheme: "file", Path: absTmpPath, RawQuery: "mode=rwc"}
+	db, err := sql.Open("sqlite", u.String())
 	if err != nil {
 		return fmt.Errorf("opening temp sqlite graph: %w", err)
 	}
@@ -126,6 +140,7 @@ CREATE INDEX workspace_facts_subject_idx ON workspace_facts(subject_key);
 		if _, exists := nodeIDByLabel[node.Label]; !exists {
 			nodeIDByLabel[node.Label] = node.ID
 		}
+		addChildLabel(nodeIDByLabel, node)
 		metadata, err := json.Marshal(node.Metadata)
 		if err != nil {
 			return fmt.Errorf("marshalling node metadata for %s: %w", node.ID, err)
@@ -222,4 +237,16 @@ func sqliteNodeID(ref string, nodeIDByLabel map[string]string) string {
 		return id
 	}
 	return ref
+}
+
+// Namespaced aggregate references retain each child's label-resolution domain.
+// A raw label from one child must never resolve to another child's same label.
+func addChildLabel(labels map[string]string, node types.Node) {
+	const prefixLength = len("child:") + 64 + 1
+	if len(node.ID) >= prefixLength && strings.HasPrefix(node.ID, "child:") && node.ID[prefixLength-1] == ':' {
+		key := node.ID[:prefixLength] + node.Label
+		if _, exists := labels[key]; !exists {
+			labels[key] = node.ID
+		}
+	}
 }

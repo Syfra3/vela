@@ -12,6 +12,7 @@ import (
 	"time"
 
 	graphExport "github.com/Syfra3/vela/internal/export"
+	"github.com/Syfra3/vela/internal/generation"
 	"github.com/Syfra3/vela/internal/query"
 	"github.com/Syfra3/vela/pkg/types"
 	mcppkg "github.com/mark3labs/mcp-go/mcp"
@@ -354,15 +355,20 @@ func writeRefundServiceGraph(t *testing.T, dir string) string {
 	if err := graphExport.WriteSQLiteGraphAtomic(graph, outDir); err != nil {
 		t.Fatalf("WriteSQLiteGraphAtomic error: %v", err)
 	}
-	manifest := types.Manifest{
-		Version:     1,
-		RepoRoot:    dir,
-		GeneratedAt: time.Now().UTC(),
-		Files: []types.ManifestFile{
-			{Path: "refund/service.go", SHA256: sha256Hex(serviceSource)},
-			{Path: "refund/repository.go", SHA256: sha256Hex(repositorySource)},
-		},
+	manifest, _, err := graphExport.Inventory(dir, types.ManifestRequest{})
+	if err != nil || !manifest.InventoryComplete {
+		t.Fatalf("fixture inventory incomplete: manifest=%+v err=%v", manifest, err)
 	}
+	closure, err := generation.ClosedInputs(dir)
+	if err != nil {
+		t.Fatalf("fixture source closure: %v", err)
+	}
+	manifest.SourceBinding = generation.BoundGoProfile
+	manifest.ConsumedFiles = closure.Files
+	manifest.DirectoryFingerprint = closure.DirectoryFingerprint
+	manifest.DependencyFingerprint = closure.DependencyFingerprint
+	manifest.ClosureConfigFingerprint = closure.ConfigFingerprint
+	manifest.GeneratedAt = time.Now().UTC()
 	manifestData, err := json.Marshal(manifest)
 	if err != nil {
 		t.Fatal(err)

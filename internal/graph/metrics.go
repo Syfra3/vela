@@ -3,9 +3,12 @@ package graph
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/Syfra3/vela/internal/generation"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 )
 
 // NodeRank is a compact row used in metric leaderboards (top-N by degree).
@@ -87,6 +90,13 @@ type rawGraph struct {
 // LoadHealthMetrics reads graph.json at path and computes every signal.
 // topN controls the length of TopByOutDegree (5 is a reasonable default).
 func LoadHealthMetrics(path string, topN int) (HealthMetrics, error) {
+	pin, err := generation.Pin(path)
+	if err != nil {
+		return HealthMetrics{Path: path}, err
+	}
+	if pin != nil {
+		path = filepath.Join(pin.Dir, "graph.json")
+	}
 	m := HealthMetrics{
 		Path:            path,
 		NodesByKind:     map[string]int{},
@@ -114,6 +124,13 @@ func LoadHealthMetrics(path string, topN int) (HealthMetrics, error) {
 		idToIndex[n.ID] = i
 		if _, seen := labelToID[n.Label]; !seen {
 			labelToID[n.Label] = n.ID
+		}
+		const prefixLength = len("child:") + 64 + 1
+		if strings.HasPrefix(n.ID, "child:") && len(n.ID) >= prefixLength && n.ID[prefixLength-1] == ':' {
+			key := n.ID[:prefixLength] + n.Label
+			if _, seen := labelToID[key]; !seen {
+				labelToID[key] = n.ID
+			}
 		}
 		m.NodesByKind[n.Kind]++
 	}

@@ -3,6 +3,7 @@ package agentinstall
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/Syfra3/vela/internal/generation"
 	"os"
 	"path/filepath"
 	"strings"
@@ -66,15 +67,8 @@ func Install(req Request) (Result, error) {
 		return result, fmt.Errorf("%s config directory is required", displayName(req.Agent))
 	}
 
-	if err := os.MkdirAll(filepath.Dir(result.GraphDBPath), 0o755); err != nil {
+	if err := generation.Initialize(filepath.Dir(result.GraphDBPath)); err != nil {
 		return result, fmt.Errorf("initialize project graph: %w", err)
-	}
-	if _, err := os.Stat(result.GraphDBPath); os.IsNotExist(err) {
-		if err := os.WriteFile(result.GraphDBPath, []byte("SQLite format 3\x00"), 0o644); err != nil {
-			return result, fmt.Errorf("initialize project graph: %w", err)
-		}
-	} else if err != nil {
-		return result, fmt.Errorf("verify project graph: %w", err)
 	}
 	result.GraphReady = true
 

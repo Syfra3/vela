@@ -16,6 +16,8 @@ import (
 	"github.com/Syfra3/vela/internal/agentinstall"
 	"github.com/Syfra3/vela/internal/app"
 	"github.com/Syfra3/vela/internal/config"
+	"github.com/Syfra3/vela/internal/export"
+	"github.com/Syfra3/vela/internal/generation"
 	igraph "github.com/Syfra3/vela/internal/graph"
 	"github.com/Syfra3/vela/internal/hooks"
 	"github.com/Syfra3/vela/internal/pipeline"
@@ -29,12 +31,19 @@ import (
 type buildOutput = app.BuildResult
 
 var runPipelineBuild = func(ctx context.Context, outDir string, req types.BuildRequest, observer pipeline.Observer) (pipeline.Result, error) {
-	registry, err := scip.DefaultRegistry()
+	cfg, err := defaultPipelineConfig()
 	if err != nil {
 		return pipeline.Result{}, fmt.Errorf("load SCIP registry: %w", err)
 	}
-	builder := pipeline.NewBuilder(pipeline.Config{Registry: registry, OutDir: outDir, Cluster: igraph.RunLeiden, Observer: observer})
+	cfg.OutDir = outDir
+	cfg.Observer = observer
+	builder := pipeline.NewBuilder(cfg)
 	return builder.Build(ctx, req)
+}
+
+var defaultPipelineConfig = func() (pipeline.Config, error) {
+	registry, err := scip.DefaultRegistry()
+	return pipeline.Config{Registry: registry, Cluster: igraph.RunLeiden}, err
 }
 
 var runBuildService = func(ctx context.Context, outDir string, req types.BuildRequest, observe func(app.BuildEvent)) (buildOutput, error) {
@@ -428,15 +437,8 @@ func detectedInstallTargets() []string {
 
 func initializeProjectGraph(projectDir string) (string, error) {
 	graphDB := filepath.Join(projectDir, ".vela", "graph.db")
-	if err := os.MkdirAll(filepath.Dir(graphDB), 0o755); err != nil {
+	if err := generation.Initialize(filepath.Dir(graphDB)); err != nil {
 		return "", fmt.Errorf("initialize project graph: %w", err)
-	}
-	if _, err := os.Stat(graphDB); os.IsNotExist(err) {
-		if err := os.WriteFile(graphDB, []byte("SQLite format 3\x00"), 0o644); err != nil {
-			return "", fmt.Errorf("initialize project graph: %w", err)
-		}
-	} else if err != nil {
-		return "", fmt.Errorf("verify project graph: %w", err)
 	}
 	return graphDB, nil
 }
@@ -451,42 +453,44 @@ func uninstallCmd() *cobra.Command {
 		Use:   "uninstall",
 		Short: "Remove selected agent integrations without deleting project indexes",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if strings.TrimSpace(projectDir) == "" {
-				projectDir = "."
-			}
-			for _, agent := range agents {
-				if strings.EqualFold(strings.TrimSpace(agent), "opencode") {
-					if strings.TrimSpace(opencodeDir) == "" {
-						return fmt.Errorf("--opencode-dir is required for opencode uninstall")
-					}
-					mcpPath := filepath.Join(opencodeDir, "mcp.json")
-					if err := os.Remove(mcpPath); err != nil && !os.IsNotExist(err) {
-						return fmt.Errorf("remove OpenCode MCP integration: %w", err)
-					}
-					instructionPath := filepath.Join(opencodeDir, "instructions.md")
-					if err := os.Remove(instructionPath); err != nil && !os.IsNotExist(err) {
-						return fmt.Errorf("remove OpenCode instruction snippet: %w", err)
-					}
-					fmt.Fprintf(cmd.OutOrStdout(), "removed OpenCode integration: %s\n", mcpPath)
+			return generation.WithRemoval(cmd.Context(), []string{opencodeDir, claudeDir}, func() error {
+				if strings.TrimSpace(projectDir) == "" {
+					projectDir = "."
 				}
-				if strings.EqualFold(strings.TrimSpace(agent), "claude") {
-					if strings.TrimSpace(claudeDir) == "" {
-						return fmt.Errorf("--claude-dir is required for claude uninstall")
+				for _, agent := range agents {
+					if strings.EqualFold(strings.TrimSpace(agent), "opencode") {
+						if strings.TrimSpace(opencodeDir) == "" {
+							return fmt.Errorf("--opencode-dir is required for opencode uninstall")
+						}
+						mcpPath := filepath.Join(opencodeDir, "mcp.json")
+						if err := os.Remove(mcpPath); err != nil && !os.IsNotExist(err) {
+							return fmt.Errorf("remove OpenCode MCP integration: %w", err)
+						}
+						instructionPath := filepath.Join(opencodeDir, "instructions.md")
+						if err := os.Remove(instructionPath); err != nil && !os.IsNotExist(err) {
+							return fmt.Errorf("remove OpenCode instruction snippet: %w", err)
+						}
+						fmt.Fprintf(cmd.OutOrStdout(), "removed OpenCode integration: %s\n", mcpPath)
 					}
-					integrationPath := filepath.Join(claudeDir, "vela-mcp.json")
-					if err := os.Remove(integrationPath); err != nil && !os.IsNotExist(err) {
-						return fmt.Errorf("remove Claude Code integration: %w", err)
+					if strings.EqualFold(strings.TrimSpace(agent), "claude") {
+						if strings.TrimSpace(claudeDir) == "" {
+							return fmt.Errorf("--claude-dir is required for claude uninstall")
+						}
+						integrationPath := filepath.Join(claudeDir, "vela-mcp.json")
+						if err := os.Remove(integrationPath); err != nil && !os.IsNotExist(err) {
+							return fmt.Errorf("remove Claude Code integration: %w", err)
+						}
+						fmt.Fprintf(cmd.OutOrStdout(), "removed Claude Code integration: %s\n", integrationPath)
 					}
-					fmt.Fprintf(cmd.OutOrStdout(), "removed Claude Code integration: %s\n", integrationPath)
 				}
-			}
-			graphDB := filepath.Join(projectDir, ".vela", "graph.db")
-			if _, err := os.Stat(graphDB); err == nil {
-				fmt.Fprintf(cmd.OutOrStdout(), "index preserved: %s\n", graphDB)
-			} else if err != nil && !os.IsNotExist(err) {
-				return fmt.Errorf("verify preserved project index: %w", err)
-			}
-			return nil
+				graphDB := filepath.Join(projectDir, ".vela", "graph.db")
+				if _, err := os.Stat(graphDB); err == nil {
+					fmt.Fprintf(cmd.OutOrStdout(), "index preserved: %s\n", graphDB)
+				} else if err != nil && !os.IsNotExist(err) {
+					return fmt.Errorf("verify preserved project index: %w", err)
+				}
+				return nil
+			})
 		},
 	}
 	cmd.Flags().StringVar(&projectDir, "project", ".", "Project directory whose index must be preserved")
@@ -517,29 +521,42 @@ func purgeCmd() *cobra.Command {
 				if err != nil {
 					return err
 				}
-				var failures []string
+				var targets []string
 				for _, entry := range entries {
-					name := entry.Name
-					if strings.TrimSpace(name) == "" {
-						name = entry.RepoRoot
+					target := entry.GraphPath
+					if target == "" {
+						target = filepath.Join(entry.RepoRoot, ".vela", "graph.db")
 					}
-					if err := purgeRegistryEntryIndex(entry); err != nil {
-						failures = append(failures, fmt.Sprintf("failed to delete index for %s: %v", name, err))
-						fmt.Fprintf(cmd.OutOrStdout(), "failed to delete index for %s: %v\n", name, err)
-						continue
-					}
-					fmt.Fprintf(cmd.OutOrStdout(), "deleted index for %s\n", name)
-					if err := registry.RemoveTrackedRepo(entry.RepoRoot); err != nil {
-						failures = append(failures, fmt.Sprintf("failed to update registry for %s: %v", name, err))
-						fmt.Fprintf(cmd.OutOrStdout(), "failed to update registry for %s: %v\n", name, err)
-					}
+					targets = append(targets, target)
 				}
-				if len(failures) > 0 {
-					return fmt.Errorf("partial failure purging all project indexes: %s", strings.Join(failures, "; "))
-				}
-				return nil
+				return generation.WithRemoval(cmd.Context(), targets, func() error {
+					var failures []string
+					for _, entry := range entries {
+						name := entry.Name
+						if strings.TrimSpace(name) == "" {
+							name = entry.RepoRoot
+						}
+						if err := purgeRegistryEntryIndexUnlocked(entry); err != nil {
+							failures = append(failures, fmt.Sprintf("failed to delete index for %s: %v", name, err))
+							fmt.Fprintf(cmd.OutOrStdout(), "failed to delete index for %s: %v\n", name, err)
+							continue
+						}
+						fmt.Fprintf(cmd.OutOrStdout(), "deleted index for %s\n", name)
+						if err := registry.RemoveTrackedRepo(entry.RepoRoot); err != nil {
+							failures = append(failures, fmt.Sprintf("failed to update registry for %s: %v", name, err))
+							fmt.Fprintf(cmd.OutOrStdout(), "failed to update registry for %s: %v\n", name, err)
+						}
+					}
+					if len(failures) > 0 {
+						return fmt.Errorf("partial failure purging all project indexes: %s", strings.Join(failures, "; "))
+					}
+					return nil
+				})
 			}
 			graphDB := filepath.Join(projectDir, ".vela", "graph.db")
+			if confirm || force {
+				return generation.WithRemoval(cmd.Context(), []string{graphDB}, func() error { return nil })
+			}
 			if !confirm && !force {
 				if _, err := os.Stat(graphDB); err == nil {
 					fmt.Fprintf(cmd.OutOrStdout(), "index preserved: %s\n", graphDB)
@@ -562,6 +579,16 @@ func purgeRegistryEntryIndex(entry registry.Entry) error {
 	graphDB := strings.TrimSpace(entry.GraphPath)
 	if graphDB == "" {
 		graphDB = filepath.Join(entry.RepoRoot, ".vela", "graph.db")
+	}
+	return generation.WithRemoval(context.Background(), []string{graphDB}, func() error { return purgeRegistryEntryIndexUnlocked(entry) })
+}
+func purgeRegistryEntryIndexUnlocked(entry registry.Entry) error {
+	graphDB := strings.TrimSpace(entry.GraphPath)
+	if graphDB == "" {
+		graphDB = filepath.Join(entry.RepoRoot, ".vela", "graph.db")
+	}
+	if err := generation.RefuseRemoval(graphDB); err != nil {
+		return err
 	}
 	if err := os.Remove(graphDB); err != nil && !os.IsNotExist(err) {
 		return err
@@ -813,6 +840,22 @@ func snapshotGeneratedState(repoRoot, outDir string) (func() error, error) {
 	if strings.TrimSpace(outDir) == "" {
 		outDir = filepath.Join(repoRoot, ".vela")
 	}
+	w, err := export.AcquireWriter(context.Background(), outDir)
+	if err != nil {
+		return nil, err
+	}
+	defer w.Close()
+	outDir = w.Dir
+	// Immutable generations own rollback/recovery. Never snapshot through
+	// compatibility symlinks or overwrite a concurrent writer's selection.
+	if _, err := os.Lstat(filepath.Join(outDir, ".generations")); err == nil {
+		return func() error { return nil }, nil
+	} else if !os.IsNotExist(err) {
+		return nil, err
+	}
+	if err := generation.CheckLegacyTargets(outDir); err != nil {
+		return nil, err
+	}
 	paths := []string{
 		filepath.Join(outDir, "graph.json"),
 		filepath.Join(outDir, "graph.db"),
@@ -835,6 +878,19 @@ func snapshotGeneratedState(repoRoot, outDir string) (func() error, error) {
 		snapshots = append(snapshots, snapshot)
 	}
 	return func() error {
+		w, err := export.AcquireWriter(context.Background(), outDir)
+		if err != nil {
+			return err
+		}
+		defer w.Close()
+		if _, err := os.Lstat(filepath.Join(outDir, ".generations")); err == nil {
+			return nil
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+		if err := generation.CheckLegacyTargets(outDir); err != nil {
+			return err
+		}
 		for _, snapshot := range snapshots {
 			if !snapshot.exists {
 				if err := os.Remove(snapshot.path); err != nil && !os.IsNotExist(err) {

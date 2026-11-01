@@ -14,6 +14,7 @@ import (
 
 	"github.com/Syfra3/vela/internal/config"
 	"github.com/Syfra3/vela/internal/export"
+	"github.com/Syfra3/vela/internal/generation"
 	vmcp "github.com/Syfra3/vela/internal/mcp"
 	"github.com/Syfra3/vela/internal/query"
 	"github.com/Syfra3/vela/internal/registry"
@@ -252,7 +253,7 @@ func activeWorkspaceGraphFile(startDir string) (string, bool) {
 		abs = startDir
 	}
 	for _, candidate := range []string{filepath.Join(abs, ".vela", "graph.json"), filepath.Join(abs, "vela-out", "graph.json")} {
-		if _, err := os.Stat(candidate); err == nil {
+		if found, _ := generation.Candidate(candidate); found {
 			return candidate, true
 		}
 	}

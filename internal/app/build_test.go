@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Syfra3/vela/internal/export"
 	"github.com/Syfra3/vela/internal/pipeline"
 	"github.com/Syfra3/vela/pkg/types"
 )
@@ -239,13 +240,13 @@ func TestBuildServiceRun_MergesChildGitReposUnderNonRepoRoot(t *testing.T) {
 			repoName := filepath.Base(req.RepoRoot)
 			projectID := filepath.ToSlash(strings.TrimPrefix(req.RepoRoot, root+string(filepath.Separator)))
 			graphPath := filepath.Join(req.RepoRoot, ".vela", "graph.json")
-			return pipeline.Result{
+			return pinnedBuildFixture(t, req.RepoRoot, pipeline.Result{
 				GraphPath:     graphPath,
 				DetectedFiles: []string{filepath.Join(req.RepoRoot, "main.go")},
 				Facts:         []types.Fact{{From: projectID + ":a", To: projectID + ":b", Kind: types.FactKindDependsOn}},
 				Graph:         &types.Graph{Nodes: []types.Node{{ID: "project:" + projectID, Label: repoName, NodeType: string(types.NodeTypeProject), Source: &types.Source{Type: types.SourceTypeCodebase, ID: projectID, Name: repoName, Path: req.RepoRoot}}}},
 				StageReports:  []pipeline.StageReport{{Stage: types.BuildStageDetect, Count: 1}, {Stage: types.BuildStagePersist, Count: 1}},
-			}, nil
+			}), nil
 		},
 		WriteHTML:     func(*types.Graph, string) error { return nil },
 		WriteReport:   func(*types.Graph, string) error { return nil },
@@ -289,10 +290,10 @@ func TestBuildServiceRun_WritesPerRepoReportsForMultiRepoBuilds(t *testing.T) {
 	svc := BuildService{
 		RunPipeline: func(_ context.Context, _ string, req types.BuildRequest, _ pipeline.Observer) (pipeline.Result, error) {
 			graphPath := filepath.Join(req.RepoRoot, ".vela", "graph.json")
-			return pipeline.Result{
+			return pinnedBuildFixture(t, req.RepoRoot, pipeline.Result{
 				GraphPath: graphPath,
 				Graph:     &types.Graph{Nodes: []types.Node{{ID: req.RepoRoot, Label: filepath.Base(req.RepoRoot), NodeType: string(types.NodeTypeProject)}}},
-			}, nil
+			}), nil
 		},
 		WriteHTML: func(*types.Graph, string) error { return nil },
 		WriteReport: func(_ *types.Graph, out string) error {
@@ -345,11 +346,11 @@ func TestBuildServiceRun_PrefixesMultiRepoWarningsWithRepoPath(t *testing.T) {
 
 	svc := BuildService{
 		RunPipeline: func(_ context.Context, _ string, req types.BuildRequest, _ pipeline.Observer) (pipeline.Result, error) {
-			return pipeline.Result{
+			return pinnedBuildFixture(t, req.RepoRoot, pipeline.Result{
 				GraphPath: filepath.Join(req.RepoRoot, ".vela", "graph.json"),
 				Graph:     &types.Graph{Nodes: []types.Node{{ID: req.RepoRoot, Label: filepath.Base(req.RepoRoot), NodeType: string(types.NodeTypeProject)}}},
 				Warnings:  []string{"SCIP driver failed: scip-typescript: no files got indexed"},
-			}, nil
+			}), nil
 		},
 		WriteHTML:     func(*types.Graph, string) error { return nil },
 		WriteReport:   func(*types.Graph, string) error { return nil },
@@ -374,6 +375,24 @@ func TestBuildServiceRun_PrefixesMultiRepoWarningsWithRepoPath(t *testing.T) {
 			t.Fatalf("warning = %q, want original warning text preserved", warning)
 		}
 	}
+}
+
+func pinnedBuildFixture(t *testing.T, root string, result pipeline.Result) pipeline.Result {
+	t.Helper()
+	manifest, _, err := export.Inventory(root, types.ManifestRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer, err := export.AcquireWriter(context.Background(), filepath.Join(root, ".vela"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Close()
+	result.Snapshot, err = writer.Publish(result.Graph, manifest, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
 }
 
 func sampleGraph() *types.Graph {

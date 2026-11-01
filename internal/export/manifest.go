@@ -6,11 +6,15 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/Syfra3/vela/internal/generation"
 	"github.com/Syfra3/vela/pkg/types"
 )
 
 // WriteManifestAtomic writes <outDir>/manifest.json atomically.
 func WriteManifestAtomic(m *types.Manifest, outDir string) error {
+	return generation.LegacyWrite(outDir, func(dir string) error { return writeManifestAtomic(m, dir) })
+}
+func writeManifestAtomic(m *types.Manifest, outDir string) error {
 	if m == nil {
 		return fmt.Errorf("manifest is nil")
 	}
@@ -22,10 +26,15 @@ func WriteManifestAtomic(m *types.Manifest, outDir string) error {
 		return fmt.Errorf("marshalling manifest: %w", err)
 	}
 	outPath := filepath.Join(outDir, "manifest.json")
-	tmp := outPath + ".tmp"
-	f, err := os.Create(tmp)
+	f, err := os.CreateTemp(outDir, ".manifest-")
 	if err != nil {
 		return fmt.Errorf("creating temp file: %w", err)
+	}
+	tmp := f.Name()
+	if err := f.Chmod(0644); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
 	}
 	if _, err := f.Write(data); err != nil {
 		_ = f.Close()

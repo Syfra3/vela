@@ -1259,10 +1259,9 @@ func TestSCN014_CompatibilityCLIForcePurgeAllReportsPartialFailures(t *testing.T
 	betaGraphDB := filepath.Join(beta, ".vela", "graph.db")
 	writeGraphDBForPurgeTest(t, alphaGraphDB)
 	writeGraphDBForPurgeTest(t, betaGraphDB)
-	if err := os.Chmod(filepath.Dir(betaGraphDB), 0o500); err != nil {
-		t.Fatalf("Chmod(beta .vela) error = %v", err)
+	if err := os.MkdirAll(filepath.Join(beta, ".vela", ".generations"), 0o755); err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(filepath.Dir(betaGraphDB), 0o700) })
 
 	registryPath := filepath.Join(home, ".vela", "registry.json")
 	if err := os.MkdirAll(filepath.Dir(registryPath), 0o755); err != nil {
@@ -1283,14 +1282,14 @@ func TestSCN014_CompatibilityCLIForcePurgeAllReportsPartialFailures(t *testing.T
 	if err == nil {
 		t.Fatal("Execute(purge --all --force) error = nil, want partial failure")
 	}
-	if _, statErr := os.Stat(alphaGraphDB); !os.IsNotExist(statErr) {
-		t.Fatalf("alpha graph.db stat err = %v, want deleted", statErr)
+	if _, statErr := os.Stat(alphaGraphDB); statErr != nil {
+		t.Fatalf("alpha graph.db stat err = %v, want preserved on preflight refusal", statErr)
 	}
 	if _, statErr := os.Stat(betaGraphDB); statErr != nil {
 		t.Fatalf("beta graph.db stat err = %v, want preserved after failed delete", statErr)
 	}
 	combined := err.Error() + stdout.String()
-	for _, want := range []string{"deleted index for alpha", "failed to delete index for beta", "partial failure"} {
+	for _, want := range []string{"removal", "refused"} {
 		if !strings.Contains(combined, want) {
 			t.Fatalf("expected purge output/error to contain %q, got error %q stdout %q", want, err.Error(), stdout.String())
 		}
@@ -1438,10 +1437,10 @@ func TestSCN019_UpdateFailurePreservesPreviousStaleGraphState(t *testing.T) {
 		return buildOutput{}, fmt.Errorf("simulated interrupted update")
 	}
 
-	root := rootCmd()
+	root := updateCmd() // isolate this rollback fixture from unrelated CLI setup
 	root.SetOut(&bytes.Buffer{})
 	root.SetErr(&bytes.Buffer{})
-	root.SetArgs([]string{"update", repoRoot, "--out-dir", outDir})
+	root.SetArgs([]string{repoRoot, "--out-dir", outDir})
 	if err := root.Execute(); err == nil {
 		t.Fatal("Execute(update) error = nil, want interrupted update error")
 	}
@@ -2280,13 +2279,15 @@ func writeRuntimeGraphForMCPSelection(t *testing.T, outDir, repoRoot string, wit
 		t.Fatalf("WriteSQLiteGraphAtomic error = %v", err)
 	}
 	if withManifest {
-		manifest := types.Manifest{
-			Version:     1,
-			RepoRoot:    repoRoot,
-			GeneratedAt: time.Now().UTC(),
-			BuildMode:   "full_rebuild",
-			Files:       []types.ManifestFile{{Path: "auth.go", SHA256: hexSHA256(source)}},
+		if err := os.WriteFile(filepath.Join(repoRoot, "go.mod"), []byte("module example.com/fixture\n\ngo 1.22\n"), 0o644); err != nil {
+			t.Fatal(err)
 		}
+		manifestPtr, _, err := export.Inventory(repoRoot, types.ManifestRequest{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		manifest := *manifestPtr
+		bindFreshFixtureManifest(t, &manifest)
 		manifestData, err := json.Marshal(manifest)
 		if err != nil {
 			t.Fatal(err)
@@ -2451,6 +2452,7 @@ func captureStdout(t *testing.T, fn func()) string {
 }
 
 func TestBuildAndExtractCommandsRouteThroughSharedBuildService(t *testing.T) {
+	repo := filepath.Join(t.TempDir(), "repo")
 	restore := runBuildService
 	t.Cleanup(func() { runBuildService = restore })
 
@@ -2459,9 +2461,9 @@ func TestBuildAndExtractCommandsRouteThroughSharedBuildService(t *testing.T) {
 		args    []string
 		wantUse string
 	}{
-		{name: "build", args: []string{"build", "/repo", "--language", "go", "--driver", "scip-go"}, wantUse: "build"},
-		{name: "update", args: []string{"update", "/repo", "--language", "go", "--driver", "scip-go"}, wantUse: "update"},
-		{name: "extract alias", args: []string{"extract", "/repo", "--language", "go", "--driver", "scip-go"}, wantUse: "extract"},
+		{name: "build", args: []string{"build", repo, "--language", "go", "--driver", "scip-go"}, wantUse: "build"},
+		{name: "update", args: []string{"update", repo, "--language", "go", "--driver", "scip-go"}, wantUse: "update"},
+		{name: "extract alias", args: []string{"extract", repo, "--language", "go", "--driver", "scip-go"}, wantUse: "extract"},
 	}
 
 	for _, tt := range tests {
@@ -2487,8 +2489,8 @@ func TestBuildAndExtractCommandsRouteThroughSharedBuildService(t *testing.T) {
 			if err := root.Execute(); err != nil {
 				t.Fatalf("Execute() error = %v", err)
 			}
-			if captured.RepoRoot != "/repo" {
-				t.Fatalf("RepoRoot = %q, want /repo", captured.RepoRoot)
+			if captured.RepoRoot != repo {
+				t.Fatalf("RepoRoot = %q, want %s", captured.RepoRoot, repo)
 			}
 			if len(captured.Languages) != 1 || captured.Languages[0] != "go" {
 				t.Fatalf("Languages = %v, want [go]", captured.Languages)
@@ -3245,18 +3247,15 @@ func writeFreshRefundStatusRuntimeGraph(t *testing.T) string {
 	if err := export.WriteSQLiteGraphAtomic(graph, outDir); err != nil {
 		t.Fatalf("WriteSQLiteGraphAtomic error = %v", err)
 	}
-	manifest := types.Manifest{
-		Version:              1,
-		RepoRoot:             repo,
-		GeneratedAt:          time.Now().UTC(),
-		ExtractorFingerprint: "test",
-		BuildMode:            "test",
-		Files: []types.ManifestFile{{
-			Path:   "services/refund_status.go",
-			SHA256: hexSHA256(statusSource),
-			Size:   int64(len(statusSource)),
-		}},
+	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module example.com/fixture\n\ngo 1.22\n"), 0o644); err != nil {
+		t.Fatal(err)
 	}
+	manifestPtr, _, err := export.Inventory(repo, types.ManifestRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := *manifestPtr
+	bindFreshFixtureManifest(t, &manifest)
 	manifestJSON, err := json.Marshal(manifest)
 	if err != nil {
 		t.Fatalf("Marshal(manifest) error = %v", err)

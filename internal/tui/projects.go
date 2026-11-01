@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"github.com/Syfra3/vela/internal/cache"
 	"github.com/Syfra3/vela/internal/config"
 	"github.com/Syfra3/vela/internal/detect"
+	"github.com/Syfra3/vela/internal/generation"
 	"github.com/Syfra3/vela/internal/hooks"
 	"github.com/Syfra3/vela/internal/registry"
 	"github.com/Syfra3/vela/pkg/types"
@@ -711,20 +713,30 @@ func deleteTrackedProjects(graphPath string, projects []trackedProject) (string,
 	if len(projects) == 0 {
 		return "No projects selected.", nil
 	}
+	var targets []string
 	for _, project := range projects {
-		if project.Path != "" {
-			if err := hooks.Uninstall(project.Path); err != nil {
-				return "", err
+		targets = append(targets, projectRemovalTargets(project)...)
+	}
+	err := generation.WithRemoval(context.Background(), targets, func() error {
+		for _, project := range projects {
+			if project.Path != "" {
+				if err := hooks.Uninstall(project.Path); err != nil {
+					return err
+				}
+			}
+			if err := removeTrackedProjectArtifactsUnlocked(project); err != nil {
+				return err
+			}
+			if err := registry.RemoveTrackedRepo(project.Path); err != nil {
+				return err
 			}
 		}
-		if err := removeTrackedProjectArtifacts(project); err != nil {
-			return "", err
+		if err := pruneProjectCache(projects); err != nil {
+			return err
 		}
-		if err := registry.RemoveTrackedRepo(project.Path); err != nil {
-			return "", err
-		}
-	}
-	if err := pruneProjectCache(projects); err != nil {
+		return nil
+	})
+	if err != nil {
 		return "", err
 	}
 	return purgeResultMessage(projects), nil
@@ -867,6 +879,9 @@ func pruneProjectCache(projects []trackedProject) error {
 }
 
 func removeTrackedProjectArtifacts(project trackedProject) error {
+	return generation.WithRemoval(context.Background(), projectRemovalTargets(project), func() error { return removeTrackedProjectArtifactsUnlocked(project) })
+}
+func removeTrackedProjectArtifactsUnlocked(project trackedProject) error {
 	for _, target := range []string{project.GraphPath, strings.TrimSpace(filepath.Join(filepath.Dir(project.GraphPath), "graph.html")), strings.TrimSpace(filepath.Join(filepath.Dir(project.GraphPath), "manifest.json")), project.ReportPath(), strings.TrimSpace(filepath.Join(project.Path, ".vela"))} {
 		if strings.TrimSpace(target) == "" {
 			continue
@@ -887,6 +902,17 @@ func (p trackedProject) ReportPath() string {
 		return ""
 	}
 	return filepath.Join(filepath.Dir(p.GraphPath), "GRAPH_REPORT.md")
+}
+
+func projectRemovalTargets(project trackedProject) []string {
+	var targets []string
+	for _, target := range []string{project.GraphPath, filepath.Dir(project.GraphPath), filepath.Join(project.Path, ".vela")} {
+		if strings.TrimSpace(target) == "" || target == "." {
+			continue
+		}
+		targets = append(targets, target)
+	}
+	return targets
 }
 
 func fileExists(path string) bool {

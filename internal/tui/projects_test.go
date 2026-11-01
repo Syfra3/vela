@@ -2,6 +2,7 @@ package tui
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,17 +40,29 @@ func TestDeleteTrackedProjectsRemovesGraphNodesAndCacheEntries(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	registryPath := writeProjectsRegistry(t, home)
+	entries, err := registry.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries[0].RepoRoot = filepath.Join(home, "alpha")
+	if err := registry.Save(entries); err != nil {
+		t.Fatal(err)
+	}
 	cacheDir := filepath.Join(home, ".vela", "cache")
 	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 		t.Fatalf("mkdir cache dir: %v", err)
 	}
-	cacheJSON := []byte("{\n  \"/work/alpha/main.go\": \"a\",\n  \"/work/vela/main.go\": \"b\"\n}")
+	cacheJSON := []byte(fmt.Sprintf("{\n  %q: \"a\",\n  \"/work/vela/main.go\": \"b\"\n}", filepath.Join(home, "alpha", "main.go")))
 	if err := os.WriteFile(filepath.Join(cacheDir, "cache.json"), cacheJSON, 0o644); err != nil {
 		t.Fatalf("write cache: %v", err)
 	}
 
 	projectOutDir := filepath.Join(home, "alpha-output")
-	message, err := deleteTrackedProjects(registryPath, []trackedProject{{Name: "alpha", NodeID: "/work/alpha", Path: "/work/alpha", GraphPath: filepath.Join(projectOutDir, "graph.json")}})
+	alphaRoot := filepath.Join(home, "alpha")
+	if err := os.MkdirAll(alphaRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	message, err := deleteTrackedProjects(registryPath, []trackedProject{{Name: "alpha", NodeID: "/work/alpha", Path: alphaRoot, GraphPath: filepath.Join(projectOutDir, "graph.json")}})
 	if err != nil {
 		t.Fatalf("deleteTrackedProjects() error = %v", err)
 	}
@@ -57,7 +70,7 @@ func TestDeleteTrackedProjectsRemovesGraphNodesAndCacheEntries(t *testing.T) {
 		t.Fatalf("message = %q", message)
 	}
 
-	entries, err := registry.Load()
+	entries, err = registry.Load()
 	if err != nil {
 		t.Fatalf("registry.Load() error = %v", err)
 	}
@@ -75,7 +88,7 @@ func TestDeleteTrackedProjectsRemovesGraphNodesAndCacheEntries(t *testing.T) {
 	if string(cacheData) == string(cacheJSON) {
 		t.Fatal("expected cache file to change")
 	}
-	if strings.Contains(string(cacheData), "/work/alpha/main.go") {
+	if strings.Contains(string(cacheData), filepath.Join(home, "alpha", "main.go")) {
 		t.Fatalf("alpha cache entry still present: %s", string(cacheData))
 	}
 	if !strings.Contains(string(cacheData), "/work/vela/main.go") {
@@ -382,12 +395,24 @@ func TestSCN008_ProjectsModelConfirmsPerProjectPurge(t *testing.T) {
 	alphaGraphPath := filepath.Join(home, "alpha-output", "graph.json")
 	betaGraphPath := filepath.Join(home, "beta-output", "graph.json")
 	registryPath := writePurgeProjectsRegistry(t, home, alphaGraphPath, betaGraphPath)
+	alphaRoot := filepath.Join(home, "alpha")
+	if err := os.MkdirAll(alphaRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := registry.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries[0].RepoRoot = alphaRoot
+	if err := registry.Save(entries); err != nil {
+		t.Fatal(err)
+	}
 
 	model := ProjectsModel{
 		graphPath:  registryPath,
 		termHeight: 40,
 		projects: []trackedProject{
-			{Name: "alpha", NodeID: "/work/alpha", Path: "/work/alpha", GraphPath: alphaGraphPath},
+			{Name: "alpha", NodeID: "/work/alpha", Path: alphaRoot, GraphPath: alphaGraphPath},
 			{Name: "beta", NodeID: "/work/beta", Path: "/work/beta", GraphPath: betaGraphPath},
 		},
 		selected: map[string]bool{},
@@ -413,7 +438,7 @@ func TestSCN008_ProjectsModelConfirmsPerProjectPurge(t *testing.T) {
 		t.Fatalf("view = %q, want purge result for alpha", model.ViewContent())
 	}
 
-	entries, err := registry.Load()
+	entries, err = registry.Load()
 	if err != nil {
 		t.Fatalf("registry.Load() error = %v", err)
 	}
