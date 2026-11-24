@@ -41,7 +41,7 @@ func ParseSearchQuery(raw string) (types.QueryRequest, error) {
 }
 
 func parsePathQuery(raw string) (types.QueryRequest, bool) {
-	for _, pattern := range []*regexp.Regexp{pathArrowPattern, pathFromPattern, pathHowPattern} {
+	for _, pattern := range []*regexp.Regexp{pathFromPattern, pathArrowPattern, pathHowPattern} {
 		match := pattern.FindStringSubmatch(raw)
 		if len(match) != 3 {
 			continue

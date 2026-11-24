@@ -114,12 +114,15 @@ type Diagnostic struct {
 
 // StatusResult returns structured runtime graph status for adapter responses.
 func (e *Engine) StatusResult() Result {
-	return Result{
-		SchemaVersion: "vela.query.v1",
-		QueryKind:     "status",
-		Status:        ResultStatusOK,
-		Freshness:     e.Freshness(),
+	result := Result{SchemaVersion: "vela.query.v1", QueryKind: "status", Status: ResultStatusOK, Freshness: e.Freshness()}
+	if d := e.UnavailableDiagnostic(); d != nil {
+		result.Status = ResultStatusUnavailable
+		result.Diagnostics = []Diagnostic{{Code: "GRAPH_UNAVAILABLE", Message: d.Message}}
+	} else if len(e.AmbiguousCorpora()) > 1 {
+		result.Status = ResultStatusAmbiguous
+		result.Diagnostics = []Diagnostic{{Code: "AMBIGUOUS_CORPUS", Message: "select a corpus explicitly"}}
 	}
+	return result
 }
 
 // DiagnosticResult returns structured adapter diagnostics when a tool cannot run.
@@ -265,12 +268,23 @@ func (e *Engine) PathResult(from, to string) Result {
 			result.ResolvedSubjects = append(result.ResolvedSubjects, subjectFromNode(node))
 		}
 	}
-	if edge, ok := e.edgeBetween(fromID, toID); ok {
-		result.Facts = append(result.Facts, factFromEdge(edge))
+	ids, ok := e.pathIDs(fromInt, toInt)
+	if !ok {
+		result.Status = ResultStatusUnresolved
+		result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "NO_GRAPH_BACKED_PATH", Message: "no graph-backed path was available"})
 		return result
 	}
-	result.Status = ResultStatusUnresolved
-	result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "NO_GRAPH_BACKED_PATH", Message: "no graph-backed path was available"})
+	filePath := isFileNode(e.nodeByID[fromID]) && isFileNode(e.nodeByID[toID])
+	for i := 0; i+1 < len(ids); i++ {
+		edge, ok := e.pathEdgeBetween(ids[i], ids[i+1], filePath)
+		if !ok {
+			result.Status = ResultStatusUnresolved
+			result.Facts = nil
+			result.Diagnostics = append(result.Diagnostics, Diagnostic{Code: "NO_GRAPH_BACKED_PATH", Message: "path edge was not available"})
+			return result
+		}
+		result.Facts = append(result.Facts, factFromEdge(edge))
+	}
 	return result
 }
 

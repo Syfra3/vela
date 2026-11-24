@@ -626,7 +626,7 @@ func loadCachedResult(req types.BuildRequest, outDir string, currentManifest *ty
 		Graph:         g,
 		GraphPath:     entryPath,
 		Snapshot:      snapshot,
-		DetectedFiles: manifestPaths(currentManifest.Files),
+		DetectedFiles: repoManifestPaths(req.RepoRoot, currentManifest.Files),
 		StageReports: []StageReport{
 			{Stage: types.BuildStageDetect, Count: fileCount},
 			{Stage: types.BuildStageScan, Count: len(g.Nodes)},
