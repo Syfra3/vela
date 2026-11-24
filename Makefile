@@ -1,6 +1,6 @@
 # Vela Knowledge Graph Builder - Makefile
 
-.PHONY: help build install test test-ci test-verbose test-coverage clean fmt fmt-check lint verify verify-ci run dev deps tidy cross release release-check hooks-install help
+.PHONY: eval-golden help build install test test-ci test-verbose test-coverage clean fmt fmt-check lint verify verify-ci run dev deps tidy cross release release-check hooks-install help
 
 # Variables
 GOTESTSUM=$(shell go env GOPATH)/bin/gotestsum
@@ -20,6 +20,9 @@ help: ## Show this help message
 	@echo ''
 	@echo 'Available targets:'
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-15s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+
+eval-golden: ## Run the offline synthetic golden evaluation (JSON on stdout)
+	@python3 scripts/golden_eval.py
 
 build: ## Build the binary
 	@echo "Building $(BINARY_NAME)..."
