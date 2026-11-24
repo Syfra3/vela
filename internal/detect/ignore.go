@@ -36,9 +36,16 @@ func LoadIgnoreFile(dir, filename string) (*IgnoreList, error) {
 		return nil, err
 	}
 	defer f.Close()
+	return parseIgnore(dir, bufio.NewScanner(f))
+}
 
+// ParseIgnoreFile parses already validated ignore control bytes.
+func ParseIgnoreFile(dir string, data []byte) (*IgnoreList, error) {
+	return parseIgnore(dir, bufio.NewScanner(strings.NewReader(string(data))))
+}
+
+func parseIgnore(dir string, scanner *bufio.Scanner) (*IgnoreList, error) {
 	il := &IgnoreList{root: dir}
-	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if p, ok := parseLine(line); ok {
