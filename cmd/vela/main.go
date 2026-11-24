@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime/debug"
@@ -25,9 +26,19 @@ import (
 	mcpserver "github.com/mark3labs/mcp-go/server"
 )
 
-var version = Version
+// Release builds replace version via -X main.version. Keep the unstamped
+// marker distinct from a release stamped with the same value as Version.
+const unstampedVersion = "(unstamped)"
+
+var version = unstampedVersion
+var unstampedBuild bool
 
 func init() {
+	if version == unstampedVersion {
+		unstampedBuild = true
+		version = Version
+		return
+	}
 	if version != "dev" && version != "" {
 		return
 	}
@@ -44,6 +55,10 @@ func main() {
 }
 
 func rootCmd() *cobra.Command {
+	return rootCmdWithReleaseTransport(&http.Transport{DisableKeepAlives: true})
+}
+
+func rootCmdWithReleaseTransport(transport http.RoundTripper) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "vela",
 		Short: "Vela — graph-truth knowledge builder",
@@ -80,7 +95,7 @@ from the persisted graph output.`,
 	root.AddCommand(newQueryKindCmd(types.QueryKindImpact, false))
 	root.AddCommand(newQueryKindCmd(types.QueryKindPath, true))
 	root.AddCommand(serveCmd())
-	root.AddCommand(versionCmd())
+	root.AddCommand(versionCmd(transport))
 	return root
 }
 
@@ -153,15 +168,22 @@ func launchTUI() error {
 	return err
 }
 
-func versionCmd() *cobra.Command {
-	return &cobra.Command{
+func versionCmd(transport http.RoundTripper) *cobra.Command {
+	var noUpdateCheck bool
+	cmd := &cobra.Command{
 		Use:   "version",
 		Short: "Print version information",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			fmt.Printf("vela %s\n", version)
-			return nil
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Fprintf(cmd.OutOrStdout(), "vela %s\n", version)
+			if !noUpdateCheck && !unstampedBuild {
+				if tag := newerRelease(cmd.Context(), transport, version); tag != "" {
+					fmt.Fprintf(cmd.ErrOrStderr(), "Vela %s is available. Homebrew: brew update && brew upgrade vela\nOther installs: %s\n", tag, releasesURL)
+				}
+			}
 		},
 	}
+	cmd.Flags().BoolVar(&noUpdateCheck, "no-update-check", false, "Skip the GitHub release check")
+	return cmd
 }
 
 func writeVisualExports(g *types.Graph, outDir string, obsCfg types.ObsidianConfig) {

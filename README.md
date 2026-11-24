@@ -230,7 +230,9 @@ Those are broad discovery prompts or keyword searches. Use `explore`, `lookup`, 
 | `vela purge` | Refuse single-project purge without `--confirm` or `--force`; current single-project mode preserves `.vela/graph.db` even when confirmed. Use `vela purge --all --confirm` or `--force` to delete tracked project indexes. |
 | `vela hooks install/status/uninstall <path>` | Manage Vela-managed Git hook blocks. |
 | `vela compatibility` | Show language compatibility evidence levels. |
-| `vela version` | Print version information. |
+| `vela version [--no-update-check]` | Print version information and optionally check for a newer stable release. |
+
+For stable builds, `vela version` makes one unauthenticated HTTPS request to the GitHub releases API with a one-second timeout. A newer stable release is announced on stderr; the command does not install updates. Use `vela version --no-update-check` to skip the request. Development and prerelease builds skip it automatically.
 
 Common flags:
 
