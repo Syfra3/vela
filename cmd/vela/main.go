@@ -59,6 +59,7 @@ from the persisted graph output.`,
 
 	root.AddCommand(tuiCmd())
 	root.AddCommand(buildCmd())
+	root.AddCommand(recoverGenerationCmd())
 	root.AddCommand(updateCmd())
 	root.AddCommand(watchCmd())
 	root.AddCommand(hooksCmd())
@@ -81,6 +82,27 @@ from the persisted graph output.`,
 	root.AddCommand(serveCmd())
 	root.AddCommand(versionCmd())
 	return root
+}
+
+func recoverGenerationCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "recover-generation OUTPUT_DIR",
+		Short: "Explicitly select a validated sealed generation without pruning history",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			w, err := export.AcquireWriter(cmd.Context(), args[0])
+			if err != nil {
+				return err
+			}
+			defer w.Close()
+			s, err := w.Recover()
+			if err != nil {
+				return err
+			}
+			_, err = fmt.Fprintln(cmd.OutOrStdout(), s.ID)
+			return err
+		},
+	}
 }
 
 func compatibilityCmd() *cobra.Command {
@@ -164,17 +186,13 @@ var loadEngine = func(graphFlag string) (*query.Engine, error) {
 			if diagnostic, ok := activeStockChefGraphUnavailableDiagnostic(".", graphFlag, "active workspace graph is invalid or unreadable"); ok {
 				return query.NewUnavailableEngine(diagnostic), nil
 			}
-			return nil, err
+			return query.NewUnavailableEngine(query.UnavailableDiagnostic{Status: "unavailable", Message: "active workspace graph is invalid or unreadable: " + err.Error(), Workspace: filepath.Dir(filepath.Dir(graphFlag)), GraphPath: graphFlag}), nil
 		}
 		if diagnostic, ok := activeStockChefGraphUnavailableDiagnostic(".", "", "active workspace graph is missing"); ok {
 			return query.NewUnavailableEngine(diagnostic), nil
 		}
 		if candidates, ok := ambiguousRegistryCandidates(); ok {
-			eng, err := query.LoadFromFile(candidates[0].GraphPath)
-			if err != nil {
-				return nil, err
-			}
-			eng.SetAmbiguousCorpora(candidates)
+			eng := query.NewAmbiguousEngine(candidates)
 			return eng, nil
 		}
 		var err error
@@ -302,14 +320,17 @@ func serveCmd() *cobra.Command {
 			if httpMode && mcpMode {
 				return fmt.Errorf("--mcp and --http are mutually exclusive")
 			}
-			eng, err := loadEngine(graphFile)
-			if err != nil {
-				return fmt.Errorf("loading graph: %w", err)
+			provider := func() *query.Engine {
+				eng, err := loadEngine(graphFile)
+				if err != nil {
+					return query.NewUnavailableEngine(query.UnavailableDiagnostic{Status: "unavailable", Message: err.Error(), GraphPath: graphFile})
+				}
+				return eng
 			}
 			if mcpMode || !httpMode {
-				return serveMCPStdio(vmcp.NewServer(eng))
+				return serveMCPStdio(vmcp.NewServerWithProvider(provider))
 			}
-			srv := server.New(eng, port)
+			srv := server.NewWithProvider(provider, port)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			return srv.Start(ctx)

@@ -234,6 +234,7 @@ func (b *Builder) Build(ctx context.Context, req types.BuildRequest) (Result, er
 		} else {
 			defer captured.Close()
 			manifest = captured.Manifest
+			files = repoManifestPaths(req.RepoRoot, manifest.Files)
 			if b.afterCapture != nil {
 				b.afterCapture()
 			}
@@ -625,7 +626,7 @@ func loadCachedResult(req types.BuildRequest, outDir string, currentManifest *ty
 		Graph:         g,
 		GraphPath:     entryPath,
 		Snapshot:      snapshot,
-		DetectedFiles: manifestPaths(currentManifest.Files),
+		DetectedFiles: repoManifestPaths(req.RepoRoot, currentManifest.Files),
 		StageReports: []StageReport{
 			{Stage: types.BuildStageDetect, Count: fileCount},
 			{Stage: types.BuildStageScan, Count: len(g.Nodes)},
@@ -756,6 +757,15 @@ func sortManifestFiles(files []types.ManifestFile) {
 	sort.Slice(files, func(i, j int) bool {
 		return files[i].Path < files[j].Path
 	})
+}
+
+// repoManifestPaths exposes inventory entries as canonical repository paths to callers.
+func repoManifestPaths(root string, files []types.ManifestFile) []string {
+	paths := manifestPaths(files)
+	for i, path := range paths {
+		paths[i] = filepath.Join(root, filepath.FromSlash(path))
+	}
+	return paths
 }
 
 func manifestPaths(files []types.ManifestFile) []string {

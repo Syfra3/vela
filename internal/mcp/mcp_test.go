@@ -677,6 +677,29 @@ func queryRequestExplain(subject string) types.QueryRequest {
 	return types.QueryRequest{Kind: types.QueryKindExplain, Subject: subject, Limit: 5}
 }
 
+func TestPathToolReturnsEveryHop(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "graph.json")
+	data := `{"nodes":[{"id":"a","label":"A","kind":"struct"},{"id":"b","label":"B","kind":"struct"},{"id":"c","label":"C","kind":"struct"}],"edges":[{"from":"a","to":"b","kind":"calls"},{"from":"b","to":"c","kind":"uses"}]}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	eng, err := query.LoadFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := handleQueryTool(eng, "path")(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"subject": "A", "target": "C"}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got query.Result
+	if err := json.Unmarshal([]byte(callResultText(t, res)), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != query.ResultStatusOK || len(got.Facts) != 2 || got.Facts[0].Subject != "a" || got.Facts[0].Object != "b" || got.Facts[1].Subject != "b" || got.Facts[1].Object != "c" {
+		t.Fatalf("unexpected path result: %+v", got)
+	}
+}
+
 func TestPathToolRequiresTarget(t *testing.T) {
 	h := handleQueryTool(newTestEngine(t), "path")
 	res, err := h(context.Background(), mcppkg.CallToolRequest{Params: mcppkg.CallToolParams{Arguments: map[string]any{"subject": "AuthService"}}})

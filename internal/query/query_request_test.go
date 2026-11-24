@@ -736,6 +736,10 @@ func TestRunRequest_PathPrefersExplanatoryIntermediateOverDirectJump(t *testing.
 	if !strings.Contains(pathResult, "internal/config/config.go") {
 		t.Fatalf("expected config intermediary in ranked path result, got %q", pathResult)
 	}
+	structured := engine.PathResult("cmd/vela/main.go", "pkg/types/types.go")
+	if structured.Status != ResultStatusOK || len(structured.Facts) != 2 || structured.Facts[0].Subject != "main" || structured.Facts[0].Object != "config" || structured.Facts[1].Subject != "config" || structured.Facts[1].Object != "types" {
+		t.Fatalf("structured path does not match text path: %+v", structured)
+	}
 }
 
 func TestRunRequest_ReverseDependenciesPreferExternalPackageBarrelCallers(t *testing.T) {

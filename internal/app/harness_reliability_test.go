@@ -13,8 +13,54 @@ import (
 	"github.com/Syfra3/vela/internal/pipeline"
 	"github.com/Syfra3/vela/internal/query"
 	"github.com/Syfra3/vela/internal/registry"
+	"github.com/Syfra3/vela/internal/scip"
 	"github.com/Syfra3/vela/pkg/types"
 )
+
+// The public consumer must not receive paths owned by a disposable snapshot.
+func TestHarnessReliabilityClosedBuildDetectedFilesSurvive(t *testing.T) {
+	root := t.TempDir()
+	canonicalRoot, err := generation.CanonicalRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(canonicalRoot, "a.go")
+	if err := os.WriteFile(file, []byte("package fixture\nfunc A() {}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module fixture\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	reg, err := scip.NewRegistry()
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := harnessService()
+	var hits int
+	service.RunPipeline = func(ctx context.Context, out string, req types.BuildRequest, observer pipeline.Observer) (pipeline.Result, error) {
+		result, err := pipeline.NewBuilder(pipeline.Config{OutDir: out, Registry: reg, Observer: observer}).Build(ctx, req)
+		hits = result.CacheHits
+		return result, err
+	}
+	for i := 0; i < 2; i++ {
+		result, err := service.Run(context.Background(), BuildRequest{RepoRoot: root})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Snapshot.Manifest.SourceBinding != generation.BoundGoProfile {
+			t.Fatalf("build %d did not use closed extraction: %s", i, result.Snapshot.Manifest.SourceBinding)
+		}
+		if (i == 0 && hits != 0) || (i == 1 && hits == 0) {
+			t.Fatalf("build %d cache hits = %d", i, hits)
+		}
+		if result.Files != 1 || len(result.DetectedFiles) != 1 || result.DetectedFiles[0] != file {
+			t.Fatalf("build %d returned non-repository detected files: %v", i, result.DetectedFiles)
+		}
+		if _, err := os.Stat(result.DetectedFiles[0]); err != nil {
+			t.Fatalf("build %d returned missing source: %v", i, err)
+		}
+	}
+}
 
 func harnessChildren(t *testing.T) (string, []string) {
 	t.Helper()

@@ -602,6 +602,25 @@ func extractAliasCmd() *cobra.Command {
 	return cmd
 }
 
+// loadCLIEngine rejects unresolved selections before a command renders facts.
+func loadCLIEngine(graphFile string) (*query.Engine, error) {
+	engine, err := loadEngine(graphFile)
+	if err != nil {
+		return nil, err
+	}
+	if d := engine.UnavailableDiagnostic(); d != nil {
+		return nil, fmt.Errorf("graph unavailable: %s (workspace: %s, graph: %s)", d.Message, d.Workspace, d.GraphPath)
+	}
+	if candidates := engine.AmbiguousCorpora(); len(candidates) > 1 {
+		var details []string
+		for _, c := range candidates {
+			details = append(details, fmt.Sprintf("%s: %s (%s)", c.Project, c.GraphPath, c.Root))
+		}
+		return nil, fmt.Errorf("ambiguous corpus; choose --graph: %s", strings.Join(details, "; "))
+	}
+	return engine, nil
+}
+
 func searchCmd() *cobra.Command {
 	var graphFile string
 	var limit int
@@ -618,7 +637,7 @@ func searchCmd() *cobra.Command {
 			if limit > 0 {
 				req.Limit = limit
 			}
-			engine, err := loadEngine(graphFile)
+			engine, err := loadCLIEngine(graphFile)
 			if err != nil {
 				return err
 			}
@@ -644,7 +663,7 @@ func exploreCmd() *cobra.Command {
 		Short: "Default agent surface for graph-backed structural context",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			engine, err := loadEngine(graphFile)
+			engine, err := loadCLIEngine(graphFile)
 			if err != nil {
 				return err
 			}
@@ -666,7 +685,7 @@ func lookupCmd() *cobra.Command {
 		Short: "Find candidate nodes before running structural graph queries",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			engine, err := loadEngine(graphFile)
+			engine, err := loadCLIEngine(graphFile)
 			if err != nil {
 				return err
 			}
@@ -687,7 +706,7 @@ func rankCmd() *cobra.Command {
 		Short: "Rank graph nodes/files/modules with split compact metrics",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			engine, err := loadEngine(graphFile)
+			engine, err := loadCLIEngine(graphFile)
 			if err != nil {
 				return err
 			}
@@ -710,7 +729,7 @@ func hotspotsCmd() *cobra.Command {
 		Short: "Answer highest-impact/dependency hotspot questions with bounded metric breakdowns",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			engine, err := loadEngine(graphFile)
+			engine, err := loadCLIEngine(graphFile)
 			if err != nil {
 				return err
 			}
@@ -732,7 +751,7 @@ func moduleSummaryCmd() *cobra.Command {
 		Short: "Summarize one graph node/path with compact metrics and bounded examples",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			engine, err := loadEngine(graphFile)
+			engine, err := loadCLIEngine(graphFile)
 			if err != nil {
 				return err
 			}
@@ -942,7 +961,7 @@ func newQueryKindCmd(kind types.QueryKind, needsTarget bool) *cobra.Command {
 			return cobra.ExactArgs(1)(cmd, args)
 		},
 		RunE: func(cmd *cobra.Command, args []string) error {
-			engine, err := loadEngine(graphFile)
+			engine, err := loadCLIEngine(graphFile)
 			if err != nil {
 				return err
 			}

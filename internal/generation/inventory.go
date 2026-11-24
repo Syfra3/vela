@@ -95,29 +95,50 @@ func Inventory(root string, req types.ManifestRequest) (*types.Manifest, []strin
 		if err != nil {
 			return nil, err
 		}
+		if tech := detect.DetectTech(dir); tech != detect.TechUnknown {
+			lists = append(lists, detect.NewIgnoreList(dir, detect.DefaultIgnorePatterns(tech)))
+		}
+		for _, name := range []string{".gitignore", ".velignore"} {
+			p := filepath.Join(dir, name)
+			data, err := regularFile(p)
+			if os.IsNotExist(err) {
+				continue
+			}
+			if err != nil {
+				return nil, err
+			}
+			rel, err := filepath.Rel(root, p)
+			if err != nil {
+				return nil, err
+			}
+			configs[filepath.ToSlash(rel)] = digestBytes(data)
+			list, err := detect.ParseIgnoreFile(dir, data)
+			if err != nil {
+				return nil, err
+			}
+			lists = append(lists, list)
+		}
 		for _, entry := range entries {
-			if !configurationName(entry.Name()) {
+			if !configurationName(entry.Name()) || entry.Name() == ".gitignore" || entry.Name() == ".velignore" {
 				continue
 			}
 			p := filepath.Join(dir, entry.Name())
+			ignored := false
+			for _, list := range lists {
+				if list.Ignored(p, entry.IsDir()) {
+					ignored = true
+					break
+				}
+			}
+			if ignored {
+				continue
+			}
 			data, err := regularFile(p)
 			if err != nil {
 				return nil, err
 			}
 			rel, _ := filepath.Rel(root, p)
 			configs[filepath.ToSlash(rel)] = digestBytes(data)
-		}
-		if tech := detect.DetectTech(dir); tech != detect.TechUnknown {
-			lists = append(lists, detect.NewIgnoreList(dir, detect.DefaultIgnorePatterns(tech)))
-		}
-		for _, name := range []string{".gitignore", ".velignore"} {
-			list, err := detect.LoadIgnoreFile(dir, name)
-			if err != nil {
-				return nil, err
-			}
-			if list != nil {
-				lists = append(lists, list)
-			}
 		}
 		return lists, nil
 	}
@@ -133,6 +154,13 @@ func Inventory(root string, req types.ManifestRequest) (*types.Manifest, []strin
 		dir := path
 		if !d.IsDir() {
 			dir = filepath.Dir(path)
+		}
+		if d.IsDir() && path != root {
+			for _, list := range states[filepath.Dir(path)] {
+				if list.Ignored(path, true) {
+					return filepath.SkipDir
+				}
+			}
 		}
 		lists, ok := states[dir]
 		if !ok {
