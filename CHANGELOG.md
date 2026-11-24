@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.12.2](https://github.com/Syfra3/vela/compare/v1.12.1...v1.12.2) (2026-11-24)
+
+
+### Bug Fixes
+
+* improve graph publication and MCP runtime readiness ([1e4d0b6](https://github.com/Syfra3/vela/commit/1e4d0b6c548a1fd93840bfee82d1d676c7848a73))
+* respect ignored directories in graph inventory ([f1fb775](https://github.com/Syfra3/vela/commit/f1fb7756361535e7370f1b93b39333ba488b8692))
+* respect ignored directories in graph inventory ([#59](https://github.com/Syfra3/vela/issues/59)) ([ea6d145](https://github.com/Syfra3/vela/commit/ea6d14524c710f121914ea3acf81357304d43328))
+
 ## [1.12.1](https://github.com/Syfra3/vela/compare/v1.12.0...v1.12.1) (2026-09-08)
 
 
