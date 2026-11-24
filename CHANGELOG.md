@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.13.0](https://github.com/Syfra3/vela/compare/v1.12.2...v1.13.0) (2026-11-24)
+
+
+### Features
+
+* notify about newer Vela releases ([#63](https://github.com/Syfra3/vela/issues/63)) ([09c1b7e](https://github.com/Syfra3/vela/commit/09c1b7ea6f6245d61655b1fe2da7e6a54c1416af))
+
 ## [1.12.2](https://github.com/Syfra3/vela/compare/v1.12.1...v1.12.2) (2026-11-24)
 
 
