@@ -70,6 +70,13 @@ func NewUnavailableEngine(diagnostic UnavailableDiagnostic) *Engine {
 	return eng
 }
 
+// NewAmbiguousEngine holds candidates without loading facts from any corpus.
+func NewAmbiguousEngine(candidates []CorpusCandidate) *Engine {
+	eng := newEngine(&types.Graph{})
+	eng.SetAmbiguousCorpora(candidates)
+	return eng
+}
+
 // UnavailableDiagnostic returns the active graph diagnostic that should preempt graph answers.
 func (e *Engine) UnavailableDiagnostic() *UnavailableDiagnostic {
 	if e == nil || e.unavailable == nil {
@@ -599,36 +606,43 @@ func (e *Engine) Path(fromLabel, toLabel string) string {
 	if !toOK {
 		return degradedNoPathMessage(fromLabel, toLabel, fmt.Sprintf("target node %q is missing from the current graph", toLabel))
 	}
-	if fromID, ok := e.intToID[fromInt]; ok {
-		if toID, ok := e.intToID[toInt]; ok {
-			fromNode, fromNodeOK := e.nodeByID[fromID]
-			toNode, toNodeOK := e.nodeByID[toID]
-			if fromNodeOK && toNodeOK && isFileNode(fromNode) && isFileNode(toNode) {
-				return e.fileDependencyPath(fromID, toID, fromLabel, toLabel)
-			}
-		}
-	}
-
-	shortest := path.DijkstraFrom(simple.Node(fromInt), e.directed)
-	nodes, _ := shortest.To(toInt)
-
-	if len(nodes) == 0 {
+	pathIDs, ok := e.pathIDs(fromInt, toInt)
+	if !ok {
 		return fmt.Sprintf("no path found from %q to %q", fromLabel, toLabel)
 	}
-
-	labels := make([]string, len(nodes))
-	pathIDs := make([]string, len(nodes))
-	for i, n := range nodes {
-		if nodeID, ok := e.intToID[n.ID()]; ok {
-			pathIDs[i] = nodeID
-			if node, ok2 := e.nodeByID[nodeID]; ok2 {
-				labels[i] = describeNode(node)
-			} else {
-				labels[i] = nodeID
-			}
-		}
+	labels := make([]string, len(pathIDs))
+	for i, id := range pathIDs {
+		labels[i] = e.describeRef(id)
 	}
 	return e.renderPathWithEvidence(pathIDs, labels)
+}
+
+// pathIDs is shared by text and structured consumers so they report the same path.
+func (e *Engine) pathIDs(fromInt, toInt int64) ([]string, bool) {
+	fromID, fromOK := e.intToID[fromInt]
+	toID, toOK := e.intToID[toInt]
+	if !fromOK || !toOK {
+		return nil, false
+	}
+	if fromNode, ok := e.nodeByID[fromID]; ok && isFileNode(fromNode) {
+		if toNode, ok := e.nodeByID[toID]; ok && isFileNode(toNode) {
+			return e.rankFileDependencyPath(fromID, toID)
+		}
+	}
+	shortest := path.DijkstraFrom(simple.Node(fromInt), e.directed)
+	nodes, _ := shortest.To(toInt)
+	if len(nodes) == 0 {
+		return nil, false
+	}
+	ids := make([]string, len(nodes))
+	for i, node := range nodes {
+		id, ok := e.intToID[node.ID()]
+		if !ok {
+			return nil, false
+		}
+		ids[i] = id
+	}
+	return ids, true
 }
 
 func (e *Engine) renderPathWithEvidence(pathIDs, labels []string) string {
@@ -639,8 +653,9 @@ func (e *Engine) renderPathWithEvidence(pathIDs, labels []string) string {
 
 	var evidenceLines []string
 	inferredBridge := false
+	filePath := isFileNode(e.nodeByID[pathIDs[0]]) && isFileNode(e.nodeByID[pathIDs[len(pathIDs)-1]])
 	for i := 0; i < len(pathIDs)-1; i++ {
-		edge, ok := e.edgeBetween(pathIDs[i], pathIDs[i+1])
+		edge, ok := e.pathEdgeBetween(pathIDs[i], pathIDs[i+1], filePath)
 		if !ok {
 			continue
 		}
@@ -664,10 +679,11 @@ func (e *Engine) renderPathWithEvidence(pathIDs, labels []string) string {
 				inferredBridge = true
 			}
 		}
-		if len(parts) == 0 {
-			continue
+		line := fmt.Sprintf("%s --[%s]--> %s", labels[i], edge.Relation, labels[i+1])
+		if len(parts) > 0 {
+			line += " {" + strings.Join(parts, ", ") + "}"
 		}
-		evidenceLines = append(evidenceLines, fmt.Sprintf("%s --[%s]--> %s {%s}", labels[i], edge.Relation, labels[i+1], strings.Join(parts, ", ")))
+		evidenceLines = append(evidenceLines, line)
 	}
 	if len(evidenceLines) == 0 {
 		return pathText
@@ -680,12 +696,34 @@ func (e *Engine) renderPathWithEvidence(pathIDs, labels []string) string {
 }
 
 func (e *Engine) edgeBetween(source, target string) (types.Edge, bool) {
+	return e.pathEdgeBetween(source, target, false)
+}
+
+func (e *Engine) pathEdgeBetween(source, target string, filePath bool) (types.Edge, bool) {
+	var best types.Edge
+	found := false
 	for _, edge := range e.graph.Edges {
-		if edge.Source == source && edge.Target == target {
-			return edge, true
+		if edge.Source != source || edge.Target != target || (filePath && !isFileDependencyEdge(edge, e.nodeByID)) {
+			continue
+		}
+		if !found || pathEdgeLess(edge, best) {
+			best, found = edge, true
 		}
 	}
-	return types.Edge{}, false
+	return best, found
+}
+
+// Prefer stronger evidence; use a stable encoding to break equal-evidence ties.
+func pathEdgeLess(a, b types.Edge) bool {
+	if types.PreferEdgeEvidence(a, b) {
+		return true
+	}
+	if types.PreferEdgeEvidence(b, a) {
+		return false
+	}
+	aj, _ := json.Marshal(a)
+	bj, _ := json.Marshal(b)
+	return string(aj) < string(bj)
 }
 
 func degradedNoPathMessage(fromLabel, toLabel, reason string) string {
@@ -705,7 +743,7 @@ func (e *Engine) fileDependencyPath(fromID, toID, fromLabel, toLabel string) str
 	for _, nodeID := range pathIDs {
 		labels = append(labels, e.describeRef(nodeID))
 	}
-	return strings.Join(labels, " → ")
+	return e.renderPathWithEvidence(pathIDs, labels)
 }
 
 func (e *Engine) rankFileDependencyPath(fromID, toID string) ([]string, bool) {

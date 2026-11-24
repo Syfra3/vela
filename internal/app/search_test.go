@@ -41,6 +41,11 @@ func TestParseSearchQuery_RoutesStructuralPrompts(t *testing.T) {
 			want: types.QueryRequest{Kind: types.QueryKindPath, Subject: "rootCmd", Target: "graphQueryCmd", Limit: types.DefaultQueryLimit, IncludeProvenance: true},
 		},
 		{
+			name: "path from wording",
+			raw:  "path from rootCmd to graphQueryCmd",
+			want: types.QueryRequest{Kind: types.QueryKindPath, Subject: "rootCmd", Target: "graphQueryCmd", Limit: types.DefaultQueryLimit, IncludeProvenance: true},
+		},
+		{
 			name: "how does wording",
 			raw:  "how does rootCmd reach graphQueryCmd?",
 			want: types.QueryRequest{Kind: types.QueryKindPath, Subject: "rootCmd", Target: "graphQueryCmd", Limit: types.DefaultQueryLimit, IncludeProvenance: true},

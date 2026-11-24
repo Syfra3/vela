@@ -43,17 +43,22 @@ Workflow:
 4. If the subject is ambiguous, list candidates or ask a clarifying question instead of guessing.`
 
 func NewServer(engine *query.Engine) *server.MCPServer {
+	return NewServerWithProvider(func() *query.Engine { return engine })
+}
+
+// NewServerWithProvider pins one independently loaded engine per tool request.
+func NewServerWithProvider(provider func() *query.Engine) *server.MCPServer {
 	srv := server.NewMCPServer(
 		"vela",
 		"0.1.0",
 		server.WithToolCapabilities(true),
 		server.WithInstructions(serverInstructions),
 	)
-	registerTools(srv, engine)
+	registerTools(srv, provider)
 	return srv
 }
 
-func registerTools(srv *server.MCPServer, engine *query.Engine) {
+func registerTools(srv *server.MCPServer, engine func() *query.Engine) {
 	registerExploreTool(srv, engine)
 	registerLookupTool(srv, engine)
 	registerQueryTool(srv, engine, "dependencies", types.QueryKindDependencies, false)
@@ -67,7 +72,17 @@ func registerTools(srv *server.MCPServer, engine *query.Engine) {
 	registerStatusTool(srv, engine)
 }
 
-func registerRankTool(srv *server.MCPServer, engine *query.Engine) {
+func graphGuard(engine *query.Engine) *markmcp.CallToolResult {
+	if d := engine.UnavailableDiagnostic(); d != nil {
+		return markmcp.NewToolResultText(formatUnavailableActiveGraph("graph", *d))
+	}
+	if candidates := engine.AmbiguousCorpora(); len(candidates) > 1 {
+		return markmcp.NewToolResultText(formatCorpusAmbiguity("graph", candidates))
+	}
+	return nil
+}
+
+func registerRankTool(srv *server.MCPServer, provider func() *query.Engine) {
 	srv.AddTool(markmcp.NewTool("rank",
 		markmcp.WithDescription("Rank graph nodes/files/modules with split structural metrics and bounded examples."),
 		markmcp.WithReadOnlyHintAnnotation(true),
@@ -77,11 +92,15 @@ func registerRankTool(srv *server.MCPServer, engine *query.Engine) {
 		markmcp.WithNumber("examples", markmcp.Description("Maximum examples per candidate; default 3")),
 	), func(ctx context.Context, req markmcp.CallToolRequest) (*markmcp.CallToolResult, error) {
 		_ = ctx
+		engine := provider()
+		if result := graphGuard(engine); result != nil {
+			return result, nil
+		}
 		return markmcp.NewToolResultStructuredOnly(engine.RankResult(req.GetString("scope", ""), req.GetString("metric", ""), req.GetInt("limit", query.DefaultRankLimit), req.GetInt("examples", query.DefaultRankExamples))), nil
 	})
 }
 
-func registerHotspotsTool(srv *server.MCPServer, engine *query.Engine) {
+func registerHotspotsTool(srv *server.MCPServer, provider func() *query.Engine) {
 	srv.AddTool(markmcp.NewTool("hotspots",
 		markmcp.WithDescription("Ergonomic wrapper for highest-impact/dependency/centrality hotspot questions."),
 		markmcp.WithReadOnlyHintAnnotation(true),
@@ -91,11 +110,15 @@ func registerHotspotsTool(srv *server.MCPServer, engine *query.Engine) {
 		markmcp.WithNumber("examples", markmcp.Description("Maximum examples per candidate; default 3")),
 	), func(ctx context.Context, req markmcp.CallToolRequest) (*markmcp.CallToolResult, error) {
 		_ = ctx
+		engine := provider()
+		if result := graphGuard(engine); result != nil {
+			return result, nil
+		}
 		return markmcp.NewToolResultStructuredOnly(engine.HotspotsResult(req.GetString("intent", ""), req.GetString("scope", ""), req.GetInt("limit", query.DefaultRankLimit), req.GetInt("examples", query.DefaultRankExamples))), nil
 	})
 }
 
-func registerModuleSummaryTool(srv *server.MCPServer, engine *query.Engine) {
+func registerModuleSummaryTool(srv *server.MCPServer, provider func() *query.Engine) {
 	srv.AddTool(markmcp.NewTool("module_summary",
 		markmcp.WithDescription("Summarize one exact graph node/path with counts, bounded examples, confidence, and gaps."),
 		markmcp.WithReadOnlyHintAnnotation(true),
@@ -103,6 +126,10 @@ func registerModuleSummaryTool(srv *server.MCPServer, engine *query.Engine) {
 		markmcp.WithNumber("examples", markmcp.Description("Maximum incoming/outgoing examples; default 5")),
 	), func(ctx context.Context, req markmcp.CallToolRequest) (*markmcp.CallToolResult, error) {
 		_ = ctx
+		engine := provider()
+		if result := graphGuard(engine); result != nil {
+			return result, nil
+		}
 		target := strings.TrimSpace(req.GetString("target", ""))
 		if target == "" {
 			return markmcp.NewToolResultStructuredOnly(engine.DiagnosticResult("module_summary", "VALIDATION_ERROR", "target is required")), nil
@@ -111,13 +138,17 @@ func registerModuleSummaryTool(srv *server.MCPServer, engine *query.Engine) {
 	})
 }
 
-func registerExploreTool(srv *server.MCPServer, engine *query.Engine) {
+func registerExploreTool(srv *server.MCPServer, provider func() *query.Engine) {
 	srv.AddTool(markmcp.NewTool("explore",
 		markmcp.WithDescription("Resolve broad graph context requests into graph-backed candidates."),
 		markmcp.WithReadOnlyHintAnnotation(true),
 		markmcp.WithString("query", markmcp.Required(), markmcp.Description("Natural-language request to resolve")),
 		markmcp.WithNumber("limit", markmcp.Description("Maximum candidates to include")),
 	), func(ctx context.Context, req markmcp.CallToolRequest) (*markmcp.CallToolResult, error) {
+		engine := provider()
+		if result := graphGuard(engine); result != nil {
+			return result, nil
+		}
 		return handleExploreTool(engine)(ctx, req)
 	})
 }
@@ -146,13 +177,17 @@ func handleExploreToolWithConnectTimeCatchUp(engine *query.Engine, catchUpRunnin
 	}
 }
 
-func registerLookupTool(srv *server.MCPServer, engine *query.Engine) {
+func registerLookupTool(srv *server.MCPServer, provider func() *query.Engine) {
 	srv.AddTool(markmcp.NewTool("lookup",
 		markmcp.WithDescription("Resolve a term into exact graph node candidates."),
 		markmcp.WithReadOnlyHintAnnotation(true),
 		markmcp.WithString("term", markmcp.Required(), markmcp.Description("Term to resolve")),
 		markmcp.WithNumber("limit", markmcp.Description("Maximum candidates to include")),
 	), func(ctx context.Context, req markmcp.CallToolRequest) (*markmcp.CallToolResult, error) {
+		engine := provider()
+		if result := graphGuard(engine); result != nil {
+			return result, nil
+		}
 		return handleLookupTool(engine)(ctx, req)
 	})
 }
@@ -168,11 +203,13 @@ func handleLookupTool(engine *query.Engine) server.ToolHandlerFunc {
 	}
 }
 
-func registerStatusTool(srv *server.MCPServer, engine *query.Engine) {
+func registerStatusTool(srv *server.MCPServer, provider func() *query.Engine) {
 	srv.AddTool(markmcp.NewTool("status",
 		markmcp.WithDescription("Report Vela runtime graph status."),
 		markmcp.WithReadOnlyHintAnnotation(true),
-	), handleStatusTool(engine))
+	), func(ctx context.Context, req markmcp.CallToolRequest) (*markmcp.CallToolResult, error) {
+		return handleStatusTool(provider())(ctx, req)
+	})
 }
 
 func handleStatusTool(engine *query.Engine) server.ToolHandlerFunc {
@@ -183,7 +220,7 @@ func handleStatusTool(engine *query.Engine) server.ToolHandlerFunc {
 	}
 }
 
-func registerQueryTool(srv *server.MCPServer, engine *query.Engine, name string, kind types.QueryKind, needsTarget bool) {
+func registerQueryTool(srv *server.MCPServer, provider func() *query.Engine, name string, kind types.QueryKind, needsTarget bool) {
 	options := []markmcp.ToolOption{
 		markmcp.WithDescription("Run a read-only graph-truth query."),
 		markmcp.WithReadOnlyHintAnnotation(true),
@@ -193,7 +230,9 @@ func registerQueryTool(srv *server.MCPServer, engine *query.Engine, name string,
 	if needsTarget {
 		options = append(options, markmcp.WithString("target", markmcp.Required(), markmcp.Description("Target node label or ID")))
 	}
-	srv.AddTool(markmcp.NewTool(name, options...), handleQueryTool(engine, string(kind)))
+	srv.AddTool(markmcp.NewTool(name, options...), func(ctx context.Context, req markmcp.CallToolRequest) (*markmcp.CallToolResult, error) {
+		return handleQueryTool(provider(), string(kind))(ctx, req)
+	})
 }
 
 func handleQueryTool(engine *query.Engine, kind string) server.ToolHandlerFunc {

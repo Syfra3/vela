@@ -64,23 +64,51 @@ func (w *Watcher) Run(stop <-chan struct{}) error {
 			if !ok {
 				return nil
 			}
-			if !w.relevant(event.Name) {
-				continue
-			}
-			if event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
-				debouncer.Trigger(event.Name)
-			}
 			if event.Has(fsnotify.Create) {
 				if info, err := os.Stat(event.Name); err == nil && info.IsDir() {
-					_ = w.fw.Add(event.Name)
+					// A populated directory may have been moved in, or files created
+					// before its watch was registered. Scan and report them as well.
+					err := w.watchNewTree(event.Name, w.fw.Add, debouncer.Trigger)
+					if err != nil {
+						return fmt.Errorf("registering watch for %s: %w", event.Name, err)
+					}
+				} else if err != nil && !os.IsNotExist(err) {
+					return fmt.Errorf("stat watch event %s: %w", event.Name, err)
 				}
 			}
-		case _, ok := <-w.fw.Errors:
+			if w.relevant(event.Name) && (event.Has(fsnotify.Write) || event.Has(fsnotify.Create) || event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename)) {
+				debouncer.Trigger(event.Name)
+			}
+		case err, ok := <-w.fw.Errors:
 			if !ok {
 				return nil
 			}
+			return fmt.Errorf("watch error: %w", err)
 		}
 	}
+}
+
+// watchNewTree tolerates entries removed between discovery, traversal and Add.
+func (w *Watcher) watchNewTree(root string, add func(string) error, trigger func(string)) error {
+	return filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			err := add(path)
+			if os.IsNotExist(err) {
+				return filepath.SkipDir
+			}
+			return err
+		}
+		if w.relevant(path) {
+			trigger(path)
+		}
+		return nil
+	})
 }
 
 func (w *Watcher) relevant(path string) bool {

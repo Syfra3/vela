@@ -110,8 +110,11 @@ func (w *Writer) Publish(g *types.Graph, manifest *types.Manifest, persist func(
 	if current, err := ResolveGeneration(w.Dir); err == nil && current != nil {
 		previous = current.ID
 	} else if err != nil {
-		// Existing invalid selection is never silently repaired by building.
-		return nil, err
+		// Readers remain fail-closed; only a writer may recognize an interrupted
+		// first publication, and never replace an existing invalid pointer.
+		if !w.incompleteFirstPublish() {
+			return nil, err
+		}
 	}
 	gens := filepath.Join(w.Dir, ".generations")
 	if err := w.step("generation_directory", func() error { return os.MkdirAll(gens, 0755) }); err != nil {
@@ -161,14 +164,14 @@ func (w *Writer) Publish(g *types.Graph, manifest *types.Manifest, persist func(
 		}
 	}
 	seal := generationSeal{ID: id, Previous: previous, Sequence: 1, Hashes: map[string]string{}}
-	for _, candidate := range validatedGenerations(gens) {
-		if candidate.Sequence == ^uint64(0) {
-			return nil, fmt.Errorf("generation sequence exhausted")
-		}
-		if candidate.Sequence >= seal.Sequence {
-			seal.Sequence = candidate.Sequence + 1
-		}
+	maxSequence, err := latestValidatedSequence(gens)
+	if err != nil {
+		return nil, err
 	}
+	if maxSequence == ^uint64(0) {
+		return nil, fmt.Errorf("generation sequence exhausted")
+	}
+	seal.Sequence = maxSequence + 1
 	for _, name := range []string{"graph.json", "graph.db", "manifest.json"} {
 		bytes, err := regularFile(filepath.Join(stage, name))
 		if err != nil {
@@ -201,6 +204,32 @@ func (w *Writer) Publish(g *types.Graph, manifest *types.Manifest, persist func(
 		return nil, err
 	}
 	return ValidateGeneration(final)
+}
+
+// incompleteFirstPublish accepts only the private staging layout created before
+// the first selection. Unknown entries and final generations require repair.
+func (w *Writer) incompleteFirstPublish() bool {
+	if _, err := os.Lstat(filepath.Join(w.Dir, ".current")); !os.IsNotExist(err) {
+		return false
+	}
+	if _, err := os.Lstat(filepath.Join(w.Dir, "seal.json")); !os.IsNotExist(err) {
+		return false
+	}
+	gens := filepath.Join(w.Dir, ".generations")
+	info, err := os.Lstat(gens)
+	if err != nil || !info.IsDir() {
+		return false
+	}
+	entries, err := os.ReadDir(gens)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), ".stage-") || len(entry.Name()) == len(".stage-") {
+			return false
+		}
+	}
+	return true
 }
 
 // User callbacks serialize into private scratch outside sealed ancestry. Only
@@ -462,6 +491,43 @@ func (w *Writer) Recover() (*Snapshot, error) {
 	}
 	return s, nil
 }
+
+// latestValidatedSequence reads small seals first and validates in descending
+// order. Invalid or tampered seals cannot reserve a sequence: only a completely
+// validated generation is authoritative.
+func latestValidatedSequence(dir string) (uint64, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return 0, err
+	}
+	type candidate struct {
+		id       string
+		sequence uint64
+	}
+	var candidates []candidate
+	for _, entry := range entries {
+		if !entry.IsDir() || !validGenerationID(entry.Name()) {
+			continue
+		}
+		data, err := regularFile(filepath.Join(dir, entry.Name(), "seal.json"))
+		if err != nil {
+			continue
+		}
+		var seal generationSeal
+		if json.Unmarshal(data, &seal) != nil || seal.ID != entry.Name() || seal.Sequence == 0 {
+			continue
+		}
+		candidates = append(candidates, candidate{entry.Name(), seal.Sequence})
+	}
+	sort.Slice(candidates, func(i, j int) bool { return candidates[i].sequence > candidates[j].sequence })
+	for _, c := range candidates {
+		if s, err := ValidateGeneration(filepath.Join(dir, c.id)); err == nil {
+			return s.Sequence, nil
+		}
+	}
+	return 0, nil
+}
+
 func validatedGenerations(dir string) []*Snapshot {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
